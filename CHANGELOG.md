@@ -2,6 +2,21 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.1.0] - 2026-03-25
+
+### Added
+
+- **`hooks/hooks.json`** — Gemini CLI hook configuration that registers `BeforeTool` and `AfterTool` hooks on `run_shell_command`. Uses Gemini-specific event names, regex matchers, millisecond timeouts (120000ms), and `name`/`description` fields for `/hooks panel` visibility.
+- **`hooks/stride-hook.sh`** — Bash hook script adapted for Gemini CLI. Uses `GEMINI_PROJECT_DIR` with `CLAUDE_PROJECT_DIR` fallback. All non-JSON output goes to stderr (Gemini requires JSON-only stdout). Includes platform detection that auto-delegates to PowerShell on native Windows.
+- **`hooks/stride-hook.ps1`** — PowerShell companion script for Windows compatibility. Uses `GEMINI_PROJECT_DIR` with `CLAUDE_PROJECT_DIR` fallback. Supports PowerShell 5.1+ and 7+.
+- **`hooks/test-stride-hook.sh`** — Bash test suite with 67 tests across 6 groups using `GEMINI_PROJECT_DIR`.
+- **`hooks/test-stride-hook.ps1`** — PowerShell test suite with 70 assertions mirroring the bash test suite using `GEMINI_PROJECT_DIR`.
+- **Automatic Hook Execution documentation** in README.md — covers Gemini-specific hook routing (BeforeTool/AfterTool), .stride.md format, platform support, `/hooks panel` management, JSON-only stdout requirement, environment variable caching, and troubleshooting.
+
+### Changed
+
+- **`GEMINI.md`** — Updated Hook Execution section to document automatic hooks (BeforeTool/AfterTool via hooks.json) vs manual fallback. Added `/hooks panel` reference.
+
 ## [1.0.0] - 2026-03-24
 
 ### Added

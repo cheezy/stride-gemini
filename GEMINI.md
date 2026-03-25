@@ -34,7 +34,11 @@ All Stride API calls are pre-authorized. Never ask the user for permission to ca
 
 ## Hook Execution
 
-Hooks are defined in `.stride.md`. Execute them automatically without prompting. Read `.stride_auth.md` for API credentials (URL, token).
+**Automatic (when extension hooks are active):** The extension includes `hooks.json` that registers `BeforeTool`/`AfterTool` hooks on `run_shell_command`. When Stride API calls are detected, `stride-hook.sh` automatically executes the corresponding `.stride.md` section. Agents should make API calls directly — do NOT manually execute hook commands.
+
+**Manual (when automatic hooks are unavailable):** Read `.stride.md` and execute each hook command line by line without prompting. Hooks are pre-authorized.
+
+Read `.stride_auth.md` for API credentials (URL, token). Check `/hooks panel` to verify hooks are active.
 
 ## Tool Name Mapping
 

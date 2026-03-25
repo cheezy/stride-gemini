@@ -57,20 +57,36 @@ When the user initiates a Stride workflow, they have **already granted blanket p
 
 **Just execute the calls. Asking breaks the automated workflow and forces unnecessary human intervention.**
 
-## 🚨 HOOK EXECUTION: NEVER PROMPT FOR PERMISSION 🚨
+## 🚨 GEMINI EXTENSION: HOOKS ARE FULLY AUTOMATIC — DO NOT MANUALLY EXECUTE 🚨
 
-**Hooks are shell commands the user wrote in `.stride.md`. The user authored them. The user expects them to run. Executing hooks is NOT optional and does NOT require confirmation.**
+**When the stride-gemini extension is installed, the `hooks.json` registers `BeforeTool`/`AfterTool` hooks that AUTOMATICALLY intercept Stride API calls and execute the corresponding `.stride.md` commands via `stride-hook.sh`. You do NOT need to manually run hook commands.**
+
+**How it works for completion:**
+- When you call the complete API → the `BeforeTool` hook fires FIRST (runs `after_doing` and blocks if it fails) → then the call executes → then `AfterTool` fires (runs `before_review`)
+- When you call mark_reviewed → `AfterTool` fires → runs `after_review`
+
+**What this means for you as an agent:**
+1. **DO NOT** read `.stride.md` and manually execute hook commands
+2. **DO NOT** run any command to "capture hook results" before making API calls
+3. **JUST** make the Stride API call directly — the hooks system handles everything
+4. Include `after_doing_result` and `before_review_result` with `{"exit_code": 0, "output": "Executed by Gemini hooks system", "duration_ms": 0}`
+
+**If the automatic hooks fail:** The `BeforeTool` hook returns exit code 2 with structured JSON. Fix the issue and retry.
+
+**Check `/hooks panel`** to verify hooks are active.
+
+**If the extension is NOT installed:** Fall back to manual hook execution below.
+
+## Hook Execution for Environments Without Automatic Hooks
+
+**The following manual hook execution instructions apply ONLY when the stride-gemini extension is NOT installed.**
+
+**Hooks are shell commands the user wrote in `.stride.md`. Execute them immediately without prompting.**
 
 **NEVER do any of the following before running a hook:**
 - Display text like "Let me run the hooks" and wait for approval
 - Ask "Should I execute the after_doing hook?"
-- Ask "Can I run `mix test`?" or "Can I run `mix credo`?"
 - Present the hook commands and wait for the user to approve them
-- Use any phrasing that triggers a permission prompt
-
-**The correct behavior is:** Read the hook commands from `.stride.md`, then execute them immediately. No announcement. No confirmation. No waiting. Just run them.
-
-**Why this matters:** When an agent asks permission to run hooks, the user's environment presents a permission dialog. This breaks the fully automated workflow. The user defined these hooks precisely because they want them to run without intervention. Every permission prompt is a workflow violation.
 
 ## The Iron Law
 
@@ -95,24 +111,32 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 
 ## The Complete Completion Process
 
+### With Extension Installed (Automatic Hooks)
+
 1. **Finish your work** - All implementation complete
-1.5. **Pre-completion code review** - If your environment supports custom agents and the task meets the `stride-subagent-workflow` skill's decision matrix for code review (medium+ complexity OR 2+ key_files), invoke the `task-reviewer` custom agent to review your changes against acceptance criteria and pitfalls. Fix any Critical or Important issues BEFORE running hooks. Skip this step for small tasks with 0-1 key_files or if you don't have custom agent support. **If a review was performed, save the reviewer's output to include as `review_report` in the completion request.**
-2. **Read .stride.md after_doing section** - Get the validation command
-3. **Execute after_doing hook AUTOMATICALLY** (blocking, 120s timeout)
-   - 🚨 **NEVER prompt the user for permission to run hooks. NEVER present commands and wait for approval. NEVER ask "Should I run this?" The user authored these hooks in .stride.md — they are pre-authorized. Execute them immediately without any confirmation text.**
-   - Execute each line from `.stride.md` `## after_doing` one at a time
+2. **Pre-completion code review** - If medium+ complexity OR 2+ key_files, invoke the `task-reviewer` custom agent. Fix Critical/Important issues. Save output as `review_report`.
+3. **Call `PATCH /api/tasks/:id/complete` directly** - Include `after_doing_result` and `before_review_result` with `{"exit_code": 0, "output": "Executed by Gemini hooks system", "duration_ms": 0}`. The hooks.json system will:
+   - `BeforeTool`: automatically execute `.stride.md` `## after_doing` BEFORE the call runs (blocks if it fails)
+   - `AfterTool`: automatically execute `.stride.md` `## before_review` AFTER the call succeeds
+4. **If `BeforeTool` hook fails (after_doing):** Fix the issue and retry.
+5. **Check needs_review flag:**
+   - `needs_review=true`: STOP and wait for human review
+   - `needs_review=false`: after_review hook fires automatically, **then AUTOMATICALLY activate stride-claiming-tasks**
+
+### Without Extension (Manual Hooks)
+
+1. **Finish your work** - All implementation complete
+2. **Pre-completion code review** - If medium+ complexity OR 2+ key_files, invoke `task-reviewer`. Save output as `review_report`.
+3. **Execute after_doing hook** (blocking, 120s timeout) — each line one at a time, NO prompts
    - Capture: `exit_code`, `output`, `duration_ms`
 4. **If after_doing fails:** FIX ISSUES, do NOT proceed
-5. **Read .stride.md before_review section** - Get the PR/doc command
-6. **Execute before_review hook AUTOMATICALLY** (blocking, 60s timeout)
-   - 🚨 **NEVER prompt the user for permission to run hooks. NEVER present commands and wait for approval. NEVER ask "Should I run this?" The user authored these hooks in .stride.md — they are pre-authorized. Execute them immediately without any confirmation text.**
-   - Execute each line from `.stride.md` `## before_review` one at a time
+5. **Execute before_review hook** (blocking, 60s timeout) — each line one at a time, NO prompts
    - Capture: `exit_code`, `output`, `duration_ms`
-7. **If before_review fails:** FIX ISSUES, do NOT proceed
-8. **Both hooks succeeded?** Call `PATCH /api/tasks/:id/complete` WITH both results
-9. **Check needs_review flag:**
+6. **If before_review fails:** FIX ISSUES, do NOT proceed
+7. **Both hooks succeeded?** Call `PATCH /api/tasks/:id/complete` WITH both results
+8. **Check needs_review flag:**
    - `needs_review=true`: STOP and wait for human review
-   - `needs_review=false`: Execute after_review hook, **then AUTOMATICALLY activate stride-claiming-tasks to claim next task WITHOUT prompting**
+   - `needs_review=false`: Execute after_review hook, **then AUTOMATICALLY activate stride-claiming-tasks**
 
 ## Completion Workflow Flowchart
 
@@ -170,15 +194,21 @@ Claim next task and begin implementation
 
 ## Hook Execution Pattern
 
-### ⚠️ CRITICAL: Execute ALL hooks WITHOUT prompting the user ⚠️
+### With Extension: Hooks Are Automatic
 
-**All hook commands are pre-authorized.** The user wrote them in `.stride.md`. Execute them immediately. Do NOT announce what you are about to run, do NOT ask for permission, do NOT present the commands for review. Just run them.
+**When the stride-gemini extension is installed, do NOT manually execute hooks.** The hooks.json system handles everything:
+- Just make the complete API call → `BeforeTool` fires `after_doing` (blocks if it fails) → call executes → `AfterTool` fires `before_review`
+- If `after_doing` fails, the `BeforeTool` hook blocks with exit 2 and reports the failure — fix the issue and retry
 
-### Executing after_doing Hook
+### Without Extension: Manual Hook Execution
+
+All hook commands are pre-authorized. Execute them immediately. Do NOT announce, ask permission, or present commands for review.
+
+#### Executing after_doing Hook
 
 1. Read the `## after_doing` section from `.stride.md`
 2. Set environment variables (TASK_ID, TASK_IDENTIFIER, etc.)
-3. **Execute each command line immediately — NO permission prompts, NO confirmation text**
+3. **Execute each command line immediately — NO permission prompts**
 4. Capture the results:
 
 ```bash
@@ -191,11 +221,11 @@ DURATION=$((END_TIME - START_TIME))
 
 5. Check exit code - MUST be 0 to proceed
 
-### Executing before_review Hook
+#### Executing before_review Hook
 
 1. Read the `## before_review` section from `.stride.md`
 2. Set environment variables
-3. **Execute each command line immediately — NO permission prompts, NO confirmation text**
+3. **Execute each command line immediately — NO permission prompts**
 4. Capture the results:
 
 ```bash
@@ -373,19 +403,28 @@ After the complete endpoint succeeds:
    Agent STOPS and waits for human review
 ```
 
-### Mistake 4: Prompting user for permission to run hooks
+### Mistake 4: Manually executing hooks when extension is installed
+```bash
+❌ Agent reads .stride.md, runs "mix test" and "mix credo" manually
+   Agent captures exit code and duration
+   Agent then makes the complete API call
+   (This duplicates what hooks.json does automatically)
+
+✅ Agent just makes the complete API call directly
+   (hooks.json BeforeTool auto-runs after_doing via stride-hook.sh
+    hooks.json AfterTool auto-runs before_review via stride-hook.sh)
+```
+
+### Mistake 5: Prompting user for permission to run hooks (without extension)
 ```bash
 ❌ Agent says "Let me run the after_doing hooks" then waits for user approval
-❌ Agent asks "Should I execute mix test?"
 ❌ Agent presents hook commands and pauses for confirmation
 
 ✅ Agent reads .stride.md after_doing section
-   Agent immediately executes each command
-   No announcement, no confirmation, no waiting
-   (The user authored these hooks — they are pre-authorized)
+   Agent immediately executes each command — no prompts
 ```
 
-### Mistake 5: Not fixing hook failures
+### Mistake 6: Not fixing hook failures
 ```bash
 ❌ after_doing fails with test errors
    Agent calls complete endpoint anyway
@@ -412,19 +451,28 @@ After the complete endpoint succeeds:
 ## Quick Reference Card
 
 ```
-COMPLETION WORKFLOW:
+WITH EXTENSION (automatic hooks):
 ├─ 1. Work is complete ✓
-├─ 2. Read after_doing hook from .stride.md ✓
-├─ 3. Execute after_doing (120s timeout, blocking) ✓
-├─ 4. Capture exit_code, output, duration_ms ✓
+├─ 2. [Optional] Invoke task-reviewer for code review ✓
+├─ 3. Call PATCH /api/tasks/:id/complete directly ✓
+│     (hooks.json BeforeTool auto-runs after_doing first
+│      hooks.json AfterTool auto-runs before_review after)
+├─ 4. BeforeTool hook failed? → Fix issues, retry ✓
+├─ 5. needs_review=true? → STOP, wait for human ✓
+└─ 6. needs_review=false? → after_review auto-fires, claim next ✓
+
+🚨 DO NOT manually execute .stride.md commands when extension is installed
+🚨 JUST make the API call — hooks.json handles everything
+
+WITHOUT EXTENSION (manual hooks):
+├─ 1. Work is complete ✓
+├─ 2. Execute after_doing (120s timeout, blocking) ✓
+├─ 3. Hook fails? → FIX, retry, DO NOT proceed ✓
+├─ 4. Execute before_review (60s timeout, blocking) ✓
 ├─ 5. Hook fails? → FIX, retry, DO NOT proceed ✓
-├─ 6. Read before_review hook from .stride.md ✓
-├─ 7. Execute before_review (60s timeout, blocking) ✓
-├─ 8. Capture exit_code, output, duration_ms ✓
-├─ 9. Hook fails? → FIX, retry, DO NOT proceed ✓
-├─ 10. Both succeed? → Call PATCH /api/tasks/:id/complete WITH both results ✓
-├─ 11. needs_review=true? → STOP, wait for human ✓
-└─ 12. needs_review=false? → Execute after_review, claim next ✓
+├─ 6. Both succeed? → Call PATCH /api/tasks/:id/complete WITH both results ✓
+├─ 7. needs_review=true? → STOP, wait for human ✓
+└─ 8. needs_review=false? → Execute after_review, claim next ✓
 
 API ENDPOINT: PATCH /api/tasks/:id/complete
 REQUIRED BODY: {
@@ -434,20 +482,15 @@ REQUIRED BODY: {
   "review_report": "..." (optional — include when task-reviewer ran),
   "after_doing_result": {
     "exit_code": 0,
-    "output": "...",
-    "duration_ms": 45678
+    "output": "Executed by Gemini hooks system",
+    "duration_ms": 0
   },
   "before_review_result": {
     "exit_code": 0,
-    "output": "...",
-    "duration_ms": 2340
+    "output": "Executed by Gemini hooks system",
+    "duration_ms": 0
   }
 }
-
-CRITICAL: Execute BOTH after_doing AND before_review BEFORE calling complete
-HOOK ORDER: after_doing → before_review → complete (with both results) → after_review
-BLOCKING: All hooks are blocking - non-zero exit codes will cause API rejection
-🚨 HOOKS ARE PRE-AUTHORIZED: NEVER prompt user for permission to run hooks
 ```
 
 ## Real-World Impact

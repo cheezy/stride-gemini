@@ -1,0 +1,32 @@
+{
+  "hooks": {
+    "AfterTool": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [
+          {
+            "name": "stride-after-tool",
+            "type": "command",
+            "command": "${GEMINI_EXTENSION_ROOT}/hooks/stride-hook.sh post",
+            "timeout": 120000,
+            "description": "Executes .stride.md hooks after Stride API calls (before_doing, before_review, after_review)"
+          }
+        ]
+      }
+    ],
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [
+          {
+            "name": "stride-before-tool",
+            "type": "command",
+            "command": "${GEMINI_EXTENSION_ROOT}/hooks/stride-hook.sh pre",
+            "timeout": 120000,
+            "description": "Executes .stride.md after_doing hook before task completion (blocks on failure)"
+          }
+        ]
+      }
+    ]
+  }
+}

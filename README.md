@@ -137,21 +137,76 @@ mix test
 mix credo --strict
 ```
 
+## Automatic Hook Execution
+
+The extension includes automatic hook execution via `hooks.json`. When installed, Stride API calls made through the Gemini CLI are intercepted and the corresponding `.stride.md` hook commands run automatically.
+
+### How It Works
+
+| Stride API Call | Hook Triggered | Gemini Event | Timing |
+|----------------|----------------|--------------|--------|
+| `POST /api/tasks/claim` | `before_doing` | `AfterTool` | After claim succeeds |
+| `PATCH /api/tasks/:id/complete` | `after_doing` | `BeforeTool` | Before completion runs (blocks on failure) |
+| `PATCH /api/tasks/:id/complete` | `before_review` | `AfterTool` | After completion succeeds |
+| `PATCH /api/tasks/:id/mark_reviewed` | `after_review` | `AfterTool` | After review succeeds |
+
+### .stride.md Format
+
+Hook commands are defined in `.stride.md` using `## heading` + ` ```bash ` code blocks:
+
+```markdown
+## before_doing
+```bash
+git pull origin main
+mix deps.get
+```
+
+## after_doing
+```bash
+mix test
+mix credo --strict
+```
+```
+
+Each command runs one at a time. If any command fails, execution stops and the hook returns exit code 2 (blocking the API call for `BeforeTool` hooks).
+
+### Platform Support
+
+- **macOS / Linux**: `stride-hook.sh` runs directly via bash
+- **Windows (Git Bash / WSL)**: `stride-hook.sh` runs directly (bash is available)
+- **Windows (native PowerShell)**: `stride-hook.sh` detects the platform and delegates to `stride-hook.ps1` automatically
+
+No platform-specific configuration needed — the single `hooks.json` entry handles all platforms.
+
+### Gemini-Specific Notes
+
+- Hooks use `BeforeTool`/`AfterTool` events (not `PreToolUse`/`PostToolUse`)
+- Matcher targets `run_shell_command` (Gemini's shell tool name)
+- Timeouts are in milliseconds (120000ms = 2 minutes)
+- **JSON-only stdout**: The hook script sends all debug/progress output to stderr; only the final structured JSON result goes to stdout (Gemini requirement)
+- Hooks are visible and manageable via `/hooks panel`, `/hooks enable`, `/hooks disable`
+
+### Environment Variable Caching
+
+After a successful task claim, hook scripts extract task metadata (TASK_ID, TASK_IDENTIFIER, TASK_TITLE, etc.) from the API response and cache them to `.stride-env-cache`. Subsequent hooks can reference these variables in `.stride.md` commands (e.g., `$TASK_IDENTIFIER`). The cache is cleaned up after the `after_review` hook.
+
+Add `.stride-env-cache` to your `.gitignore`.
+
+### Troubleshooting
+
+- **Hooks not firing**: Check `/hooks panel` to verify hooks are registered. Reinstall the extension if needed.
+- **Permission errors on Windows**: Ensure PowerShell execution policy allows scripts, or verify the `-ExecutionPolicy Bypass` flag is working
+- **Hook failures blocking API calls**: `BeforeTool` hooks (after_doing) block on failure by design. Fix the underlying issue and retry.
+- **Non-JSON stdout errors**: Ensure no debug output leaks to stdout. The hook script handles this, but custom `.stride.md` commands should avoid stdout output that isn't captured.
+- **Missing .stride.md**: Hooks exit cleanly (code 0) when `.stride.md` is not present — no action needed
+
 ## Updating
 
-To get the latest skills and agents:
+To get the latest skills, agents, and hooks:
 
 ```bash
 gemini extensions install https://github.com/cheezy/stride-gemini
 ```
-
-Or if you cloned manually:
-
-```bash
-cd stride-gemini && git pull origin main
-```
-
-Then re-copy the `skills/` and `agents/` directories into your project.
 
 ## License
 
