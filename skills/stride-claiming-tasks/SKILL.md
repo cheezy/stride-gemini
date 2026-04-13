@@ -30,13 +30,15 @@ This skill enforces the proper claiming workflow including prerequisite verifica
 
 ## ⚡ AUTOMATION NOTICE ⚡
 
-**This is a FULLY AUTOMATED workflow. Do NOT prompt the user between steps.**
+**The workflow IS the automation. Every step exists because skipping it caused failures.**
 
-- After claiming → AUTOMATICALLY begin implementation
-- After implementation → AUTOMATICALLY activate stride-completing-tasks
-- After completing (if needs_review=false) → AUTOMATICALLY claim next task
+The agent should work continuously through the full workflow: explore → implement → review → complete. Do not prompt the user between steps — but do not skip steps either. Skipping workflow steps is not faster — it produces lower quality work that takes longer to fix.
 
-**The agent should work continuously without asking "Should I continue?" or "What's next?"**
+- After claiming → activate stride-subagent-workflow, then begin implementation
+- After implementation → activate stride-completing-tasks, execute hooks, then complete
+- After completing (if needs_review=false) → claim next task and repeat the full workflow
+
+**Following every step IS the fast path. Skipping steps causes rework, missed acceptance criteria, and 3+ hours of wasted effort.**
 
 ## API Authorization
 
@@ -285,7 +287,7 @@ DURATION=$((END_TIME - START_TIME))
 
 **The claiming skill's job ends when you start coding. Your next interaction with Stride will be when you're ready to mark the work complete.**
 
-**AUTOMATION: This is a fully automated workflow. The agent should claim → implement → complete without ANY user prompts between steps.**
+**The workflow IS the automation. Do not prompt the user between steps — but do not skip steps either. The loop is: claim → explore → implement → review → complete → claim. Every phase is mandatory.**
 
 ## MANDATORY: Next Skill After Claiming
 

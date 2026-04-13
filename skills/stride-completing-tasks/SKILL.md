@@ -26,15 +26,16 @@ This skill enforces the proper completion workflow: execute BOTH `after_doing` A
 
 ## ⚡ AUTOMATION NOTICE ⚡
 
-**This is a FULLY AUTOMATED workflow. Do NOT prompt the user between steps.**
+**The workflow IS the automation. Every step exists because skipping it caused failures.**
 
-- After completing hooks → AUTOMATICALLY call complete endpoint
-- If needs_review=false → AUTOMATICALLY activate stride-claiming-tasks to claim next task
-- The loop continues: claim → implement → complete → claim → implement → complete
+The agent should work continuously through the full workflow: explore → implement → review → complete. Do not prompt the user between steps — but do not skip steps either. Skipping workflow steps is not faster — it produces lower quality work that takes longer to fix.
 
-**The agent should work continuously without asking "Should I claim next?" or "Continue working?"**
+- Before completing → verify you explored the codebase and reviewed your changes against acceptance criteria
+- After hooks succeed → call the complete endpoint with all required fields
+- If needs_review=false → activate stride-claiming-tasks and repeat the full workflow
+- If needs_review=true → STOP and wait for human approval
 
-**ONLY STOP when needs_review=true (human approval required)**
+**Following every step IS the fast path. The loop is: claim → explore → implement → review → complete → claim. Every phase is mandatory.**
 
 ## API Authorization
 
@@ -332,7 +333,7 @@ After the complete endpoint succeeds:
 3. **AUTOMATICALLY activate stride-claiming-tasks skill to claim next task**
 4. **Continue working WITHOUT prompting the user**
 
-**CRITICAL AUTOMATION:** When needs_review=false, the agent should AUTOMATICALLY continue to the next task by activating the stride-claiming-tasks skill. Do NOT ask "Would you like me to claim the next task?" or "Should I continue?" - just proceed automatically.
+**The workflow IS the automation.** When needs_review=false, proceed to the next task by activating the stride-claiming-tasks skill. Do not prompt the user — but do not skip the exploration and review phases of the next task either. Following every step IS the fast path.
 
 ## Red Flags - STOP
 
