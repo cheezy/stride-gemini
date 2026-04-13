@@ -24,6 +24,9 @@ Four custom agents are available for task lifecycle support. Use them per the de
 
 ## Workflow Sequence
 
+**Preferred:** Activate `stride-workflow` once -- it orchestrates the full lifecycle (claim -> explore -> implement -> review -> complete) in a single skill.
+
+**Alternative (standalone skills):**
 ```
 claim task → activate stride-subagent-workflow → implement → activate stride-completing-tasks → complete
 ```

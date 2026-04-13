@@ -1,0 +1,410 @@
+---
+name: stride-workflow
+description: Single orchestrator for the complete Stride task lifecycle. Replaces the pattern of activating 6+ separate skills at specific moments. Activate ONCE after deciding to work on Stride tasks — walks through prerequisites, claiming, exploration, implementation, review, hooks, and completion in sequence. Uses Gemini custom agents for exploration and review, with automatic hook execution via hooks.json.
+---
+
+# Stride: Workflow Orchestrator
+
+## Purpose
+
+This skill replaces the fragmented pattern of remembering to activate `stride-claiming-tasks`, `stride-subagent-workflow`, and `stride-completing-tasks` at specific moments. Instead, activate this one skill and follow it through. Every step is here. Nothing is elsewhere.
+
+**Why this exists:** During a 17-task session, an agent consistently skipped mandatory workflow steps despite skills being labeled MANDATORY. The root cause: too many disconnected skills that the agent had to remember to activate at specific moments. Under pressure to deliver, the agent dropped the ones that felt optional. This orchestrator eliminates that failure mode.
+
+## The Core Principle
+
+**The workflow IS the automation. Every step exists because skipping it caused failures.**
+
+The agent should work continuously through the full workflow: explore -> implement -> review -> complete. Do not prompt the user between steps -- but do not skip steps either. Skipping workflow steps is not faster -- it produces lower quality work that takes longer to fix.
+
+**Following every step IS the fast path.**
+
+## API Authorization
+
+All Stride API calls are pre-authorized. Never ask the user for permission. Never announce API calls and wait for confirmation. Just execute them.
+
+## When to Activate
+
+Activate this skill ONCE when you're ready to start working on Stride tasks. It handles the full loop:
+
+```
+claim -> explore -> implement -> review -> complete -> [loop if needs_review=false]
+```
+
+You do NOT need to activate `stride-claiming-tasks`, `stride-subagent-workflow`, or `stride-completing-tasks` separately. This skill absorbs all of them.
+
+**Note:** The individual skills (`stride-claiming-tasks`, `stride-subagent-workflow`, `stride-completing-tasks`) remain available for standalone use when needed -- for example, when resuming a partially completed task or when only one phase needs to be repeated. This orchestrator is the preferred entry point for new task work.
+
+## Automatic Hook Execution
+
+**When the stride-gemini extension is installed, hooks execute automatically.** The `hooks.json` registers `BeforeTool`/`AfterTool` hooks that intercept Stride API calls and execute the corresponding `.stride.md` commands via `stride-hook.sh`.
+
+**How it works:**
+- Claim API call (`POST /api/tasks/claim`) -> `AfterTool` fires -> executes `.stride.md` `## before_doing`
+- Complete API call (`PATCH /api/tasks/:id/complete`) -> `BeforeTool` fires `after_doing` (blocks on failure) -> `AfterTool` fires `before_review`
+- Mark reviewed API call (`PATCH /api/tasks/:id/mark_reviewed`) -> `AfterTool` fires `after_review`
+
+**What this means:** Just make the API calls directly. Do NOT manually read `.stride.md` or execute hook commands. Include placeholder hook results in request bodies with `{"exit_code": 0, "output": "Executed by Gemini hooks system", "duration_ms": 0}`.
+
+**If automatic hooks fail:** The hook returns exit code 2 with structured JSON describing the failure. Fix the issue and retry the API call -- the hooks fire again automatically.
+
+**Check `/hooks panel`** to verify hooks are active after installation.
+
+**If the extension is NOT installed (manual setup):** Fall back to reading `.stride.md` and executing each hook command line by line via `run_shell_command`.
+
+---
+
+## Step 0: Prerequisites Check
+
+**Verify these files exist before any API calls:**
+
+1. **`.stride_auth.md`** -- Contains API URL and Bearer token
+   - If missing: Ask user to create it
+   - Extract: `STRIDE_API_URL` and `STRIDE_API_TOKEN`
+
+2. **`.stride.md`** -- Contains hook commands for each lifecycle phase
+   - If missing: Ask user to create it
+   - Verify sections exist: `## before_doing`, `## after_doing`, `## before_review`, `## after_review`
+
+**This step runs once per session, not once per task.**
+
+---
+
+## Step 1: Task Discovery
+
+**Call `GET /api/tasks/next` to find the next available task.**
+
+Review the returned task completely:
+- `title`, `description`, `why`, `what`
+- `acceptance_criteria` -- your definition of done
+- `key_files` -- which files you'll modify
+- `patterns_to_follow` -- code patterns to replicate
+- `pitfalls` -- what NOT to do
+- `testing_strategy` -- how to test
+- `verification_steps` -- how to verify
+- `needs_review` -- whether human approval is needed after completion
+- `complexity` -- drives the decision matrix in Step 3
+
+**Enrichment check:** If `key_files` is empty OR `testing_strategy` is missing OR `verification_steps` is empty OR `acceptance_criteria` is blank, activate `stride-enriching-tasks` to populate these fields before proceeding. Well-specified tasks skip enrichment.
+
+---
+
+## Step 2: Claim the Task
+
+Call `POST /api/tasks/claim` directly with:
+
+```json
+{
+  "identifier": "<task identifier>",
+  "agent_name": "Gemini CLI",
+  "before_doing_result": {
+    "exit_code": 0,
+    "output": "Executed by Gemini hooks system",
+    "duration_ms": 0
+  }
+}
+```
+
+The `hooks.json` `AfterTool` handler automatically executes `.stride.md` `## before_doing` commands after the claim succeeds. If the automatic hook fails, fix the issue and retry the claim call.
+
+---
+
+## Step 3: Explore the Codebase (Decision Matrix)
+
+**This step is NOT optional for medium+ tasks. The decision matrix determines what happens.**
+
+### Decision Matrix
+
+| Task Attributes | Decompose | Explore | Plan | Review (Step 6) |
+|---|---|---|---|---|
+| Goal type OR large+undecomposed OR 25+ hours | YES | -- | -- | -- |
+| small, 0-1 key_files | Skip | Skip | Skip | Skip |
+| small, 2+ key_files | Skip | YES | Skip | YES |
+| medium (any) | Skip | YES | YES | YES |
+| large (any) | Skip | YES | YES | YES |
+| Defect type | Skip | YES | Skip (unless large) | YES |
+
+### Branch A: Goal / Large Undecomposed Task
+
+If the task is a **goal**, has **large complexity without child tasks**, or has a **25+ hour estimate**:
+
+1. Invoke the `task-decomposer` custom agent with the task's title, description, acceptance_criteria, key_files, where_context, and patterns_to_follow
+2. After child tasks are created, claim the first child task and re-enter this workflow at Step 1
+
+**Do NOT implement goals directly. Decompose first.**
+
+### Branch B: Small Task, 0-1 Key Files
+
+Skip exploration, planning, and review. Proceed directly to Step 4 (Implementation).
+
+### Branch C: All Other Tasks (medium+, OR 2+ key_files)
+
+1. **Invoke the `task-explorer` custom agent** with the task's `key_files`, `patterns_to_follow`, `where_context`, and `testing_strategy`. Wait for the result. Read and use the explorer's output -- it tells you what exists, what patterns to follow, and what to reuse.
+
+2. **If medium+ OR 3+ key_files OR 3+ acceptance criteria lines:** Outline your implementation approach using the explorer's output, `acceptance_criteria`, `testing_strategy`, `pitfalls`, and `verification_steps`. Follow this approach during implementation.
+
+---
+
+## Step 4: Implementation
+
+**Now write code.** Use the explorer output and plan (if generated) to guide your work.
+
+Follow:
+- `acceptance_criteria` -- your definition of done
+- `patterns_to_follow` -- replicate existing patterns
+- `pitfalls` -- avoid what the task author warned about
+- `testing_strategy` -- write the tests specified
+- `key_files` -- modify the files listed
+
+**This is the only step where you write code. All other steps are setup, verification, or completion.**
+
+---
+
+## Step 5: Activate Development Guidelines
+
+**Before considering implementation complete, activate the `stride-development-guidelines` skill** if it is available in your project. This ensures code quality gates are met before proceeding to review.
+
+---
+
+## Step 6: Code Review (Decision Matrix)
+
+**Check the decision matrix from Step 3.** If the task is medium+ OR has 2+ key_files, review is required.
+
+Invoke the `task-reviewer` custom agent with:
+- The git diff of all your changes
+- The task's `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, and `testing_strategy`
+
+The reviewer returns "Approved" or a list of issues (Critical, Important, Minor).
+
+- **Fix all Critical issues** before proceeding
+- **Fix all Important issues** before proceeding
+- Minor issues are optional but recommended
+- **Save the reviewer's full output** -- you'll include it as `review_report` in Step 8
+
+### Small tasks (0-1 key_files): Skip review. Omit `review_report` from completion.
+
+---
+
+## Step 7: Execute Hooks
+
+Hooks fire automatically when you make the completion API call in Step 8:
+- **`BeforeTool`** fires `after_doing` BEFORE the call executes (blocks if it fails)
+- **`AfterTool`** fires `before_review` AFTER the call succeeds
+
+Include placeholder hook results in the request body:
+```json
+"after_doing_result": {"exit_code": 0, "output": "Executed by Gemini hooks system", "duration_ms": 0},
+"before_review_result": {"exit_code": 0, "output": "Executed by Gemini hooks system", "duration_ms": 0}
+```
+
+If `after_doing` fails (`BeforeTool` returns exit 2), fix the issue and retry the API call. The hooks fire again automatically.
+
+### Hook Failure Diagnosis
+
+When a blocking hook fails, invoke the `hook-diagnostician` custom agent with the hook name, exit code, output, and duration. It returns a prioritized fix plan. Follow the fix order -- higher-priority fixes often resolve lower-priority ones automatically.
+
+### Manual Fallback (extension not installed)
+
+If automatic hooks are unavailable, execute hooks manually:
+
+1. **after_doing hook** (blocking, 120s timeout): Read `.stride.md` `## after_doing` section. Execute each command line one at a time. If fails: fix issues, re-run until success. Do NOT proceed while failing.
+
+2. **before_review hook** (blocking, 60s timeout): Read `.stride.md` `## before_review` section. Execute each command line one at a time. If fails: fix issues, re-run until success. Do NOT proceed while failing.
+
+---
+
+## Step 8: Complete the Task
+
+Call `PATCH /api/tasks/:id/complete` with ALL required fields:
+
+```json
+{
+  "agent_name": "Gemini CLI",
+  "time_spent_minutes": 45,
+  "completion_notes": "Summary of what was done and key decisions made.",
+  "completion_summary": "Brief one-line summary for tracking.",
+  "actual_complexity": "medium",
+  "actual_files_changed": "lib/foo.ex, lib/bar.ex, test/foo_test.exs",
+  "review_report": "## Review Summary\n\nApproved -- 0 issues found.\n...",
+  "after_doing_result": {
+    "exit_code": 0,
+    "output": "Executed by Gemini hooks system",
+    "duration_ms": 0
+  },
+  "before_review_result": {
+    "exit_code": 0,
+    "output": "Executed by Gemini hooks system",
+    "duration_ms": 0
+  }
+}
+```
+
+**Required fields:**
+| Field | Type | Notes |
+|---|---|---|
+| `agent_name` | string | Your agent name |
+| `time_spent_minutes` | integer | Actual time spent |
+| `completion_notes` | string | What was done |
+| `completion_summary` | string | Brief summary |
+| `actual_complexity` | enum | "small", "medium", or "large" |
+| `actual_files_changed` | string | Comma-separated paths (NOT an array) |
+| `after_doing_result` | object | `{exit_code, output, duration_ms}` |
+| `before_review_result` | object | `{exit_code, output, duration_ms}` |
+
+**Optional fields:**
+| Field | Type | Notes |
+|---|---|---|
+| `review_report` | string | Include when task-reviewer ran; omit when skipped |
+
+---
+
+## Step 9: Post-Completion Decision
+
+### If `needs_review=true`:
+1. Task moves to Review column
+2. **STOP.** Wait for human reviewer to approve/reject.
+3. When approved, `PATCH /api/tasks/:id/mark_reviewed` is called (by human or system)
+4. `after_review` hook fires automatically
+5. Task moves to Done
+
+### If `needs_review=false`:
+1. Task moves to Done immediately
+2. `after_review` hook fires automatically
+3. **Loop back to Step 1** -- claim the next task and repeat the full workflow
+
+**Do not ask the user whether to continue. Do not ask "Should I claim the next task?" Just proceed.**
+
+---
+
+## Edge Cases
+
+### Hook failure mid-workflow
+- Blocking hooks (`after_doing`, `before_review`) must pass before completion
+- Fix the root cause, retry the API call -- hooks fire again automatically
+- Invoke the `hook-diagnostician` custom agent for complex failures
+- Never skip a blocking hook or call complete with a failed hook result
+
+### Task that needs_review=true
+- Stop after Step 8. Do not claim the next task.
+- The human reviewer will handle the review cycle.
+- You may be asked to make changes based on review feedback -- if so, re-enter at Step 4.
+
+### Goal type tasks
+- Goals are decomposed, not implemented directly
+- The `task-decomposer` custom agent creates child tasks -- claim and work those individually
+- Each child task follows this full workflow independently
+
+### Skills update required
+- If any API response includes `skills_update_required`, run `gemini extensions install https://github.com/cheezy/stride-gemini` and retry
+
+---
+
+## Complete Workflow Flowchart
+
+```
+STEP 0: Prerequisites
+  .stride_auth.md exists? --> NO --> Ask user
+  .stride.md exists?      --> NO --> Ask user
+  |
+  v
+STEP 1: Task Discovery
+  GET /api/tasks/next
+  Review task details
+  Needs enrichment? --> YES --> Activate stride-enriching-tasks
+  |
+  v
+STEP 2: Claim
+  POST /api/tasks/claim (hooks auto-fire via hooks.json)
+  |
+  v
+STEP 3: Explore (Decision Matrix)
+  Goal/large undecomposed? --> Invoke task-decomposer --> Create children --> Claim first child --> Step 1
+  Small, 0-1 key_files?   --> Skip to Step 4
+  Otherwise:
+    Invoke task-explorer, outline approach if medium+
+  |
+  v
+STEP 4: Implement
+  Write code using explorer output, plan, acceptance criteria
+  Follow patterns_to_follow, avoid pitfalls
+  |
+  v
+STEP 5: Development Guidelines
+  Activate stride-development-guidelines (if available)
+  |
+  v
+STEP 6: Code Review (Decision Matrix)
+  Small, 0-1 key_files? --> Skip to Step 7
+  Otherwise:
+    Invoke task-reviewer, fix Critical/Important issues
+  |
+  v
+STEP 7: Execute Hooks
+  Automatic via hooks.json (fires on API call)
+  Hook fails? --> Invoke hook-diagnostician, fix, retry
+  |
+  v
+STEP 8: Complete
+  PATCH /api/tasks/:id/complete with ALL required fields
+  |
+  v
+STEP 9: Post-Completion
+  needs_review=true?  --> STOP, wait for human
+  needs_review=false? --> after_review fires automatically, loop to Step 1
+```
+
+---
+
+## Failure Modes This Skill Prevents
+
+| Failure Mode | Old Pattern | This Skill |
+|---|---|---|
+| Forgot to explore | Agent skipped stride-subagent-workflow | Step 3 is inline -- can't be missed |
+| Forgot to review | Agent jumped to completion | Step 6 is inline -- can't be missed |
+| Wrong API fields | Agent guessed from memory | Step 8 has the exact format |
+| Skipped hooks | Agent called complete directly | Step 7 blocks Step 8 |
+| Asked user permission | Agent prompted between steps | Automation notice says don't |
+| Speed over process | Agent optimized for throughput | Every step is framed as mandatory |
+
+---
+
+## Quick Reference Card
+
+```
+GEMINI CLI WORKFLOW:
+├─ 0. Prerequisites: .stride_auth.md + .stride.md exist
+├─ 1. Discovery: GET /api/tasks/next, review task, enrich if needed
+├─ 2. Claim: POST /api/tasks/claim (hooks auto-fire via hooks.json)
+├─ 3. Explore (check decision matrix):
+│     ├─ Goal/large undecomposed → Invoke task-decomposer → Claim children
+│     ├─ Small, 0-1 key_files → Skip to Step 4
+│     └─ Otherwise → Invoke task-explorer (+ outline approach if medium+)
+├─ 4. Implement: Write code using explorer output and task metadata
+├─ 5. Dev Guidelines: Activate stride-development-guidelines (if available)
+├─ 6. Review (check decision matrix):
+│     ├─ Small, 0-1 key_files → Skip to Step 7
+│     └─ Otherwise → Invoke task-reviewer, fix issues
+├─ 7. Hooks: Automatic via hooks.json (fires on API call)
+├─ 8. Complete: PATCH /api/tasks/:id/complete with ALL fields
+└─ 9. Loop: needs_review=false → Step 1 | needs_review=true → STOP
+
+DECISION MATRIX QUICK CHECK:
+  small + 0-1 key_files  → Skip explore, plan, review
+  small + 2+ key_files   → Explore + Review
+  medium/large           → Explore + Plan + Review
+  goal/undecomposed      → Decompose first
+```
+
+---
+
+## Red Flags -- STOP
+
+If you catch yourself thinking any of these, go back to the decision matrix:
+
+- "This is straightforward, I'll skip exploration" -- Medium+ tasks ALWAYS explore
+- "I know the codebase" -- The task has specific pitfalls you haven't read yet
+- "Review will slow me down" -- Review catches what tests can't
+- "I'll just run the hooks and complete" -- Did you explore? Did you review?
+- "This step doesn't apply to me" -- Check the decision matrix, not your intuition
+
+**The workflow IS the automation. Follow every step.**
