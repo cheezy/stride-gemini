@@ -2,6 +2,19 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.2.0] - 2026-04-13
+
+### Added
+
+- **`stride-workflow` skill** — Single orchestrator for the complete Stride task lifecycle adapted for Gemini CLI. Walks through prerequisites, claiming, codebase exploration (via custom agents), implementation, code review, hooks, and completion in a single skill. Uses automatic hook execution via `BeforeTool`/`AfterTool` and process-over-speed messaging. Eliminates the need to remember which skills to activate at which moments.
+
+### Changed
+
+- **`stride-claiming-tasks` skill** — Reframed automation notice from throughput-emphasizing ("FULLY AUTOMATED") to process-over-speed ("The workflow IS the automation"). Added "Recommended: Use the Workflow Orchestrator" section pointing to `stride-workflow`. Renamed "MANDATORY: Next Skill After Claiming" to "Next Skill After Claiming (Standalone Mode)".
+- **`stride-completing-tasks` skill** — Reframed automation notice from throughput-emphasizing to process-over-speed. Added "Arriving from stride-workflow" section. Renamed "MANDATORY: Previous Skill Before Completing" to "Previous Skill Before Completing (Standalone Mode)". Added `stride-workflow` as first entry in the prerequisite skills list.
+- **`GEMINI.md`** — Updated Workflow Sequence to recommend `stride-workflow` as preferred entry point, with standalone skill chain as alternative.
+- **`README.md`** — Added `stride-workflow` to Workflow Order (as recommended) and Skills section. Existing standalone workflow preserved as alternative.
+
 ## [1.1.0] - 2026-03-25
 
 ### Added
