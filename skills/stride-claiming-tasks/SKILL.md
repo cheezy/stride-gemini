@@ -289,9 +289,17 @@ DURATION=$((END_TIME - START_TIME))
 
 **The workflow IS the automation. Do not prompt the user between steps — but do not skip steps either. The loop is: claim → explore → implement → review → complete → claim. Every phase is mandatory.**
 
-## MANDATORY: Next Skill After Claiming
+## Recommended: Use the Workflow Orchestrator
 
-After claiming a task, you MUST activate the next skill in sequence:
+**For new task work, `stride-workflow` is the recommended entry point.** It walks through the complete lifecycle — claiming, exploration, implementation, review, hooks, and completion — in a single skill. You do not need to remember which skills to activate at which moments.
+
+Activate `stride-workflow` instead of this skill when starting a new task cycle.
+
+**This claiming skill remains available for standalone use** when you need just the claiming API format (e.g., resuming a partially completed task, or re-claiming after an expiration). In standalone mode, follow the next skill guidance below.
+
+## Next Skill After Claiming (Standalone Mode)
+
+If you are using this skill standalone (not via the orchestrator), activate the next skill in sequence:
 
 1. **`stride-subagent-workflow`** — Check the decision matrix to determine if you need the explorer, planner, or reviewer. Activate BEFORE implementation.
 2. **`stride-completing-tasks`** — Activate WHEN implementation is done. Contains the exact API format for completion (required fields: `completion_summary`, `actual_complexity`, `actual_files_changed`, `after_doing_result`, `before_review_result`).

@@ -578,12 +578,23 @@ The API response may include a `skills_update_required` field when your skills a
 1. Run `gemini extensions install https://github.com/cheezy/stride-gemini` to get the latest skills
 2. Retry your original action
 
-## MANDATORY: Previous Skill Before Completing
+## Arriving from stride-workflow
 
-You should have already activated these skills before reaching this point:
+If you are following the `stride-workflow` orchestrator, you arrive here at **Step 7-8** with all prerequisites already satisfied:
+- Task was claimed with proper before_doing hook (Step 2)
+- Codebase was explored and patterns identified (Step 3)
+- Implementation is complete (Step 4)
+- Code review was performed against acceptance criteria (Step 6)
 
-1. **`stride-claiming-tasks`** — To claim the task with proper before_doing hook execution
-2. **`stride-subagent-workflow`** — To explore, plan, and review based on the decision matrix
+**You can proceed directly to hook execution and completion.** The orchestrator has already guided you through all prior steps.
+
+## Previous Skill Before Completing (Standalone Mode)
+
+If you are using this skill standalone (not via the orchestrator), you should have already activated:
+
+1. **`stride-workflow`** (recommended) — The orchestrator handles the full lifecycle. If you used it, you've already completed all prior steps.
+2. **`stride-claiming-tasks`** — To claim the task with proper before_doing hook execution
+3. **`stride-subagent-workflow`** — To explore, plan, and review based on the decision matrix
 
 If you skipped any of these, the after_doing hook is likely to fail. Go back and verify.
 
