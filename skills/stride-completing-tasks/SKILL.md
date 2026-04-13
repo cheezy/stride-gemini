@@ -110,6 +110,19 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 
 **Required:** Execute BOTH hooks BEFORE calling the complete endpoint.
 
+## ⚠️ BEFORE CALLING COMPLETE: Verification Checklist ⚠️
+
+**STOP. Before proceeding to completion, verify you completed these steps:**
+
+- [ ] **Did you activate `stride-workflow` after claiming?** If no → activate it now. The orchestrator ensures exploration, review, and hooks all happen.
+- [ ] **Did you explore the codebase before coding?** If no → read the task's `key_files`, search for `patterns_to_follow`, and understand the existing code before proceeding.
+- [ ] **Did you review your changes against `acceptance_criteria`?** If no → walk through each acceptance criterion and verify your implementation meets it. Check `pitfalls` too.
+- [ ] **Are you ready to run the `after_doing` hook (tests, linting)?** If no → fix any known issues first. The hook will fail if tests don't pass.
+
+**If ANY answer is NO → Go back and do it now. Do NOT proceed to completion.**
+
+Skipping these steps is not faster — it produces lower quality work that takes longer to fix. This checklist exists because agents consistently skipped these steps under pressure to deliver quickly.
+
 ## The Complete Completion Process
 
 ### With Extension Installed (Automatic Hooks)
