@@ -118,6 +118,7 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 - [ ] **Did you explore the codebase before coding?** If no → read the task's `key_files`, search for `patterns_to_follow`, and understand the existing code before proceeding.
 - [ ] **Did you review your changes against `acceptance_criteria`?** If no → walk through each acceptance criterion and verify your implementation meets it. Check `pitfalls` too.
 - [ ] **Are you ready to run the `after_doing` hook (tests, linting)?** If no → fix any known issues first. The hook will fail if tests don't pass.
+- [ ] **Is `workflow_steps` included in the complete payload?** If no → add it now. The array is required on every completion. It must contain one entry for each of the six step names (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`) — see the stride-workflow skill for the schema.
 
 **If ANY answer is NO → Go back and do it now. Do NOT proceed to completion.**
 
@@ -320,11 +321,21 @@ PATCH /api/tasks/:id/complete
     "exit_code": 0,
     "output": "Creating pull request...\nPR #123 created: https://github.com/org/repo/pull/123",
     "duration_ms": 2340
-  }
+  },
+  "workflow_steps": [
+    {"name": "explorer",       "dispatched": true,  "duration_ms": 12450},
+    {"name": "planner",        "dispatched": true,  "duration_ms": 8200},
+    {"name": "implementation", "dispatched": true,  "duration_ms": 1820000},
+    {"name": "reviewer",       "dispatched": true,  "duration_ms": 15300},
+    {"name": "after_doing",    "dispatched": true,  "duration_ms": 45678},
+    {"name": "before_review",  "dispatched": true,  "duration_ms": 2340}
+  ]
 }
 ```
 
-**Critical:** Both `after_doing_result` and `before_review_result` are REQUIRED. The API will reject requests without them.
+**Critical:** `after_doing_result`, `before_review_result`, and `workflow_steps` are all REQUIRED. The API will reject requests without them.
+
+**Schema reference:** The `workflow_steps` array must match the schema documented in the `stride-workflow` skill — key-for-key. Always include one entry per step name (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`). Skipped steps use `{"name": "<step>", "dispatched": false, "reason": "<why>"}`.
 
 **Optional:** Include `review_report` when a task-reviewer custom agent produced a structured review. Omit it when no review was performed (e.g., small tasks with 0-1 key_files).
 
@@ -503,7 +514,15 @@ REQUIRED BODY: {
     "exit_code": 0,
     "output": "Executed by Gemini hooks system",
     "duration_ms": 0
-  }
+  },
+  "workflow_steps": [
+    {"name": "explorer",       "dispatched": true,  "duration_ms": 12450},
+    {"name": "planner",        "dispatched": true,  "duration_ms": 8200},
+    {"name": "implementation", "dispatched": true,  "duration_ms": 1820000},
+    {"name": "reviewer",       "dispatched": true,  "duration_ms": 15300},
+    {"name": "after_doing",    "dispatched": true,  "duration_ms": 45678},
+    {"name": "before_review",  "dispatched": true,  "duration_ms": 2340}
+  ]
 }
 ```
 
@@ -535,6 +554,7 @@ REQUIRED BODY: {
 | `actual_files_changed` | string | Yes | Comma-separated file paths (NOT an array) |
 | `after_doing_result` | object | Yes | Hook result (see format below) |
 | `before_review_result` | object | Yes | Hook result (see format below) |
+| `workflow_steps` | array | Yes | Telemetry array with one entry per step name. See stride-workflow skill for full schema. |
 | `review_report` | string | No | Structured review report from task-reviewer custom agent. Include when a review was performed; omit when no review was done. |
 
 **WRONG — actual_files_changed as array:**
