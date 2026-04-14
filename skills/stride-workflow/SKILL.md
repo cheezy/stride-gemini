@@ -235,7 +235,15 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
     "exit_code": 0,
     "output": "Executed by Gemini hooks system",
     "duration_ms": 0
-  }
+  },
+  "workflow_steps": [
+    {"name": "explorer",       "dispatched": true,  "duration_ms": 12450},
+    {"name": "planner",        "dispatched": true,  "duration_ms": 8200},
+    {"name": "implementation", "dispatched": true,  "duration_ms": 1820000},
+    {"name": "reviewer",       "dispatched": true,  "duration_ms": 15300},
+    {"name": "after_doing",    "dispatched": true,  "duration_ms": 45678},
+    {"name": "before_review",  "dispatched": true,  "duration_ms": 2340}
+  ]
 }
 ```
 
@@ -250,6 +258,7 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 | `actual_files_changed` | string | Comma-separated paths (NOT an array) |
 | `after_doing_result` | object | `{exit_code, output, duration_ms}` |
 | `before_review_result` | object | `{exit_code, output, duration_ms}` |
+| `workflow_steps` | array | Six-entry telemetry array — see **Workflow Telemetry** section below |
 
 **Optional fields:**
 | Field | Type | Notes |
@@ -273,6 +282,75 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 3. **Loop back to Step 1** -- claim the next task and repeat the full workflow
 
 **Do not ask the user whether to continue. Do not ask "Should I claim the next task?" Just proceed.**
+
+---
+
+## Workflow Telemetry: The `workflow_steps` Array
+
+Every task completion **must** include a `workflow_steps` array in the `PATCH /api/tasks/:id/complete` payload. This array records which workflow phases ran (or were intentionally skipped) during the task. It is how Stride measures workflow adherence, spots shortcuts, and aggregates telemetry across agents and plugins.
+
+**Build the array incrementally as you progress through the workflow.** Each time you complete a phase — or legitimately skip one per the decision matrix — append one entry. Submit the completed six-entry array in Step 8.
+
+### Step Name Vocabulary
+
+The `name` field must be one of these six values. Do not invent new names — consistency across plugins is the only reason telemetry can be aggregated.
+
+| Step name | When to record it | Orchestrator step |
+|---|---|---|
+| `explorer` | Codebase exploration (`task-explorer` custom agent, or manual file reads when the extension is unavailable) | Step 3 |
+| `planner` | Implementation planning (manual outline of approach for medium+ tasks) | Step 3 |
+| `implementation` | Writing code | Step 4 |
+| `reviewer` | Code review (`task-reviewer` custom agent) | Step 6 |
+| `after_doing` | The `after_doing` hook execution | Step 7 |
+| `before_review` | The `before_review` hook execution | Step 7 |
+
+### Per-Step Schema
+
+Each element of `workflow_steps` is an object with these keys:
+
+| Key | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string | Always | One of the six vocabulary values above |
+| `dispatched` | boolean | Always | `true` if the step ran; `false` if intentionally skipped |
+| `duration_ms` | integer | When `dispatched=true` | Wall-clock time the step took, in milliseconds |
+| `reason` | string | When `dispatched=false` | Short explanation of why the step was skipped |
+
+### End-of-Workflow Example (full dispatch)
+
+A medium-complexity task that exercised every phase:
+
+```json
+"workflow_steps": [
+  {"name": "explorer",       "dispatched": true, "duration_ms": 12450},
+  {"name": "planner",        "dispatched": true, "duration_ms": 8200},
+  {"name": "implementation", "dispatched": true, "duration_ms": 1820000},
+  {"name": "reviewer",       "dispatched": true, "duration_ms": 15300},
+  {"name": "after_doing",    "dispatched": true, "duration_ms": 45678},
+  {"name": "before_review",  "dispatched": true, "duration_ms": 2340}
+]
+```
+
+### End-of-Workflow Example (small task, decision matrix skips)
+
+A small task with 0-1 key_files that legitimately skipped exploration, planning, and review per the decision matrix in Step 3:
+
+```json
+"workflow_steps": [
+  {"name": "explorer",       "dispatched": false, "reason": "Decision matrix: small task, 0-1 key_files"},
+  {"name": "planner",        "dispatched": false, "reason": "Decision matrix: small task, 0-1 key_files"},
+  {"name": "implementation", "dispatched": true,  "duration_ms": 620000},
+  {"name": "reviewer",       "dispatched": false, "reason": "Decision matrix: small task, 0-1 key_files"},
+  {"name": "after_doing",    "dispatched": true,  "duration_ms": 38200},
+  {"name": "before_review",  "dispatched": true,  "duration_ms": 1900}
+]
+```
+
+### Rules
+
+- Always include **all six** step names. Skipped steps are recorded with `dispatched: false` — never omitted.
+- Record entries in the order the steps occurred in the workflow (the order listed in the vocabulary table above).
+- When `dispatched: false`, the `reason` must describe **why** the step was skipped (e.g., decision matrix rule, task metadata, platform constraint) — not merely restate that it was skipped.
+- A missing `workflow_steps` array, or one with fewer than six entries, indicates an incomplete telemetry record.
 
 ---
 
