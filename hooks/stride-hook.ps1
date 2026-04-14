@@ -86,15 +86,42 @@ if ($HookName -eq 'before_doing') {
         $response = $json.tool_response
         if ($response) {
             $taskJson = $null
-            try {
-                $responseObj = $response | ConvertFrom-Json
-                if ($responseObj.data.id) {
-                    $taskJson = $responseObj.data
-                } elseif ($responseObj.id) {
-                    $taskJson = $responseObj
+
+            # Shape 1: host wraps API JSON inside tool_response.stdout as a string
+            if ($response -is [PSCustomObject] -and $response.PSObject.Properties.Name -contains 'stdout') {
+                try {
+                    $innerObj = $response.stdout | ConvertFrom-Json
+                    if ($innerObj.data -and $innerObj.data.id) {
+                        $taskJson = $innerObj.data
+                    } elseif ($innerObj.id) {
+                        $taskJson = $innerObj
+                    }
+                } catch {
+                    # stdout not parseable — fall through
                 }
-            } catch {
-                # Response is not parseable JSON — skip caching
+            }
+
+            # Shape 2: tool_response is a JSON-encoded string
+            if (-not $taskJson -and $response -is [string]) {
+                try {
+                    $responseObj = $response | ConvertFrom-Json
+                    if ($responseObj.data -and $responseObj.data.id) {
+                        $taskJson = $responseObj.data
+                    } elseif ($responseObj.id) {
+                        $taskJson = $responseObj
+                    }
+                } catch {
+                    # Response not parseable JSON — skip caching
+                }
+            }
+
+            # Shape 3: tool_response is raw API JSON object
+            if (-not $taskJson -and $response -is [PSCustomObject]) {
+                if ($response.data -and $response.data.id) {
+                    $taskJson = $response.data
+                } elseif ($response.PSObject.Properties.Name -contains 'id' -and $response.id) {
+                    $taskJson = $response
+                }
             }
 
             if ($taskJson) {

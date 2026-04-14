@@ -108,12 +108,27 @@ esac
 if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
   RESPONSE=$(echo "$INPUT" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
   if [ -n "$RESPONSE" ]; then
-    # tool_response may be raw JSON or may need extraction
-    # Try parsing directly, then try extracting embedded JSON
+    # tool_response may come in three shapes depending on the host:
+    #   1. {"stdout": "<api-json-string>", ...} — Bash-tool wrapper (Claude Code)
+    #   2. "<api-json-string>" — legacy harnesses that stringify the body
+    #   3. {"data": {...}} or {"id": ...} — raw API JSON object
     TASK_JSON=""
-    if echo "$RESPONSE" | jq -e '.data.id' > /dev/null 2>&1; then
-      TASK_JSON=$(echo "$RESPONSE" | jq -r '.data' 2>/dev/null)
-    elif echo "$RESPONSE" | jq -e '.id' > /dev/null 2>&1; then
+    INNER=""
+
+    # Shape 1: wrapper object with .stdout key — peel and parse inner
+    if echo "$RESPONSE" | jq -e 'type == "object" and has("stdout")' > /dev/null 2>&1; then
+      INNER=$(echo "$RESPONSE" | jq -r '.stdout // ""' 2>/dev/null)
+      if [ -n "$INNER" ] && echo "$INNER" | jq -e '.data.id' > /dev/null 2>&1; then
+        TASK_JSON=$(echo "$INNER" | jq -c '.data' 2>/dev/null)
+      elif [ -n "$INNER" ] && echo "$INNER" | jq -e '.id' > /dev/null 2>&1; then
+        TASK_JSON="$INNER"
+      fi
+    fi
+
+    # Shapes 2 and 3: response itself is the API JSON
+    if [ -z "$TASK_JSON" ] && echo "$RESPONSE" | jq -e '.data.id' > /dev/null 2>&1; then
+      TASK_JSON=$(echo "$RESPONSE" | jq -c '.data' 2>/dev/null)
+    elif [ -z "$TASK_JSON" ] && echo "$RESPONSE" | jq -e '.id' > /dev/null 2>&1; then
       TASK_JSON="$RESPONSE"
     fi
 
@@ -197,13 +212,20 @@ for trimmed in "${CMD_LIST[@]}"; do
   CMD_STDOUT_FILE=$(mktemp)
   CMD_STDERR_FILE=$(mktemp)
 
-  if eval "$trimmed" > "$CMD_STDOUT_FILE" 2> "$CMD_STDERR_FILE"; then
+  # Relax `set -u` and `pipefail` for the user's command so a reference to an
+  # unset env var (e.g. $TASK_IDENTIFIER when env-cache failed to write) doesn't
+  # silently abort the eval before the actual command runs.
+  set +uo pipefail
+  eval "$trimmed" > "$CMD_STDOUT_FILE" 2> "$CMD_STDERR_FILE"
+  CMD_EXIT=$?
+  set -uo pipefail
+
+  if [ "$CMD_EXIT" -eq 0 ]; then
     echo "$trimmed" >> "$COMPLETED_FILE"
     # Print command output to stderr (Gemini requires JSON-only stdout)
     cat "$CMD_STDOUT_FILE" >&2
     cat "$CMD_STDERR_FILE" >&2
   else
-    CMD_EXIT=$?
     CMD_STDOUT=$(tail -50 "$CMD_STDOUT_FILE")
     CMD_STDERR=$(tail -50 "$CMD_STDERR_FILE")
     rm -f "$CMD_STDOUT_FILE" "$CMD_STDERR_FILE"
