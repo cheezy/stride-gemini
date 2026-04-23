@@ -2,6 +2,12 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.5.1] - 2026-04-23
+
+### Fixed
+
+- **`hooks/hooks.json` path substitution** — The `command` fields referenced `${GEMINI_EXTENSION_ROOT}`, which is not a variable Gemini CLI expands. At hook-execution time Gemini passed the literal string to bash; bash treated it as an unset shell variable and expanded it to empty, leaving `/hooks/stride-hook.sh` as an absolute filesystem path that doesn't exist. The effect was that every `run_shell_command` tool call in an affected workspace was blocked with `bash: line 1: /hooks/stride-hook.sh: No such file or directory`. Replaced with `${extensionPath}` — the documented Gemini CLI variable that expands to the extension's install directory (see https://geminicli.com/docs/extensions/reference/ "Variables" section). Users upgrading from 1.5.0 should update the extension and verify that `run_shell_command` works again in a clean workspace.
+
 ## [1.5.0] - 2026-04-16
 
 ### Added
