@@ -1,9 +1,15 @@
 ---
 name: stride-subagent-workflow
-description: MANDATORY after claiming any Stride task. Contains the decision matrix for invoking task-explorer, task-reviewer, task-decomposer, and hook-diagnostician custom agents. Skipping means no codebase exploration before implementation and no code review before completion — causing wrong approaches and missed acceptance criteria. Activate IMMEDIATELY after claim succeeds, BEFORE writing any code.
+description: INTERNAL — invoked only by stride:stride-workflow. Do NOT invoke from a user prompt. Contains the Claude Code subagent decision matrix (when to dispatch stride:task-explorer, stride:task-reviewer, stride:task-decomposer, stride:hook-diagnostician), used during the orchestrator's exploration and review phases.
 ---
 
 # Stride: Custom Agent Workflow
+
+## STOP — orchestrator check
+
+If you arrived here directly from a user prompt, you are in the wrong skill.
+Invoke `stride:stride-workflow` instead. Do not read further.
+Sub-skills are dispatched by the orchestrator only.
 
 ## ⚠️ THIS SKILL IS MANDATORY AFTER CLAIMING — NOT OPTIONAL ⚠️
 

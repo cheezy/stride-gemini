@@ -1,6 +1,6 @@
 ---
 name: stride-workflow
-description: Single orchestrator for the complete Stride task lifecycle. Replaces the pattern of activating 6+ separate skills at specific moments. Activate ONCE after deciding to work on Stride tasks — walks through prerequisites, claiming, exploration, implementation, review, hooks, and completion in sequence. Uses Gemini custom agents for exploration and review, with automatic hook execution via hooks.json.
+description: Single orchestrator for the complete Stride task lifecycle. Invoke when the user asks to claim a task, work on the next stride task, work on stride tasks, complete a stride task, enrich a stride task, decompose a goal, or create a goal or stride tasks. Replaces invoking stride-claiming-tasks, stride-completing-tasks, stride-creating-tasks, stride-creating-goals, stride-enriching-tasks, or stride-subagent-workflow directly — those are dispatched from inside this orchestrator. Walks through prerequisites, claiming, exploration, implementation, review, hooks, and completion. Handles both Claude Code (with subagent dispatch) and other environments (Cursor/Windsurf/Continue without subagents).
 ---
 
 # Stride: Workflow Orchestrator
@@ -22,6 +22,49 @@ The agent should work continuously through the full workflow: explore -> impleme
 ## API Authorization
 
 All Stride API calls are pre-authorized. Never ask the user for permission. Never announce API calls and wait for confirmation. Just execute them.
+
+## Orchestrator Activation Marker
+
+The orchestrator writes a marker file when it starts and clears it when it stops. The `BeforeTool` hook on the `activate_skill` tool reads this file to decide whether sub-skill activations (`stride-claiming-tasks`, `stride-completing-tasks`, `stride-creating-tasks`, `stride-creating-goals`, `stride-enriching-tasks`, `stride-subagent-workflow`) are coming from inside this orchestrator (allowed) or directly from a user prompt (blocked).
+
+**Without the marker, the hook blocks sub-skill activations.** Writing it in Step 0 and clearing it in Step 9 is therefore mandatory — skipping the write means the orchestrator's own dispatches are blocked; skipping the clear means the next session inherits a stale marker.
+
+### Marker Contract
+
+| Field | Value |
+|---|---|
+| Path | `<project-root>/.stride/.orchestrator_active` |
+| Format | Single-line JSON: `{"session_id": "<id>", "started_at": "<ISO8601>", "pid": <pid>}` |
+| Lifecycle | Written in Step 0, cleared in Step 9 (success OR abort) |
+| Freshness window | 4 hours — markers older than `started_at + 4h` are treated as stale |
+| Stale handling | The `BeforeTool` hook treats stale markers as missing (and may delete them) |
+| Directory | `.stride/` is created with `mkdir -p` if absent |
+| `.gitignore` | The `.stride/` directory should be in the project's `.gitignore` (mention to operators on first install) |
+
+**Project root resolution.** Gemini CLI does not set a dedicated project-directory environment variable (the hooks reference passes `cwd` on stdin to hook scripts; the agent itself runs `run_shell_command` from the project root). The orchestrator therefore writes the marker relative to the active working directory using a fallback chain: `${GEMINI_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}`. The companion gate script (`stride-skill-gate.sh`) prefers the stdin `cwd` field with the same env-var fallback so the two agree on the marker location regardless of host.
+
+### Write Command (Step 0)
+
+```bash
+PROJECT_DIR="${GEMINI_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}"
+mkdir -p "$PROJECT_DIR/.stride"
+printf '{"session_id":"%s","started_at":"%s","pid":%d}\n' \
+  "${GEMINI_SESSION_ID:-${CLAUDE_SESSION_ID:-$(uuidgen 2>/dev/null || date +%s)}}" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "$$" \
+  > "$PROJECT_DIR/.stride/.orchestrator_active"
+```
+
+### Clear Command (Step 9)
+
+```bash
+PROJECT_DIR="${GEMINI_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}"
+rm -f "$PROJECT_DIR/.stride/.orchestrator_active"
+```
+
+### Override
+
+`STRIDE_ALLOW_DIRECT=1` bypasses the gate entirely (for plugin debugging or scripted CI). When set, sub-skill activations are allowed regardless of the marker.
 
 ## When to Activate
 
@@ -65,6 +108,20 @@ You do NOT need to activate `stride-claiming-tasks`, `stride-subagent-workflow`,
 2. **`.stride.md`** -- Contains hook commands for each lifecycle phase
    - If missing: Ask user to create it
    - Verify sections exist: `## before_doing`, `## after_doing`, `## before_review`, `## after_review`
+
+**Then write the orchestrator activation marker** (see "Orchestrator Activation Marker" section above for the contract):
+
+```bash
+PROJECT_DIR="${GEMINI_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}"
+mkdir -p "$PROJECT_DIR/.stride"
+printf '{"session_id":"%s","started_at":"%s","pid":%d}\n' \
+  "${GEMINI_SESSION_ID:-${CLAUDE_SESSION_ID:-$(uuidgen 2>/dev/null || date +%s)}}" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "$$" \
+  > "$PROJECT_DIR/.stride/.orchestrator_active"
+```
+
+Without this marker the `BeforeTool(activate_skill)` hook will block your sub-skill activations in Steps 2, 3, 6, and 8.
 
 **This step runs once per session, not once per task.**
 
@@ -296,6 +353,17 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 3. **Loop back to Step 1** -- claim the next task and repeat the full workflow
 
 **Do not ask the user whether to continue. Do not ask "Should I claim the next task?" Just proceed.**
+
+### Clearing the Orchestrator Activation Marker
+
+When the workflow finally stops -- because there are no more tasks, the user halts the loop, `needs_review=true` puts the task into human review, or an unrecoverable error aborts -- clear the marker:
+
+```bash
+PROJECT_DIR="${GEMINI_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}"
+rm -f "$PROJECT_DIR/.stride/.orchestrator_active"
+```
+
+Leaving a stale marker behind allows direct sub-skill activations to slip past the `BeforeTool(activate_skill)` gate in the next session for up to 4 hours. The hook treats markers older than 4 hours as stale and may delete them on read, but the orchestrator should not rely on that — clear explicitly.
 
 ---
 

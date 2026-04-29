@@ -26,6 +26,18 @@
             "description": "Executes .stride.md after_doing hook before task completion (blocks on failure)"
           }
         ]
+      },
+      {
+        "matcher": "activate_skill",
+        "hooks": [
+          {
+            "name": "stride-skill-gate",
+            "type": "command",
+            "command": "${extensionPath}/hooks/stride-skill-gate.sh",
+            "timeout": 10000,
+            "description": "Blocks direct activation of Stride sub-skills unless dispatched from inside stride-workflow"
+          }
+        ]
       }
     ]
   }

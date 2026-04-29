@@ -1,9 +1,15 @@
 ---
 name: stride-enriching-tasks
-description: MANDATORY when a task has empty key_files, missing testing_strategy, or no verification_steps. Transforms minimal human-provided task specs into complete implementation-ready specifications through automated codebase exploration. Without enrichment, implementing agents waste 3+ hours on unfocused exploration that this skill does in 5 minutes.
+description: INTERNAL — invoked only by stride:stride-workflow. Do NOT invoke from a user prompt. Contains the task enrichment procedure (codebase exploration to populate key_files, testing_strategy, verification_steps for sparse tasks), used during the orchestrator's enrichment phase before claiming.
 ---
 
 # Stride: Enriching Tasks
+
+## STOP — orchestrator check
+
+If you arrived here directly from a user prompt, you are in the wrong skill.
+Invoke `stride:stride-workflow` instead. Do not read further.
+Sub-skills are dispatched by the orchestrator only.
 
 ## ⚠️ THIS SKILL IS MANDATORY FOR SPARSE TASKS — NOT OPTIONAL ⚠️
 

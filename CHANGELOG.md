@@ -2,6 +2,26 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.6.0] - 2026-04-29
+
+### Added
+
+- **`hooks/stride-skill-gate.sh` and `hooks/stride-skill-gate.ps1`** — Layer-1 enforcement gate ported from stride 1.10.0 (commit 5c30036). Registered as a new `BeforeTool` hook with `matcher: "activate_skill"` in `hooks/hooks.json`, alongside the existing `run_shell_command` matcher. When the agent attempts to activate any internal Stride sub-skill (`stride-claiming-tasks`, `stride-completing-tasks`, `stride-creating-tasks`, `stride-creating-goals`, `stride-enriching-tasks`, `stride-subagent-workflow`) directly from a user prompt, the gate blocks the activation with exit 2 + a structured `{"decision":"block","reason":"..."}` JSON payload and a human-readable stderr message instructing the agent to activate `stride:stride-workflow` instead. The orchestrator skill writes a marker file at `<project-root>/.stride/.orchestrator_active` on entry and clears it on exit; the gate allows protected sub-skill activations only while the marker is present and fresh (within 4 hours). `STRIDE_ALLOW_DIRECT=1` bypasses the gate entirely for plugin debugging or scripted CI.
+- **Gemini-specific gate adapters.** Compared to the Claude Code reference: (1) the gate extracts the skill name from `tool_input.name` (Gemini's `activate_skill` argument shape) instead of `tool_input.skill`; (2) the project root is resolved from the BeforeTool stdin `cwd` field, falling back through `${GEMINI_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-.}}` because Gemini CLI does not set a dedicated project-dir env var; (3) the pure-bash JSON-extraction fallback anchors on `"tool_input"` before searching for `"name"` so it never mismatches against `"tool_name"` or `"hook_event_name"` at the top level of the payload.
+- **`hooks/test-stride-skill-gate.sh` and `hooks/test-stride-skill-gate.ps1`** — Test harnesses with 7 scenarios covering: marker missing → block, marker fresh → allow, marker stale (5h) → block, `stride-workflow` always allowed, non-Stride skills always allowed, `STRIDE_ALLOW_DIRECT=1` bypasses, plugin-namespaced names recognized. The bash suite runs 16 assertions and exits 0 on success.
+- **`skills/stride-workflow` Orchestrator Activation Marker section.** New section between API Authorization and When to Activate documents the marker contract (path, JSON shape, 4h freshness window, `.gitignore` note, `STRIDE_ALLOW_DIRECT=1` override). Step 0 (Prerequisites) gained a marker-write block; Step 9 (Post-Completion) gained a "Clearing the Orchestrator Activation Marker" subsection. The marker contract is byte-identical to stride 1.10.0 so cross-plugin tooling can rely on the same path and JSON fields.
+- **`## STOP — orchestrator check` preamble** — Inserted as the first H2 of every sub-skill body (6 files). The 5-line block instructs an agent that arrived at a sub-skill directly to back out and activate `stride:stride-workflow` instead. Wording is byte-identical to stride 1.10.0 so cross-plugin grep tooling stays consistent.
+- **`docs/HOOK_RESEARCH.md`** — Captures the research that decided Layer 1 is portable to Gemini CLI. Confirms `activate_skill` is a documented built-in tool, `BeforeTool` honors regex matchers on `tool_name`, the `tool_input.name` field carries the skill name, and exit 2 + stderr is the preferred block contract — all aligning with stride 1.10.0's gate design with only the three adapters listed above.
+
+### Changed
+
+- **All 6 sub-skill `description:` fields** (`stride-claiming-tasks`, `stride-completing-tasks`, `stride-creating-tasks`, `stride-creating-goals`, `stride-enriching-tasks`, `stride-subagent-workflow`) — Reframed as `INTERNAL — invoked only by stride:stride-workflow. Do NOT invoke from a user prompt.` Removed user-intent verbs (`claim a task`, `complete a task`, etc.) so Gemini's auto-activation matcher no longer routes user prompts to the sub-skills. Wording is byte-identical to stride 1.10.0 for cross-plugin consistency. Frontmatter shape preserved — no `skills_version` field added (the stride-gemini convention is `name` + `description` only).
+- **`stride-workflow` `description:`** — Amplified to enumerate the explicit user-intent phrases that should match the orchestrator: "claim a task", "work on the next stride task", "complete a stride task", "enrich a stride task", "decompose a goal", "create a goal or stride tasks". The phrase list is load-bearing for Gemini's matcher and should not be diluted.
+
+### Source
+
+Motivated by the three-layer defense designed in `docs/plans/stride-plugin-feedback.md` (kanban repo) and ported from stride 1.10.0 (commit 5c30036). Layer 1 (the runtime `BeforeTool(activate_skill)` gate) is now active on Gemini CLI; Layers 2 (description reframing) and 3 (STOP preamble) have always been runtime-independent and are also in place.
+
 ## [1.5.1] - 2026-04-23
 
 ### Fixed

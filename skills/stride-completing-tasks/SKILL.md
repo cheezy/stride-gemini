@@ -1,9 +1,15 @@
 ---
 name: stride-completing-tasks
-description: MANDATORY before calling /api/tasks/:id/complete. Contains ALL required fields and hook formats. Skipping this skill causes 3+ API rejections. Activate when you've finished work on a Stride task.
+description: INTERNAL — invoked only by stride:stride-workflow. Do NOT invoke from a user prompt. Contains the completion API contract (PATCH /api/tasks/:id/complete required fields including completion_summary, actual_complexity, after_doing_result, before_review_result, explorer_result, reviewer_result), used during the orchestrator's completion phase.
 ---
 
 # Stride: Completing Tasks
+
+## STOP — orchestrator check
+
+If you arrived here directly from a user prompt, you are in the wrong skill.
+Invoke `stride:stride-workflow` instead. Do not read further.
+Sub-skills are dispatched by the orchestrator only.
 
 ## ⚠️ THIS SKILL IS MANDATORY — NOT OPTIONAL ⚠️
 
