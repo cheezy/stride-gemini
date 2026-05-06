@@ -2,6 +2,22 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.7.0] - 2026-05-06
+
+### Added
+
+- **`agents/task-enricher.md`** — New custom agent that owns the four-phase enrichment procedure (intent parse, codebase exploration, complexity heuristic, 16-item validation checklist). Receives sparse task fields from the orchestrator and returns a single enriched-task JSON object ready for `PATCH /api/tasks/:id`. Ported from stride 1.11.0 (`stride/agents/task-enricher.md`) with Gemini-specific frontmatter (`tools:` as a YAML list of `read_file`, `grep_search`, `glob`, `list_directory`; plus `temperature: 0.2`, `max_turns: 15`, `timeout_mins: 5`; no `model` or `skills_version` fields). The body is platform-neutral with grep/glob/read invocation syntax adapted to Gemini tool names.
+
+### Changed
+
+- **`skills/stride-enriching-tasks/SKILL.md`** — Slimmed from 779 lines to 264 lines. The four-phase manual enrichment procedure now lives in `agents/task-enricher.md`. The skill retains the STOP preamble, MANDATORY warning, API Authorization block, Iron Law, API integration curl examples, and output example, but the Gemini CLI path now invokes `task-enricher` instead of walking the procedure inline. Other environments still follow the condensed manual walkthrough phases (Phases 1-4 retained in summary form, with the 16-item Phase 4 checklist preserved verbatim).
+- **`skills/stride-subagent-workflow/SKILL.md`** — Added `task-enricher` to the agent inventory in the MANDATORY teaser block. Added a new `## Pre-Claim: Enrichment (Sparse Tasks)` section documenting when and how to invoke the enricher before claiming a task. Added `task-enricher` to the Quick Reference Card and References section. Updated the frontmatter `description:` to enumerate `task-enricher` alongside the other custom agents.
+- **`skills/stride-workflow/SKILL.md`** — Step 1 enrichment check expanded into two platform subsections: `#### Gemini CLI: Invoke the Enricher Agent` (3-step invoke + PATCH flow) and `#### Other Environments: Activate the Enrichment Skill` (manual-phase fallback). Matches the stride 1.11.0 platform-split pattern.
+
+### Source
+
+Ported from stride 1.11.0 (commit 92b72ea). Cross-plugin parity goal G86 / W349.
+
 ## [1.6.0] - 2026-04-29
 
 ### Added

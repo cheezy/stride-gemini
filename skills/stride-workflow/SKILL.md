@@ -142,7 +142,18 @@ Review the returned task completely:
 - `needs_review` -- whether human approval is needed after completion
 - `complexity` -- drives the decision matrix in Step 3
 
-**Enrichment check:** If `key_files` is empty OR `testing_strategy` is missing OR `verification_steps` is empty OR `acceptance_criteria` is blank, activate `stride-enriching-tasks` to populate these fields before proceeding. Well-specified tasks skip enrichment.
+**Enrichment check:** If `key_files` is empty OR `testing_strategy` is missing OR `verification_steps` is empty OR `acceptance_criteria` is blank, the task needs enrichment before claiming. Well-specified tasks skip this check.
+
+#### Gemini CLI: Invoke the Enricher Agent
+
+1. **Invoke the `task-enricher` custom agent** (`agents/task-enricher.md`) with the task identifier and the sparse fields (title, type, description, priority if set). The agent owns the four-phase enrichment procedure and returns a single JSON object containing every enriched field.
+2. **Submit the returned JSON via `PATCH /api/tasks/:id`** to populate the missing fields on the existing task. The agent does NOT call the API itself.
+3. Re-fetch the task with `GET /api/tasks/:id` and verify all required fields are populated before proceeding to Step 2.
+
+#### Other Environments: Activate the Enrichment Skill
+
+1. Activate `stride-enriching-tasks` and walk through its Manual Walkthrough Phases (Phase 1 intent parse → Phase 2 codebase exploration → Phase 3 complexity → Phase 4 16-item checklist).
+2. Submit the assembled JSON via `PATCH /api/tasks/:id` per the API Integration block in that skill.
 
 ---
 

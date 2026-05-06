@@ -1,6 +1,6 @@
 ---
 name: stride-subagent-workflow
-description: INTERNAL — invoked only by stride:stride-workflow. Do NOT invoke from a user prompt. Contains the Claude Code subagent decision matrix (when to dispatch stride:task-explorer, stride:task-reviewer, stride:task-decomposer, stride:hook-diagnostician), used during the orchestrator's exploration and review phases.
+description: INTERNAL — invoked only by stride:stride-workflow. Do NOT invoke from a user prompt. Contains the Gemini CLI custom-agent decision matrix (when to invoke task-enricher, task-explorer, task-reviewer, task-decomposer, hook-diagnostician), used during the orchestrator's enrichment, exploration, and review phases.
 ---
 
 # Stride: Custom Agent Workflow
@@ -16,6 +16,7 @@ Sub-skills are dispatched by the orchestrator only.
 **If you just claimed a Stride task and are about to start implementation, you MUST activate this skill first.**
 
 This skill contains the decision matrix that determines which custom agents to invoke:
+- `task-enricher` — Enrich a sparse task with key_files, patterns, testing strategy, etc. **before claiming**
 - `task-explorer` — Read key_files and discover patterns before coding
 - `task-reviewer` — Review your changes against acceptance criteria before completion
 - `task-decomposer` — Break goals into properly-sized subtasks
@@ -82,6 +83,28 @@ Use this matrix to determine which custom agents to invoke based on task attribu
 - If the task is a **goal** or has **large complexity without child tasks** or a **25+ hour estimate**: invoke the decomposer first. The decomposer breaks it into claimable child tasks — you don't implement goals directly.
 - If the task is small with 0-1 key_files, skip all custom agents and code directly.
 - Otherwise, at minimum run the explorer and reviewer.
+
+## Pre-Claim: Enrichment (Sparse Tasks)
+
+**When:** During the orchestrator's Step 1 enrichment check, BEFORE claiming. Triggered when the task has empty `key_files` OR missing `testing_strategy` OR empty `verification_steps` OR blank `acceptance_criteria`.
+
+**What to do:** Invoke the `task-enricher` custom agent (`agents/task-enricher.md`), passing the sparse task fields.
+
+Provide the agent with:
+- The task's `identifier` (e.g., `W339`)
+- The task's `title`, `type`, and `description` (the agent must NOT modify these — only read them)
+- Any `priority` or `dependencies` the human specified
+
+The enricher will return a single JSON object containing the enriched fields: `key_files`, `patterns_to_follow`, `testing_strategy`, `verification_steps`, `pitfalls`, `acceptance_criteria`, `complexity`, `why`, `what`, `where_context`. The agent does NOT call the Stride API itself.
+
+**After enrichment:**
+1. Submit the returned JSON via `PATCH /api/tasks/:id` to populate the missing fields on the existing task
+2. Re-fetch the task with `GET /api/tasks/:id` to verify all required fields are populated
+3. Proceed to claim the task as normal — the rest of the matrix below applies once it's claimed
+
+**Skip enrichment when:**
+- The task is already well-specified (all four trigger fields populated)
+- The task type is `goal` (decompose first; the resulting child tasks may need enrichment individually)
 
 ## Phase 0: Decomposition (Goals and Large Undecomposed Tasks)
 
@@ -263,6 +286,7 @@ CUSTOM AGENT WORKFLOW:
 └─ 7. Proceed to after_doing hook (stride-completing-tasks)
 
 CUSTOM AGENTS (defined in agents/ directory):
+  task-enricher      - Enriches sparse tasks before claiming (Pre-Claim phase)
   task-decomposer    - Breaks goals into dependency-ordered child tasks
   task-explorer      - Reads key_files, finds tests, searches patterns
   task-reviewer      - Reviews diff against acceptance criteria & pitfalls
@@ -286,4 +310,4 @@ This skill sits between claiming and completing in the workflow:
 **FORBIDDEN:** Skipping from claiming directly to completing without checking the decision matrix here. Even for small tasks, you must check the matrix — it takes 5 seconds and prevents wrong decisions.
 
 ---
-**References:** This skill works with `stride-claiming-tasks` (activate after claim) and `stride-completing-tasks` (code review before hooks). Agent definitions are in `agents/task-decomposer.md`, `agents/task-explorer.md`, `agents/task-reviewer.md`, and `agents/hook-diagnostician.md`.
+**References:** This skill works with `stride-claiming-tasks` (activate after claim) and `stride-completing-tasks` (code review before hooks). Agent definitions are in `agents/task-enricher.md`, `agents/task-decomposer.md`, `agents/task-explorer.md`, `agents/task-reviewer.md`, and `agents/hook-diagnostician.md`.
