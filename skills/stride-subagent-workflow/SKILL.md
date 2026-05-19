@@ -178,15 +178,89 @@ Produce an ordered implementation plan. Follow this plan during implementation.
 - The task's `patterns_to_follow` text
 - The task's `testing_strategy` object
 
-The reviewer will return either "Approved" or a list of issues categorized as Critical, Important, or Minor.
+The reviewer returns a human-readable prose summary followed by a fenced ```json block. The schema of that block is owned by [`stride/agents/task-reviewer.md`](https://github.com/cheezy/stride/blob/main/agents/task-reviewer.md) — do not duplicate field definitions here.
 
-**Capture the reviewer's output as `review_report`:** Save the full structured review output returned by the task-reviewer agent. You will include this as the `review_report` field in the completion API call (via `stride-completing-tasks`). Capture it regardless of whether the review found issues — an "Approved" report is still valuable for traceability. When the reviewer is skipped (small tasks with 0-1 key_files), simply omit `review_report` from the completion call.
+**Capture the reviewer's full response as `review_report`:** Save the reviewer's entire response (prose summary line + per-severity issue list + acceptance-criteria table + fenced ```json block) verbatim. You will include it as the `review_report` field in the completion API call (via `stride-completing-tasks`). Capture it regardless of whether the review found issues — an "Approved" report is still valuable for traceability. When the reviewer is skipped (small tasks with 0-1 key_files), submit the self-reported skip form for `reviewer_result` (see `stride-completing-tasks`) and omit `review_report` from the completion call.
 
 **If issues are found:**
 - Fix all Critical issues before proceeding
 - Fix Important issues before proceeding
 - Minor issues are optional but recommended
 - After fixing, you do NOT need to re-run the reviewer — proceed to the after_doing hook
+
+### Extracting the structured review block
+
+After the reviewer returns, extract the first fenced ```json block from its response and use it to populate `reviewer_result` in the completion PATCH payload (constructed via `stride-completing-tasks` and submitted in the orchestrator's Step 7). The same `reviewer_result` map carries both the legacy summary fields (kept for backwards compatibility with older Kanban deploys) and the structured fields (the actual deliverable for downstream consumers — they live inside `reviewer_result`, never under a new top-level API key).
+
+**Extraction pattern** — extract the first ```json fence and parse it:
+
+```python
+import re, json
+m = re.search(r'```json\n(.*?)\n```', reviewer_response, re.DOTALL)
+structured = json.loads(m.group(1))  # the parsed schema
+```
+
+**Field mapping into `reviewer_result`:**
+
+- Legacy fields (always populated):
+  - `summary` ← `structured.summary`
+  - `issues_found` ← `sum(structured.issue_counts.values())` (sum only the recognized severity keys you receive; pass through any unknown severity keys verbatim inside the structured `issue_counts` object)
+  - `acceptance_criteria_checked` ← `len(structured.acceptance_criteria)`
+  - `dispatched: true`, `duration_ms: <wall-clock ms>` (as before)
+- Structured fields (copied verbatim from the parsed JSON, but **omit any key the agent did not emit** — do not send empty placeholders):
+  - `status`, `issue_counts`, `issues`, `acceptance_criteria`, `testing_strategy`, `patterns`, `pitfalls`, `schema_version`
+
+**Worked example.** Given the reviewer response below (truncated for brevity)…
+
+````text
+Approved
+...prose summary + issue list + acceptance-criteria table...
+
+```json
+{
+  "schema_version": "1.0",
+  "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
+  "status": "approved",
+  "issue_counts": {"critical": 0, "important": 0, "minor": 0},
+  "issues": [],
+  "acceptance_criteria": [
+    {"criterion": "All task positions recalculate when a card moves columns", "status": "met", "evidence": "lib/kanban/tasks.ex:142-168"},
+    {"criterion": "Existing position-stable behavior unchanged", "status": "met", "evidence": "test/kanban/tasks_test.exs:198-240"},
+    {"criterion": "PubSub broadcast emitted exactly once per move", "status": "met", "evidence": "lib/kanban/tasks.ex:172"}
+  ]
+}
+```
+````
+
+…the resulting `reviewer_result` value in the completion PATCH payload is:
+
+```json
+"reviewer_result": {
+  "dispatched": true,
+  "duration_ms": 29560,
+  "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
+  "issues_found": 0,
+  "acceptance_criteria_checked": 3,
+  "schema_version": "1.0",
+  "status": "approved",
+  "issue_counts": {"critical": 0, "important": 0, "minor": 0},
+  "issues": [],
+  "acceptance_criteria": [
+    {"criterion": "All task positions recalculate when a card moves columns", "status": "met", "evidence": "lib/kanban/tasks.ex:142-168"},
+    {"criterion": "Existing position-stable behavior unchanged", "status": "met", "evidence": "test/kanban/tasks_test.exs:198-240"},
+    {"criterion": "PubSub broadcast emitted exactly once per move", "status": "met", "evidence": "lib/kanban/tasks.ex:172"}
+  ]
+}
+```
+
+Legacy + structured fields coexist in the same map; the server persists `reviewer_result` as `:jsonb` and tolerates the structured keys today (G143/W688 will validate them explicitly).
+
+**Fallback when JSON parsing fails.** If no ```json block is present, or the block does not parse, do not abort the completion. Instead:
+
+1. Fall back to substring-matching the prose summary line ("Approved" or "N issues found (X critical, Y important, Z minor)") to populate `reviewer_result.summary` and `reviewer_result.issues_found` as before this rollout.
+2. Set `acceptance_criteria_checked` from the count of criterion lines you find in the prose acceptance-criteria table, or to `0` if none can be parsed.
+3. **Omit** every structured field (`status`, `issue_counts`, `issues`, `acceptance_criteria`, `testing_strategy`, `patterns`, `pitfalls`, `schema_version`) from the PATCH payload — do not send empty placeholders. The Kanban server tolerates their absence (the new ReviewReportPanel renders only what it receives).
+4. Keep `dispatched: true` and `duration_ms` as captured. The fallback path produces a degraded-but-valid completion, never a hard failure.
 
 ## Workflow Flowchart
 
