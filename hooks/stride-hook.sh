@@ -43,9 +43,180 @@ if [ "$_delegate_to_ps1" = "true" ]; then
   exec powershell.exe -ExecutionPolicy Bypass -File "$PS1_SCRIPT" "$PHASE"
 fi
 
-# Exit early if no phase argument or no .stride.md
-[ -n "$PHASE" ] || exit 0
-[ -f "$STRIDE_MD" ] || exit 0
+# --- Per-file diff capture (G148/W719 contract, Option D semantic) ---
+# Emits a JSON array of `{path, diff}` entries to stdout, one per file that
+# differs between $1 (base ref) and the agent's WORKING TREE at the time the
+# function runs. The snapshot captures committed-since-base, staged-but-
+# uncommitted, modified-but-unstaged, AND untracked-but-not-gitignored changes
+# in a single pass — so reviewers see the agent's full working state at
+# completion time, regardless of whether the agent committed before calling
+# /complete. Truncates diffs over 500 lines with the contract marker; emits
+# the binary placeholder for files git reports as binary in --numstat (tracked)
+# or that contain a NUL byte (untracked). Falls back to HEAD~1 when the
+# provided base is empty or unresolvable. Returns an empty array (and exit 0)
+# for any degraded path (jq missing, git missing, not in a repo, no commits to
+# diff) so callers can treat this strictly as "best-effort capture".
+capture_changed_files() {
+  local base="${1:-}"
+  local max_lines=500
+  local trunc_marker="[diff truncated at 500 lines]"
+  local bin_placeholder="[binary file — no diff captured]"
+
+  if ! command -v jq > /dev/null 2>&1 || ! command -v git > /dev/null 2>&1; then
+    printf '[]\n'
+    return 0
+  fi
+
+  if [ -z "$base" ] || ! git rev-parse --verify "$base" > /dev/null 2>&1; then
+    if git rev-parse --verify "HEAD~1" > /dev/null 2>&1; then
+      base="HEAD~1"
+    else
+      printf '[]\n'
+      return 0
+    fi
+  fi
+
+  # Tracked files that differ between base and the working tree (committed,
+  # staged, and unstaged changes all surface in a single `git diff <base>`).
+  local tracked_files
+  tracked_files=$(git diff --name-only "$base" 2>/dev/null || printf '')
+
+  # Untracked files not covered by .gitignore.
+  local untracked_files
+  untracked_files=$(git ls-files --others --exclude-standard 2>/dev/null || printf '')
+
+  # Combine; dedupe by path. Untracked entries should not overlap tracked
+  # (git would report a path as one OR the other, not both), but the awk
+  # `!seen` guard makes a single-entry-per-path invariant explicit.
+  local all_files
+  all_files=$(printf '%s\n%s\n' "$tracked_files" "$untracked_files" \
+    | awk 'NF && !seen[$0]++')
+
+  if [ -z "$all_files" ]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  # numstat for tracked changes — used to detect binaries among tracked files
+  # via the `- - <path>` marker. Untracked files are not in numstat; their
+  # binary detection runs separately on file contents.
+  local numstat
+  numstat=$(git diff --numstat "$base" 2>/dev/null || printf '')
+
+  local jsonl_file
+  jsonl_file=$(mktemp)
+
+  local file
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+
+    # Determine whether this path is in the untracked list (membership lookup,
+    # not just empty check — tracked_files and untracked_files were merged
+    # above with dedupe).
+    local is_untracked=0
+    if [ -n "$untracked_files" ]; then
+      local u
+      while IFS= read -r u; do
+        if [ "$u" = "$file" ]; then
+          is_untracked=1
+          break
+        fi
+      done <<< "$untracked_files"
+    fi
+
+    local is_binary=0
+    local diff_text=""
+
+    if [ "$is_untracked" -eq 1 ]; then
+      # Untracked: synthesize a new-file unified patch by diffing the file
+      # against /dev/null. `git diff --no-index` exits 1 when files differ —
+      # that is the expected path here, so we ignore the exit code and
+      # capture whatever stdout it produced. --no-color guards against
+      # pager/color being inherited from the user's git config.
+      #
+      # Binary detection uses git's own determination: when --no-index sees
+      # a binary file, it emits "Binary files /dev/null and <path> differ"
+      # instead of a unified patch. Sniffing that prefix is more reliable
+      # than a NUL-byte grep (bash truncates $'\0' to an empty pattern,
+      # which matches every line and falsely flags text files as binary).
+      diff_text=$(git diff --no-index --no-color /dev/null "$file" 2>/dev/null)
+      # For new files, --no-index emits a header (`diff --git`,
+      # `new file mode`, `index ...`) BEFORE the "Binary files ... differ"
+      # sentinel line, so we have to check anywhere in the output rather
+      # than just the prefix.
+      if printf '%s\n' "$diff_text" | grep -q '^Binary files .* differ$'; then
+        is_binary=1
+      fi
+    elif [ -n "$numstat" ]; then
+      local nl added rest deleted path
+      while IFS= read -r nl; do
+        added="${nl%%	*}"
+        rest="${nl#*	}"
+        deleted="${rest%%	*}"
+        path="${rest#*	}"
+        if [ "$added" = "-" ] && [ "$deleted" = "-" ] && [ "$path" = "$file" ]; then
+          is_binary=1
+          break
+        fi
+      done <<< "$numstat"
+    fi
+
+    if [ "$is_binary" -eq 1 ]; then
+      diff_text="$bin_placeholder"
+    else
+      if [ "$is_untracked" -eq 0 ]; then
+        # Tracked: working-tree diff vs base (committed + staged + unstaged
+        # changes all in one diff).
+        diff_text=$(git diff "$base" -- "$file" 2>/dev/null || printf '')
+      fi
+      # diff_text for untracked was already captured above.
+      local line_count=0
+      if [ -n "$diff_text" ]; then
+        local _no_nl="${diff_text//$'\n'/}"
+        line_count=$(( ${#diff_text} - ${#_no_nl} + 1 ))
+      fi
+      if [ "$line_count" -gt "$max_lines" ]; then
+        local truncated
+        truncated=$(printf '%s\n' "$diff_text" | head -n $((max_lines - 1)))
+        diff_text="${truncated}
+${trunc_marker}"
+      fi
+    fi
+
+    jq -n --arg path "$file" --arg diff "$diff_text" '{path: $path, diff: $diff}' >> "$jsonl_file"
+  done <<< "$all_files"
+
+  if [ -s "$jsonl_file" ]; then
+    jq -s '.' < "$jsonl_file"
+  else
+    printf '[]\n'
+  fi
+  rm -f "$jsonl_file"
+}
+
+# Writes the changed-files snapshot to $PROJECT_DIR/.stride-changed-files.json.
+# Invoked from every after_doing exit path (no-commands branch, all-comments
+# branch, and the post-command-loop success branch) so the file exists when
+# the subsequent /complete curl reads it inline. The function is a no-op when
+# TASK_BASE_REF is unset (e.g. the test harness sources the script without
+# claiming a task first).
+finalize_after_doing() {
+  local snapshot
+  if [ -n "${TASK_BASE_REF:-}" ]; then
+    snapshot=$(capture_changed_files "${TASK_BASE_REF:-}" 2>/dev/null || printf '[]')
+    printf '%s\n' "$snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
+  fi
+}
+
+# Exit early if no phase argument or no .stride.md. Placed AFTER the
+# capture_changed_files definition so tests can source this script to use the
+# function in isolation.
+if [ -z "$PHASE" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+if [ ! -f "$STRIDE_MD" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 # Read Gemini CLI hook input from stdin
 INPUT=$(cat)
@@ -133,6 +304,11 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
     fi
 
     if [ -n "$TASK_JSON" ]; then
+      # Capture the current git HEAD as TASK_BASE_REF so capture_changed_files
+      # has an anchor pointing at when the task was claimed (consumed by
+      # finalize_after_doing at the end of every after_doing exit path).
+      _base_ref=$(git rev-parse HEAD 2>/dev/null || printf '')
+
       # Values are single-quoted to handle spaces in titles/descriptions
       {
         echo "TASK_ID='$(echo "$TASK_JSON" | jq -r '.id // empty')'"
@@ -141,7 +317,12 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
         echo "TASK_STATUS='$(echo "$TASK_JSON" | jq -r '.status // empty')'"
         echo "TASK_COMPLEXITY='$(echo "$TASK_JSON" | jq -r '.complexity // empty')'"
         echo "TASK_PRIORITY='$(echo "$TASK_JSON" | jq -r '.priority // empty')'"
+        echo "TASK_BASE_REF='$_base_ref'"
       } > "$ENV_CACHE" 2>/dev/null || true
+
+      # Clear any stale changed-files snapshot left over from a prior task so
+      # the new task's after_doing capture starts from a clean slate.
+      rm -f "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
     fi
   fi
 fi
@@ -181,8 +362,12 @@ while IFS= read -r _line || [ -n "$_line" ]; do
   fi
 done < "$STRIDE_MD"
 
-# No commands for this hook — exit cleanly
-[ -n "$COMMANDS" ] || exit 0
+# No commands for this hook — exit cleanly. after_doing still needs to write
+# the changed-files snapshot so /complete sees a populated array.
+if [ -z "$COMMANDS" ]; then
+  [ "$HOOK_NAME" = "after_doing" ] && finalize_after_doing
+  exit 0
+fi
 
 # --- Build command list for tracking ---
 # Split commands into an array for structured output
@@ -194,8 +379,10 @@ while IFS= read -r cmd; do
   CMD_LIST+=("$trimmed")
 done <<< "$COMMANDS"
 
-# Nothing to execute after filtering
+# Nothing to execute after filtering — but after_doing still needs to write
+# the changed-files snapshot (e.g. an all-commented after_doing block).
 if [ ${#CMD_LIST[@]} -eq 0 ]; then
+  [ "$HOOK_NAME" = "after_doing" ] && finalize_after_doing
   exit 0
 fi
 
@@ -300,9 +487,15 @@ fi
 
 rm -f "$COMPLETED_FILE"
 
-# Clean up env cache after the final hook in the lifecycle
-if [ "$HOOK_NAME" = "after_review" ] && [ -f "$ENV_CACHE" ]; then
-  rm -f "$ENV_CACHE"
+# Write the per-file diff snapshot after the after_doing block succeeds. The
+# subsequent /complete curl reads the file inline via cat-in-jq so reviewers
+# see uncommitted edits and untracked-new files in /review.
+[ "$HOOK_NAME" = "after_doing" ] && finalize_after_doing
+
+# Clean up env cache and changed-files snapshot after the final hook in the
+# lifecycle so the next task starts from a clean slate.
+if [ "$HOOK_NAME" = "after_review" ]; then
+  rm -f "$ENV_CACHE" "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
 fi
 
 exit 0

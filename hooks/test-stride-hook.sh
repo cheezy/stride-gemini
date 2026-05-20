@@ -626,6 +626,616 @@ else
   echo "  SKIP: env caching tests (jq not available)"
 fi
 
+
+# ============================================================
+# Test Group 7: Per-file diff capture (G148/W719 contract)
+# ============================================================
+echo ""
+echo "=== Test Group 7: Per-file diff capture ==="
+
+# Source the capture function from the hook script. The script's main flow
+# only runs when stdin is provided and a hook name is matched, so sourcing it
+# without those preconditions safely defines the function without executing
+# anything.
+if ! command -v jq > /dev/null 2>&1; then
+  echo "  SKIP: diff-capture tests (jq not available)"
+elif ! command -v git > /dev/null 2>&1; then
+  echo "  SKIP: diff-capture tests (git not available)"
+else
+  # Mirror of the inline truncation logic for isolated unit testing.
+  trunc_diff_inline() {
+    local diff_text="$1"
+    local max_lines="$2"
+    local marker="$3"
+
+    local line_count=0
+    if [ -n "$diff_text" ]; then
+      local _no_nl="${diff_text//$'\n'/}"
+      line_count=$(( ${#diff_text} - ${#_no_nl} + 1 ))
+    fi
+    if [ "$line_count" -gt "$max_lines" ]; then
+      local truncated
+      truncated=$(printf '%s\n' "$diff_text" | head -n $((max_lines - 1)))
+      printf '%s\n%s' "$truncated" "$marker"
+    else
+      printf '%s' "$diff_text"
+    fi
+  }
+
+  # Mirror of the inline binary-detection logic for isolated unit testing.
+  is_binary_in_numstat() {
+    local numstat="$1" target="$2"
+    local nl added rest deleted path
+    while IFS= read -r nl; do
+      added="${nl%%	*}"
+      rest="${nl#*	}"
+      deleted="${rest%%	*}"
+      path="${rest#*	}"
+      if [ "$added" = "-" ] && [ "$deleted" = "-" ] && [ "$path" = "$target" ]; then
+        return 0
+      fi
+    done <<< "$numstat"
+    return 1
+  }
+
+  # 7a: Truncation — diff at exactly 500 lines is not truncated
+  EXACT_500=$(for i in $(seq 1 500); do echo "line $i"; done)
+  RESULT=$(trunc_diff_inline "$EXACT_500" 500 "[diff truncated at 500 lines]")
+  RESULT_LINES=$(printf '%s\n' "$RESULT" | wc -l | tr -d ' ')
+  assert_eq "500-line diff: line count preserved" "500" "$RESULT_LINES"
+  if echo "$RESULT" | grep -qF "[diff truncated at 500 lines]"; then
+    echo -e "  ${RED}FAIL${RESET}: 500-line diff should not contain truncation marker"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 500-line diff is not truncated"
+    PASS=$((PASS + 1))
+  fi
+
+  # 7b: Truncation — diff over 500 lines is truncated with the contract marker
+  OVER_500=$(for i in $(seq 1 750); do echo "line $i"; done)
+  RESULT=$(trunc_diff_inline "$OVER_500" 500 "[diff truncated at 500 lines]")
+  RESULT_LINES=$(printf '%s\n' "$RESULT" | wc -l | tr -d ' ')
+  assert_eq "750-line diff: truncated to 500 lines total" "500" "$RESULT_LINES"
+  assert_contains "750-line diff: marker appended" \
+    "[diff truncated at 500 lines]" \
+    "$RESULT"
+  # Last line should be the marker
+  LAST_LINE=$(printf '%s\n' "$RESULT" | tail -n 1)
+  assert_eq "750-line diff: marker is last line" \
+    "[diff truncated at 500 lines]" \
+    "$LAST_LINE"
+
+  # 7c: Truncation — empty input stays empty
+  RESULT=$(trunc_diff_inline "" 500 "[diff truncated at 500 lines]")
+  assert_eq "empty diff stays empty" "" "$RESULT"
+
+  # 7d: Binary detection — numstat with "- - <file>" returns true
+  NUMSTAT='10	2	lib/foo.ex
+-	-	assets/logo.png
+3	0	test/foo_test.exs'
+  if is_binary_in_numstat "$NUMSTAT" "assets/logo.png"; then
+    echo -e "  ${GREEN}PASS${RESET}: binary file detected from numstat"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: binary file not detected"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # 7e: Binary detection — text file does not match
+  if is_binary_in_numstat "$NUMSTAT" "lib/foo.ex"; then
+    echo -e "  ${RED}FAIL${RESET}: text file misidentified as binary"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: text file correctly not flagged binary"
+    PASS=$((PASS + 1))
+  fi
+
+  # 7f: Binary detection — file not in numstat
+  if is_binary_in_numstat "$NUMSTAT" "nonexistent.txt"; then
+    echo -e "  ${RED}FAIL${RESET}: missing file misidentified as binary"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: missing file correctly not flagged binary"
+    PASS=$((PASS + 1))
+  fi
+
+  # 7g: Integration — capture_changed_files in a real temp git repo
+  # Source the function from the hook script. Set arg empty to skip script main.
+  CAPTURE_DIR=$(mktemp -d)
+  (
+    cd "$CAPTURE_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "original" > a.txt
+    echo "original" > b.txt
+    # Create a small binary file (PNG signature + nulls)
+    printf '\x89PNG\r\n\x1a\n\x00\x00\x00\x00\x00\x00\x00\x00' > logo.png
+    git add . > /dev/null
+    git commit -q -m "initial"
+
+    # Capture the base
+    BASE=$(git rev-parse HEAD)
+
+    # Modify text + binary
+    echo "modified" > a.txt
+    printf '\x89PNG\r\n\x1a\n\xff\xff\xff\xff\xff\xff\xff\xff' > logo.png
+    rm b.txt
+    git add -A > /dev/null
+    git commit -q -m "changes"
+
+    # Source the capture function from the hook script.
+    # The early-exit checks (no phase, no .stride.md) keep main from running.
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+
+    capture_changed_files "$BASE"
+  ) > "$CAPTURE_DIR/capture.json" 2> "$CAPTURE_DIR/capture.err"
+
+  CAPTURE_OUTPUT=$(cat "$CAPTURE_DIR/capture.json")
+
+  # Verify the output is a JSON array of length 3
+  if echo "$CAPTURE_OUTPUT" | jq -e 'type == "array" and length == 3' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: integration: emits 3-entry JSON array"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: integration: expected 3-entry array, got: $(echo "$CAPTURE_OUTPUT" | head -c 200)"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # Text file should have a unified-patch diff
+  TEXT_DIFF=$(echo "$CAPTURE_OUTPUT" | jq -r '.[] | select(.path == "a.txt") | .diff')
+  # `grep -F` still treats a leading "--" as an option; pick a needle that
+  # avoids that without weakening the assertion.
+  assert_contains "integration: text file has unified-patch header" \
+    "diff --git a/a.txt" \
+    "$TEXT_DIFF"
+  assert_contains "integration: text file has +/- lines" "+modified" "$TEXT_DIFF"
+
+  # Binary file should have the exact placeholder
+  BIN_DIFF=$(echo "$CAPTURE_OUTPUT" | jq -r '.[] | select(.path == "logo.png") | .diff')
+  assert_eq "integration: binary file emits exact placeholder" \
+    "[binary file — no diff captured]" \
+    "$BIN_DIFF"
+
+  # Deleted file (b.txt) still appears in the changed-files list
+  DELETED_PRESENT=$(echo "$CAPTURE_OUTPUT" | jq -r '.[] | select(.path == "b.txt") | .path')
+  assert_eq "integration: deleted file present in array" "b.txt" "$DELETED_PRESENT"
+
+  rm -rf "$CAPTURE_DIR"
+
+  # 7h: Fallback — non-repo directory returns empty array
+  NONREPO_DIR=$(mktemp -d)
+  (
+    cd "$NONREPO_DIR" || exit 1
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files ""
+  ) > "$NONREPO_DIR/out.json" 2>/dev/null
+  NONREPO_OUTPUT=$(cat "$NONREPO_DIR/out.json")
+  if echo "$NONREPO_OUTPUT" | jq -e 'type == "array" and length == 0' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: non-repo directory returns empty array"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: non-repo expected [], got: $NONREPO_OUTPUT"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$NONREPO_DIR"
+
+  # 7i: Fallback — empty base ref with a valid HEAD~1 still captures
+  FALLBACK_DIR=$(mktemp -d)
+  FALLBACK_OUT=$(mktemp)
+  (
+    cd "$FALLBACK_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "first" > c.txt
+    git add c.txt > /dev/null
+    git commit -q -m "first"
+    echo "second" > c.txt
+    git add c.txt > /dev/null
+    git commit -q -m "second"
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files ""
+  ) > "$FALLBACK_OUT" 2>/dev/null
+  FALLBACK_OUTPUT=$(cat "$FALLBACK_OUT")
+  rm -f "$FALLBACK_OUT"
+  if echo "$FALLBACK_OUTPUT" | jq -e 'type == "array" and length == 1 and .[0].path == "c.txt"' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: empty base falls back to HEAD~1 successfully"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: empty-base fallback expected single c.txt entry, got: $FALLBACK_OUTPUT"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$FALLBACK_DIR"
+
+  # 7j: End-to-end — after_doing hook writes .stride-changed-files.json
+  E2E_DIR=$(mktemp -d)
+  (
+    cd "$E2E_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    # Gitignore the hook's runtime artifacts so they don't leak into the
+    # snapshot via the Option D untracked-file capture.
+    cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+GITIGNORE
+    echo "v1" > tracked.txt
+    git add .gitignore tracked.txt > /dev/null
+    git commit -q -m "v1 + gitignore"
+    BASE=$(git rev-parse HEAD)
+    echo "v2" > tracked.txt
+    git add tracked.txt > /dev/null
+    git commit -q -m "v2"
+
+    cat > .stride.md << 'STRIDE'
+## after_doing
+```bash
+echo "ran after_doing"
+```
+STRIDE
+
+    # Pre-populate the env cache with the base ref the hook would have set
+    printf "TASK_BASE_REF='%s'\n" "$BASE" > .stride-env-cache
+
+    COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stridelikeaboss.com/api/tasks/1/complete"}}'
+    echo "$COMPLETE_JSON" | GEMINI_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  if [ -f "$E2E_DIR/.stride-changed-files.json" ]; then
+    E2E_JSON=$(cat "$E2E_DIR/.stride-changed-files.json")
+    if echo "$E2E_JSON" | jq -e 'type == "array" and length == 1 and .[0].path == "tracked.txt"' > /dev/null 2>&1; then
+      echo -e "  ${GREEN}PASS${RESET}: e2e: after_doing wrote correct .stride-changed-files.json"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${RESET}: e2e: unexpected JSON contents: $E2E_JSON"
+      FAIL=$((FAIL + 1))
+    fi
+  else
+    echo -e "  ${RED}FAIL${RESET}: e2e: .stride-changed-files.json was not written"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$E2E_DIR"
+
+  # 7k: All-commented after_doing still triggers capture
+  NOCMD_DIR=$(mktemp -d)
+  (
+    cd "$NOCMD_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > f.txt
+    git add f.txt > /dev/null
+    # Gitignore stride runtime artifacts (Option D would otherwise capture
+    # the test-fixture .stride.md / .stride-env-cache as untracked files).
+    cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+GITIGNORE
+    git add .gitignore > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    echo "v2" > f.txt
+    git add f.txt > /dev/null
+    git commit -q -m "v2"
+
+    cat > .stride.md << 'STRIDE'
+## after_doing
+```bash
+# every command commented out
+# echo "this never runs"
+```
+STRIDE
+
+    printf "TASK_BASE_REF='%s'\n" "$BASE" > .stride-env-cache
+
+    COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stridelikeaboss.com/api/tasks/1/complete"}}'
+    echo "$COMPLETE_JSON" | GEMINI_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  if [ -f "$NOCMD_DIR/.stride-changed-files.json" ]; then
+    NOCMD_JSON=$(cat "$NOCMD_DIR/.stride-changed-files.json")
+    if echo "$NOCMD_JSON" | jq -e 'type == "array" and length == 1 and .[0].path == "f.txt"' > /dev/null 2>&1; then
+      echo -e "  ${GREEN}PASS${RESET}: all-commented after_doing still triggers capture"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${RESET}: all-commented after_doing: unexpected JSON: $NOCMD_JSON"
+      FAIL=$((FAIL + 1))
+    fi
+  else
+    echo -e "  ${RED}FAIL${RESET}: all-commented after_doing did not write the JSON snapshot"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$NOCMD_DIR"
+
+  # 7l: Legacy bypass — non-after_doing hooks must NOT touch the snapshot file
+  # If a stale snapshot exists from a prior after_doing, before_review (or any
+  # other phase) must leave it untouched. This preserves the backward-compat
+  # guarantee: legacy code paths that don't run the capture continue to work.
+  BYPASS_DIR=$(mktemp -d)
+  (
+    cd "$BYPASS_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > x.txt
+    git add x.txt > /dev/null
+    git commit -q -m "v1"
+
+    cat > .stride.md << 'STRIDE'
+## before_review
+```bash
+echo "ran before_review"
+```
+STRIDE
+
+    # Pre-seed the snapshot file with a marker we can detect.
+    echo '[{"path":"stale.txt","diff":"stale"}]' > .stride-changed-files.json
+
+    COMPLETE_JSON='{"tool_input":{"command":"curl -X PATCH https://stridelikeaboss.com/api/tasks/1/complete"}}'
+    # `post` phase + complete URL → before_review (not after_doing)
+    echo "$COMPLETE_JSON" | GEMINI_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  if [ -f "$BYPASS_DIR/.stride-changed-files.json" ]; then
+    BYPASS_JSON=$(cat "$BYPASS_DIR/.stride-changed-files.json")
+    if echo "$BYPASS_JSON" | jq -e '.[0].path == "stale.txt"' > /dev/null 2>&1; then
+      echo -e "  ${GREEN}PASS${RESET}: legacy bypass — before_review preserves snapshot file"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${RESET}: legacy bypass — before_review overwrote the snapshot: $BYPASS_JSON"
+      FAIL=$((FAIL + 1))
+    fi
+  else
+    echo -e "  ${RED}FAIL${RESET}: legacy bypass — before_review deleted the snapshot unexpectedly"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$BYPASS_DIR"
+
+  # 7m: Empty changed-files list — base ref resolves but no files differ
+  EMPTY_DIFF_DIR=$(mktemp -d)
+  EMPTY_DIFF_OUT=$(mktemp)
+  (
+    cd "$EMPTY_DIFF_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > y.txt
+    git add y.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    # Make a second commit with no real changes (use --allow-empty)
+    git commit -q --allow-empty -m "empty"
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$EMPTY_DIFF_OUT" 2>/dev/null
+  EMPTY_DIFF_OUTPUT=$(cat "$EMPTY_DIFF_OUT")
+  rm -f "$EMPTY_DIFF_OUT"
+  if echo "$EMPTY_DIFF_OUTPUT" | jq -e 'type == "array" and length == 0' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: empty changed-files list returns []"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: empty changed-files expected [], got: $EMPTY_DIFF_OUTPUT"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$EMPTY_DIFF_DIR"
+
+  # 7n: File with embedded null bytes — git --numstat reports as binary, so the
+  # placeholder must be emitted (no patch attempt)
+  NULL_DIR=$(mktemp -d)
+  (
+    cd "$NULL_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    printf 'plain text\n' > nullfile.dat
+    git add nullfile.dat > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+    # Replace contents with bytes that include nulls
+    printf 'text\x00with\x00nulls\n' > nullfile.dat
+    git add nullfile.dat > /dev/null
+    git commit -q -m "v2"
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$NULL_DIR/out.json" 2>/dev/null
+  NULL_OUTPUT=$(cat "$NULL_DIR/out.json")
+  NULL_DIFF=$(echo "$NULL_OUTPUT" | jq -r '.[0].diff // ""')
+  assert_eq "null-byte file emits binary placeholder" \
+    "[binary file — no diff captured]" \
+    "$NULL_DIFF"
+  rm -rf "$NULL_DIR"
+
+  # ---------------------------------------------------------------------------
+  # Test Group 7 (Option D semantic) — cases 7o-7s
+  # The snapshot must reflect the agent's working state at completion time:
+  # modified-uncommitted tracked files, staged-uncommitted changes, untracked
+  # new files (synthesized new-file patches), untracked binaries (placeholder),
+  # and dedupe when a path is both committed-since-base AND further modified
+  # in the working tree.
+  # ---------------------------------------------------------------------------
+
+  # 7o: Modified-uncommitted tracked file appears in the snapshot
+  UNCOMMITTED_DIR=$(mktemp -d)
+  (
+    cd "$UNCOMMITTED_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > tracked.txt
+    git add tracked.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+
+    # Modify the tracked file WITHOUT committing or staging
+    echo "v2-uncommitted" > tracked.txt
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$UNCOMMITTED_DIR/out.json" 2>/dev/null
+  UNCOMMITTED_OUTPUT=$(cat "$UNCOMMITTED_DIR/out.json")
+  UNCOMMITTED_DIFF=$(echo "$UNCOMMITTED_OUTPUT" | jq -r '.[] | select(.path == "tracked.txt") | .diff')
+  if [ -n "$UNCOMMITTED_DIFF" ]; then
+    assert_contains "Option D: modified-uncommitted tracked file has unified-patch header" \
+      "diff --git a/tracked.txt" \
+      "$UNCOMMITTED_DIFF"
+    assert_contains "Option D: modified-uncommitted tracked file diff body present" \
+      "+v2-uncommitted" \
+      "$UNCOMMITTED_DIFF"
+  else
+    echo -e "  ${RED}FAIL${RESET}: Option D: modified-uncommitted tracked file missing from snapshot"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$UNCOMMITTED_DIR"
+
+  # 7p: Staged-uncommitted change appears in the snapshot
+  STAGED_DIR=$(mktemp -d)
+  (
+    cd "$STAGED_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > staged.txt
+    git add staged.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+
+    # Modify and stage WITHOUT committing
+    echo "v2-staged" > staged.txt
+    git add staged.txt > /dev/null
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$STAGED_DIR/out.json" 2>/dev/null
+  STAGED_OUTPUT=$(cat "$STAGED_DIR/out.json")
+  STAGED_DIFF=$(echo "$STAGED_OUTPUT" | jq -r '.[] | select(.path == "staged.txt") | .diff')
+  if [ -n "$STAGED_DIFF" ]; then
+    assert_contains "Option D: staged-uncommitted file has unified-patch header" \
+      "diff --git a/staged.txt" \
+      "$STAGED_DIFF"
+    assert_contains "Option D: staged-uncommitted file diff body present" \
+      "+v2-staged" \
+      "$STAGED_DIFF"
+  else
+    echo -e "  ${RED}FAIL${RESET}: Option D: staged-uncommitted file missing from snapshot"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$STAGED_DIR"
+
+  # 7q: Untracked new file appears as synthesized new-file patch
+  UNTRACKED_DIR=$(mktemp -d)
+  (
+    cd "$UNTRACKED_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > existing.txt
+    git add existing.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+
+    # Create a NEW untracked file
+    cat > new_file.txt << 'NEW'
+line one
+line two
+line three
+NEW
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$UNTRACKED_DIR/out.json" 2>/dev/null
+  UNTRACKED_OUTPUT=$(cat "$UNTRACKED_DIR/out.json")
+  UNTRACKED_DIFF=$(echo "$UNTRACKED_OUTPUT" | jq -r '.[] | select(.path == "new_file.txt") | .diff')
+  if [ -n "$UNTRACKED_DIFF" ]; then
+    # Synthesized new-file patch should have the +++ b/<path> header and at
+    # least one `+<content>` body line.
+    assert_contains "Option D: untracked new file has +++ b/<path> header" \
+      "+++ b/new_file.txt" \
+      "$UNTRACKED_DIFF"
+    assert_contains "Option D: untracked new file has +<content> body lines" \
+      "+line one" \
+      "$UNTRACKED_DIFF"
+  else
+    echo -e "  ${RED}FAIL${RESET}: Option D: untracked new file missing from snapshot (output: $UNTRACKED_OUTPUT)"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -rf "$UNTRACKED_DIR"
+
+  # 7r: Untracked binary uses the binary placeholder
+  UNTRACKED_BIN_DIR=$(mktemp -d)
+  (
+    cd "$UNTRACKED_BIN_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > a.txt
+    git add a.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+
+    # Create an untracked file with NUL bytes (binary)
+    printf 'binary\x00data\x00here\n' > new.bin
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$UNTRACKED_BIN_DIR/out.json" 2>/dev/null
+  UNTRACKED_BIN_OUTPUT=$(cat "$UNTRACKED_BIN_DIR/out.json")
+  UNTRACKED_BIN_DIFF=$(echo "$UNTRACKED_BIN_OUTPUT" | jq -r '.[] | select(.path == "new.bin") | .diff')
+  assert_eq "Option D: untracked binary file emits exact binary placeholder" \
+    "[binary file — no diff captured]" \
+    "$UNTRACKED_BIN_DIFF"
+  rm -rf "$UNTRACKED_BIN_DIR"
+
+  # 7s: Dedupe — committed-and-further-modified path appears exactly once
+  DEDUPE_DIR=$(mktemp -d)
+  (
+    cd "$DEDUPE_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    echo "v1" > dual.txt
+    git add dual.txt > /dev/null
+    git commit -q -m "v1"
+    BASE=$(git rev-parse HEAD)
+
+    # Commit a change…
+    echo "v2-committed" > dual.txt
+    git add dual.txt > /dev/null
+    git commit -q -m "v2"
+
+    # …then modify the same path further WITHOUT committing
+    echo "v3-uncommitted-on-top" > dual.txt
+
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null || true
+    capture_changed_files "$BASE"
+  ) > "$DEDUPE_DIR/out.json" 2>/dev/null
+  DEDUPE_OUTPUT=$(cat "$DEDUPE_DIR/out.json")
+  DEDUPE_COUNT=$(echo "$DEDUPE_OUTPUT" | jq -r '[.[] | select(.path == "dual.txt")] | length')
+  assert_eq "Option D: dedupe — committed + further-modified path appears exactly once" \
+    "1" \
+    "$DEDUPE_COUNT"
+  # And the diff should reflect the FINAL working-tree state (not the
+  # intermediate committed value).
+  DEDUPE_DIFF=$(echo "$DEDUPE_OUTPUT" | jq -r '.[] | select(.path == "dual.txt") | .diff')
+  assert_contains "Option D: dedupe — diff reflects final working-tree content" \
+    "+v3-uncommitted-on-top" \
+    "$DEDUPE_DIFF"
+  rm -rf "$DEDUPE_DIR"
+fi
+
 # ============================================================
 # Summary
 # ============================================================

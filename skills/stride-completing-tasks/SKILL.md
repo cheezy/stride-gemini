@@ -128,6 +128,7 @@ Use when you've finished implementing a Stride task and are ready to mark it com
 - [ ] **Are you ready to run the `after_doing` hook (tests, linting)?** If no → fix any known issues first. The hook will fail if tests don't pass.
 - [ ] **Is `workflow_steps` included in the complete payload?** If no → add it now. The array is required on every completion. It must contain one entry for each of the six step names (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`) — see the stride-workflow skill for the schema.
 - [ ] **Are `explorer_result` and `reviewer_result` included?** If no → add them now. Both are required on every completion, either as a dispatched-custom-agent result or as a self-reported skip with a reason from the fixed enum. See the Explorer/Reviewer Result Schema section below.
+- [ ] **Did you embed `.stride-changed-files.json` into the payload as `changed_files`?** Read it INLINE inside the same curl invocation via `--argjson cf "$(cat "$GEMINI_PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || echo '[]')"`. Use the absolute `$GEMINI_PROJECT_DIR` path (not a relative `.stride-changed-files.json`) — a non-root agent CWD silently misses the file otherwise. Reading the snapshot in a SEPARATE Bash tool call before the curl runs the cat BEFORE the BeforeTool hook has written the file, producing an empty or stale read. See the Per-File Diff Capture (Optional) section below for the canonical pattern.
 
 **If ANY answer is NO → Go back and do it now. Do NOT proceed to completion.**
 
@@ -312,15 +313,65 @@ When a blocking hook fails, invoke the `hook-diagnostician` custom agent **as th
 
 ## API Request Format
 
-After BOTH hooks succeed, call the complete endpoint:
+After BOTH hooks succeed, assemble and send the completion request as a
+SINGLE Bash invocation that inlines the snapshot read inside `jq -n`. The
+inline pattern matters because the BeforeTool-on-complete hook writes
+`.stride-changed-files.json` during the curl call — a separate Bash tool
+call BEFORE the curl reads the file BEFORE the hook has populated it. See
+the "Why inline?" paragraph in the [Per-File Diff Capture (Optional)](#per-file-diff-capture-optional)
+section below.
+
+```bash
+curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
+  -H "Authorization: Bearer $STRIDE_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -n \
+    --argjson cf "$(cat "$GEMINI_PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || echo '[]')" \
+    --arg agent_name 'Gemini CLI' \
+    --arg notes 'All tests passing. PR #123 created.' \
+    --arg summary 'Brief one-line summary for tracking.' \
+    --arg complexity 'small' \
+    --arg files 'lib/foo.ex, test/foo_test.exs' \
+    --arg report '## Review Summary\n\nApproved — 0 issues found.' \
+    '{
+       agent_name: $agent_name,
+       time_spent_minutes: 45,
+       completion_notes: $notes,
+       completion_summary: $summary,
+       actual_complexity: $complexity,
+       actual_files_changed: $files,
+       changed_files: $cf,
+       review_report: $report,
+       after_doing_result: {exit_code: 0, output: "...", duration_ms: 45678},
+       before_review_result: {exit_code: 0, output: "...", duration_ms: 2340},
+       explorer_result: {dispatched: true, summary: "...", duration_ms: 12450},
+       reviewer_result: {dispatched: true, summary: "...", duration_ms: 15300, acceptance_criteria_checked: 5, issues_found: 0},
+       workflow_steps: [
+         {name: "explorer", dispatched: true, duration_ms: 12450},
+         {name: "planner", dispatched: true, duration_ms: 8200},
+         {name: "implementation", dispatched: true, duration_ms: 1820000},
+         {name: "reviewer", dispatched: true, duration_ms: 15300},
+         {name: "after_doing", dispatched: true, duration_ms: 45678},
+         {name: "before_review", dispatched: true, duration_ms: 2340}
+       ]
+     }')"
+```
+
+The resulting request body has this shape (illustrative — populated values
+match the `--arg` / `--argjson` substitutions above):
 
 ```json
-PATCH /api/tasks/:id/complete
 {
   "agent_name": "Gemini CLI",
   "time_spent_minutes": 45,
   "completion_notes": "All tests passing. PR #123 created.",
-  "review_report": "## Review Summary\n\nApproved — 0 issues found.\n\n### Acceptance Criteria\n| # | Criterion | Status |\n|---|-----------|--------|\n| 1 | Feature works | Met |",
+  "completion_summary": "Brief one-line summary for tracking.",
+  "actual_complexity": "small",
+  "actual_files_changed": "lib/foo.ex, test/foo_test.exs",
+  "changed_files": [
+    {"path": "lib/foo.ex", "diff": "--- a/lib/foo.ex\n+++ b/lib/foo.ex\n@@ -1,3 +1,4 @@\n defmodule Foo do\n+  @moduledoc \"Foo\"\n end\n"}
+  ],
+  "review_report": "## Review Summary\n\nApproved — 0 issues found.",
   "after_doing_result": {
     "exit_code": 0,
     "output": "Running tests...\n230 tests, 0 failures\nmix credo --strict\nNo issues found",
@@ -355,6 +406,94 @@ PATCH /api/tasks/:id/complete
 ```
 
 **Critical:** `after_doing_result`, `before_review_result`, `explorer_result`, `reviewer_result`, and `workflow_steps` are all REQUIRED. The API will reject requests without them.
+
+**Optional:** Include `changed_files` whenever `.stride-changed-files.json` exists in the project root — read it INLINE inside the same curl invocation (see the bash example above and the [Per-File Diff Capture (Optional)](#per-file-diff-capture-optional) section below). The `|| echo '[]'` fallback produces an empty array when the snapshot is absent or unreadable; emitting `changed_files: []` is a valid completion. The encoding rules (500-line truncation marker, binary placeholder, `{path, diff}` shape) live in `docs/diff-contract.md` and should not be duplicated into the example.
+
+## Per-File Diff Capture (Optional)
+
+The completion payload accepts an optional top-level `changed_files` array — one
+`{path, diff}` entry per file changed during the task. When provided, the
+Stride review queue renders each diff inline next to the task, giving the
+human reviewer a per-file view of what the agent did without leaving the
+kanban UI. When omitted, the review queue falls back to the file list in
+`actual_files_changed` (no inline diff panel). The encoding rules live in
+the contract doc and are the single source of truth:
+
+> **Contract:** [`docs/diff-contract.md`](https://raw.githubusercontent.com/cheezy/kanban/refs/heads/main/docs/diff-contract.md)
+> (defines `path` / `diff` keys, exact truncation marker string, exact binary
+> placeholder string, the 500-line inclusive cap, and the optional-field rules)
+
+**How the stride-gemini extension produces this data.** After a successful
+`after_doing` hook the extension captures the agent's working-tree state
+versus the `$TASK_BASE_REF` anchor — committed changes, staged-but-uncommitted
+changes, modified-but-unstaged changes, AND untracked-new files (not in
+`.gitignore`) all surface in a single snapshot. Untracked new files appear
+as synthesized new-file unified patches (diffed against `/dev/null`);
+untracked binaries use the binary placeholder. The extension applies the
+contract's truncation and binary conventions and writes the JSON array to
+`$GEMINI_PROJECT_DIR/.stride-changed-files.json` (with `$CLAUDE_PROJECT_DIR`
+as a fallback). The snapshot is per-project, refreshed at the end of every
+`after_doing`, and cleaned up on `after_review`.
+
+**Working-tree semantic (v1.10.0+).** The snapshot reflects the agent's full
+working state at completion time, regardless of commit state. An agent that
+edits a file and calls `/complete` WITHOUT committing first still produces a
+populated snapshot — the diff is captured from the working tree against
+`$TASK_BASE_REF`, not from `..HEAD`. Earlier extension versions (≤ 1.9.x)
+had no per-file diff capture at all.
+
+**Why inline?** The BeforeTool-on-complete hook fires `after_doing` BEFORE
+the curl runs. The hook writes `.stride-changed-files.json` during that
+phase. If the agent's payload assembly reads the snapshot in a SEPARATE Bash
+tool call BEFORE the curl call, that earlier Bash invocation runs BEFORE the
+BeforeTool hook fires — so the file may not yet exist (or contains a stale
+snapshot from a prior task). The fix is to inline the `cat` inside the same
+curl invocation, so the read happens AFTER the BeforeTool hook has populated
+the file but BEFORE the request body is serialized.
+
+**How to populate `changed_files` in your payload.** Inline the snapshot read
+inside the curl invocation using `jq -n --argjson cf`, with the absolute
+`$GEMINI_PROJECT_DIR` path so the read works regardless of the Bash call's
+CWD:
+
+```bash
+curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
+  -H "Authorization: Bearer $STRIDE_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -n \
+    --argjson cf "$(cat "$GEMINI_PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || echo '[]')" \
+    --arg summary 'completion summary text' \
+    --arg notes 'completion notes text' \
+    '{
+       completion_summary: $summary,
+       completion_notes: $notes,
+       changed_files: $cf,
+       actual_complexity: "small"
+     }')"
+```
+
+If `.stride-changed-files.json` is absent — older extension install, non-git
+project, capture failed, jq missing on the agent's machine — the inlined
+`|| echo '[]'` fallback produces an empty array. Empty `changed_files` is a
+valid shape; the server accepts it. Do NOT synthesize diffs by hand to "fill
+in" the field; emit only what the extension captured (or `[]`). Both shapes
+below are valid completions:
+
+```json
+"changed_files": [
+  {"path": "lib/foo.ex", "diff": "--- a/lib/foo.ex\n+++ b/lib/foo.ex\n@@ -1,3 +1,4 @@\n defmodule Foo do\n+  @moduledoc \"Foo\"\n end\n"},
+  {"path": "assets/logo.png", "diff": "[binary file — no diff captured]"}
+]
+```
+
+```json
+"changed_files": []
+```
+
+**Backward compatibility.** `changed_files` is strictly optional. Completion
+payloads that omit it remain fully valid forever — the server treats the
+absence as "no diff data available" and the review queue shows the file list
+from `actual_files_changed` without an inline diff panel.
 
 ## Explorer/Reviewer Result Schema
 
