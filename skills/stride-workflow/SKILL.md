@@ -107,7 +107,7 @@ You do NOT need to activate `stride-claiming-tasks`, `stride-subagent-workflow`,
 
 2. **`.stride.md`** -- Contains hook commands for each lifecycle phase
    - If missing: Ask user to create it
-   - Verify sections exist: `## before_doing`, `## after_doing`, `## before_review`, `## after_review`
+   - Verify sections exist: `## before_doing`, `## after_doing`, `## before_review`, `## after_review`, `## after_goal`
 
 **Then write the orchestrator activation marker** (see "Orchestrator Activation Marker" section above for the contract):
 
@@ -249,6 +249,61 @@ The reviewer returns "Approved" or a list of issues (Critical, Important, Minor)
 
 ## Step 7: Execute Hooks
 
+### Hooks Reference
+
+The five recognized `.stride.md` hook sections, in lifecycle order:
+
+| Hook | Fires | Blocking | Timeout | Purpose |
+|---|---|:---:|---|---|
+| `## before_doing` | After `POST /api/tasks/claim` succeeds | yes | 60s | Pull latest, install deps, ensure clean working tree |
+| `## after_doing` | Before `PATCH /api/tasks/:id/complete` runs | yes | 120s | Run tests, lint, build — quality gate before completion |
+| `## before_review` | After `PATCH /api/tasks/:id/complete` succeeds | yes | 60s | Generate PR, post artifacts, notify reviewers |
+| `## after_review` | After `PATCH /api/tasks/:id/mark_reviewed` succeeds | yes | 60s | Merge, deploy, cleanup |
+| `## after_goal` | After the parent goal's final child task completes | yes | 60s | Project-level rollups, goal-completion notifications, archival |
+
+A missing `## after_goal` section parses as a clean no-op — older `.stride.md` files that predate the section keep working without modification. The plugin's `hooks/stride-hook.sh` and `hooks/stride-hook.ps1` detect the `after_goal` entry in the response payload of `/complete` or `/mark_reviewed` and execute it automatically when present (W783/W784).
+
+### Hook Environment Variables
+
+The server populates `hook.env` and the plugin forwards every key into the child process environment. The variable set differs by hook (`TASK_*` for the four task-scoped hooks, `GOAL_*` for `after_goal`); `BOARD_*`, `COLUMN_*`, `AGENT_NAME`, and `HOOK_NAME` are present across all five.
+
+| Variable | `before_doing` / `after_doing` / `before_review` / `after_review` | `after_goal` |
+|---|:---:|:---:|
+| `HOOK_NAME`, `AGENT_NAME` | ✓ | ✓ |
+| `BOARD_ID`, `BOARD_NAME` | ✓ | ✓ |
+| `COLUMN_ID`, `COLUMN_NAME` | ✓ | ✓ |
+| `TASK_ID`, `TASK_IDENTIFIER`, `TASK_TITLE`, `TASK_DESCRIPTION` | ✓ | — |
+| `TASK_STATUS`, `TASK_COMPLEXITY`, `TASK_PRIORITY`, `TASK_NEEDS_REVIEW` | ✓ | — |
+| `GOAL_ID`, `GOAL_IDENTIFIER`, `GOAL_TITLE`, `GOAL_DESCRIPTION` | — | ✓ |
+
+Server-supplied values are the single source of truth — the plugin does not invent, derive, or look up any of these client-side. A key the server omits is exported as an empty string (defined-but-empty), never raised as an error.
+
+### Canonical Hook Examples
+
+The hooks are general-purpose — any shell command is fair game. The examples below are common starting points, not the only valid uses.
+
+````markdown
+## before_review
+
+```bash
+gh pr create \
+  --title "$TASK_IDENTIFIER: $TASK_TITLE" \
+  --body "Implements $TASK_IDENTIFIER."
+```
+
+## after_goal
+
+```bash
+gh pr create \
+  --title "$GOAL_IDENTIFIER: $GOAL_TITLE" \
+  --body "Rolls up the completed goal $GOAL_IDENTIFIER ($GOAL_TITLE)."
+```
+````
+
+`## after_goal` is not coupled to PR creation. Other valid uses include posting to Slack with `curl`, archiving artifacts, kicking off a release pipeline, or running a project-level smoke test.
+
+### Automatic Hook Execution
+
 Hooks fire automatically when you make the completion API call in Step 8:
 - **`BeforeTool`** fires `after_doing` BEFORE the call executes (blocks if it fails)
 - **`AfterTool`** fires `before_review` AFTER the call succeeds
@@ -358,6 +413,27 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 3. **Loop back to Step 1** -- claim the next task and repeat the full workflow
 
 **Do not ask the user whether to continue. Do not ask "Should I claim the next task?" Just proceed.**
+
+### If this completion finishes the parent goal's last child task
+
+When the just-completed task is the **final child of a parent goal**, the server bundles a fifth `after_goal` entry in the response of `/complete` (when `needs_review=false`) or `/mark_reviewed` (when `needs_review=true`), alongside the primary hooks. The plugin's hook bridge auto-detects this entry and executes the local `## after_goal` section as a blocking hook (same shape as `after_doing` / `before_review`).
+
+The hook captures `{exit_code, output, duration_ms}` and emits the structured result on stdout. To flip the parent goal to Done, the agent must then POST that result:
+
+```bash
+curl -X PATCH "$STRIDE_API_URL/api/tasks/$GOAL_ID/after_goal" \
+  -H "Authorization: Bearer $STRIDE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "$AFTER_GOAL_RESULT_JSON"
+```
+
+`$GOAL_ID` is supplied in the hook's `GOAL_ID` / `GOAL_IDENTIFIER` env vars (see Step 7's env-var matrix). A `2xx` with `exit_code == 0` transitions the goal to Done. A `2xx` with `exit_code != 0` records the failure on the goal's `after_goal_attempts` audit log and leaves the goal In Progress for the user to investigate.
+
+**Back-compat (for older agent runtimes):**
+
+- If `.stride.md` has no `## after_goal` section, the hook bridge silently no-ops. The server's grace-window worker promotes the goal to Done automatically after the configured wait.
+- If the agent doesn't POST the result at all (older plugin versions), the same grace-window worker covers the gap. The goal transitions to Done after the wait expires with a synthetic attempt tagged `source: "after_goal_grace_worker"`.
+- The `## after_goal` hook is general-purpose — Slack notifications, artifact archival, release pipelines, project-level smoke tests are all valid uses. See Step 7's "Canonical Hook Examples".
 
 ### Clearing the Orchestrator Activation Marker
 
