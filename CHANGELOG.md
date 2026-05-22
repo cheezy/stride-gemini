@@ -2,6 +2,35 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.11.0] - 2026-05-22
+
+### Added
+
+- **`## after_goal` hook section** — fifth `.stride.md` hook, fires after the parent goal's final child task completes. Blocking, 60s timeout, same single-bash-fence parsing rule as the four existing hooks. The plugin's `hooks/stride-hook.sh` and `hooks/stride-hook.ps1` now inspect the response payload of `/complete` and `/mark_reviewed` for an `after_goal` entry and execute the local `## after_goal` section as a blocking hook when present. Missing section is a clean no-op (back-compat). Structured failure JSON surfaces on stdout for the agent to forward via `PATCH /api/tasks/:goal_id/after_goal` per the Stride server contract. Implemented as W783 / W784.
+- **`GOAL_*` env vars** — `GOAL_ID`, `GOAL_IDENTIFIER`, `GOAL_TITLE`, `GOAL_DESCRIPTION` forwarded by the hook bridge into the `## after_goal` child process environment, sourced verbatim from the server-supplied `hook.env`. `BOARD_*`, `COLUMN_*`, `AGENT_NAME`, and `HOOK_NAME` remain present across all five hooks.
+- **`skills/stride-workflow/SKILL.md`** (W786) — Step 7 (Execute Hooks) opens with a Hooks Reference table listing all five hooks (timing/blocking/timeout/purpose), followed by a Hook Environment Variables matrix (`TASK_*` vs `GOAL_*` per hook) and a Canonical Hook Examples block. Step 9 (Post-Completion Decision) gains a subsection describing the goal-Done transition triggered by `after_goal` success and the agent's `PATCH /api/tasks/:goal_id/after_goal` POST contract. Examples explicitly note the hook is general-purpose (Slack notifications, artifact archival, release pipelines, project-level smoke tests are all valid uses).
+- **`hooks/test-stride-hook.sh`** and **`hooks/test-stride-hook.ps1`** (W785) — End-to-end test coverage for the new routing. Each harness adds five cases (four required scenarios + mark_reviewed parity). Bash suite now reports 117/0 (100 prior + 17 new in Group 8). PowerShell suite mirrored in Group 7.
+
+### Gemini-specific adaptations preserved
+
+The `run_stride_section` helper introduced for after_goal routing keeps two pre-existing gemini conventions intact: (1) `finalize_after_doing` is gated explicitly on the section being `after_doing` (gemini gates at every call site rather than inside the function), and (2) the plain-text JSON fallback when `$HAS_JQ=false` is routed to stderr (not stdout) per gemini's "JSON-only stdout" contract.
+
+### Backward compatibility
+
+A `.stride.md` without a `## after_goal` section continues to work unchanged — the new routing code is a clean no-op for that case. The four existing hook routes produce byte-identical output (empirically confirmed by all 100 pre-existing tests passing unchanged after the parse-and-exec refactor). Older agent runtimes that don't speak the after_goal protocol — including those that don't make the PATCH POST — are covered by the server-side grace-window worker.
+
+### Migration
+
+Install or update via your normal stride-gemini install flow. No `.stride.md`, `.stride_auth.md`, or `.gitignore` changes are required. To opt into the new hook, add a `## after_goal` section to `.stride.md`. The receiving Stride server must include the `PATCH /api/tasks/:id/after_goal` endpoint for agent reports to land.
+
+### Note on the v1.10.0 gap
+
+Commit `c3da0d8 Release 1.10.0` (per-file diff capture, W732) was committed but never tagged on origin. This v1.11.0 release captures both the v1.10.0 prepared work AND the new after_goal feature, so installing v1.11.0 picks up both.
+
+### Source
+
+G163 / W783 (bash routing), W784 (PowerShell mirror), W785 (end-to-end tests), W786 (SKILL.md), W787 (this release). Pattern mirrors the Claude plugin's v1.17.1 release (https://github.com/cheezy/stride/releases/tag/v1.17.1) — the after_goal feature shipped first on the Claude plugin and is being ported to the other Stride agent plugins.
+
 ## [1.10.0] - 2026-05-20
 
 ### Added

@@ -145,6 +145,11 @@ mix deps.get
 ## after_doing
 mix test
 mix credo --strict
+
+## after_goal
+# Optional fifth hook — fires after the parent goal's final child task
+# completes. Omit the section entirely for the back-compat no-op path.
+./scripts/notify-team.sh "$GOAL_IDENTIFIER" "$GOAL_TITLE"
 ```
 
 ## Automatic Hook Execution
@@ -157,8 +162,10 @@ The extension includes automatic hook execution via `hooks.json`. When installed
 |----------------|----------------|--------------|--------|
 | `POST /api/tasks/claim` | `before_doing` | `AfterTool` | After claim succeeds |
 | `PATCH /api/tasks/:id/complete` | `after_doing` | `BeforeTool` | Before completion runs (blocks on failure) |
-| `PATCH /api/tasks/:id/complete` | `before_review` | `AfterTool` | After completion succeeds |
-| `PATCH /api/tasks/:id/mark_reviewed` | `after_review` | `AfterTool` | After review succeeds |
+| `PATCH /api/tasks/:id/complete` | `before_review` (+ `after_goal` if bundled) | `AfterTool` | After completion succeeds |
+| `PATCH /api/tasks/:id/mark_reviewed` | `after_review` (+ `after_goal` if bundled) | `AfterTool` | After review succeeds |
+
+**`after_goal` (v1.11.0+):** the server bundles an `after_goal` entry alongside the primary hook in the response of `/complete` or `/mark_reviewed` when the completing task is the final child of a parent goal. The extension auto-executes the local `## after_goal` section as a blocking hook (60s timeout, same shape as `after_doing`) and emits a structured result on stdout. The agent forwards the result via `PATCH /api/tasks/:goal_id/after_goal` to flip the goal to Done. A missing `## after_goal` section is a clean no-op (back-compat). The hook receives `GOAL_ID` / `GOAL_IDENTIFIER` / `GOAL_TITLE` / `GOAL_DESCRIPTION` env vars from the server's `hook.env`, and is general-purpose — Slack notifications, artifact archival, release pipelines, project-level smoke tests are all valid uses, not just PR creation.
 
 ### .stride.md Format
 
