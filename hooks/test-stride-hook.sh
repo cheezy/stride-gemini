@@ -1237,6 +1237,169 @@ NEW
 fi
 
 # ============================================================
+# Test Group 8: after_goal end-to-end routing (W785)
+# ============================================================
+# Covers the four required after_goal scenarios end-to-end (full script
+# subprocess), exercising the W783 routing changes in stride-hook.sh.
+echo ""
+echo "=== Test Group 8: after_goal end-to-end routing (W785) ==="
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "  SKIP: jq missing — Group 8 requires jq for response parsing"
+else
+  AG_E2E_PROJ="$TMPDIR_TEST/after-goal-e2e"
+  mkdir -p "$AG_E2E_PROJ"
+  cat > "$AG_E2E_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "before_doing_ran"
+```
+
+## after_doing
+```bash
+echo "after_doing_ran"
+```
+
+## before_review
+```bash
+echo "before_review_ran"
+```
+
+## after_review
+```bash
+echo "after_review_ran"
+```
+
+## after_goal
+```bash
+echo "after_goal_ran for $GOAL_IDENTIFIER"
+```
+STRIDE
+
+  ag_e2e_input() {
+    local primary_command="$1"
+    local hooks_json="$2"
+    local inner_json
+    inner_json=$(jq -nc --argjson hooks "$hooks_json" '{data: {id: 99}, hooks: $hooks}')
+    jq -nc \
+      --arg cmd "$primary_command" \
+      --arg inner "$inner_json" \
+      '{tool_input: {command: $cmd}, tool_response: {stdout: $inner}}'
+  }
+
+  # 8a: after_goal entry in response + ## after_goal section present.
+  AG_E2E_INPUT_PRESENT=$(ag_e2e_input \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete" \
+    '[{"name":"after_doing"},{"name":"before_review"},{"name":"after_review"},{"name":"after_goal"}]')
+  AG_E2E_OUT_PRESENT=$(echo "$AG_E2E_INPUT_PRESENT" | CLAUDE_PROJECT_DIR="$AG_E2E_PROJ" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  AG_E2E_RC_PRESENT=$?
+  assert_exit "8a: end-to-end after_goal present exits 0" 0 "$AG_E2E_RC_PRESENT"
+  assert_contains "8a: primary before_review ran" "before_review_ran" "$AG_E2E_OUT_PRESENT"
+  assert_contains "8a: after_goal section ran" "after_goal_ran" "$AG_E2E_OUT_PRESENT"
+  assert_contains "8a: structured success JSON for after_goal on stdout" \
+    '"hook": "after_goal"' "$AG_E2E_OUT_PRESENT"
+
+  # 8b: after_goal entry in response + ## after_goal section ABSENT (back-compat).
+  AG_E2E_PROJ_MISSING="$TMPDIR_TEST/after-goal-e2e-missing"
+  mkdir -p "$AG_E2E_PROJ_MISSING"
+  cat > "$AG_E2E_PROJ_MISSING/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "before_doing_ran"
+```
+
+## after_doing
+```bash
+echo "after_doing_ran"
+```
+
+## before_review
+```bash
+echo "before_review_ran"
+```
+
+## after_review
+```bash
+echo "after_review_ran"
+```
+STRIDE
+  AG_E2E_OUT_MISSING=$(echo "$AG_E2E_INPUT_PRESENT" | CLAUDE_PROJECT_DIR="$AG_E2E_PROJ_MISSING" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  AG_E2E_RC_MISSING=$?
+  assert_exit "8b: end-to-end after_goal-missing-section exits 0 (back-compat)" 0 \
+    "$AG_E2E_RC_MISSING"
+  assert_contains "8b: primary before_review still ran" "before_review_ran" "$AG_E2E_OUT_MISSING"
+  if echo "$AG_E2E_OUT_MISSING" | grep -qF '"hook": "after_goal"'; then
+    echo -e "  ${RED}FAIL${RESET}: 8b: missing ## after_goal should emit no after_goal JSON"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 8b: missing ## after_goal emits no after_goal JSON"
+    PASS=$((PASS + 1))
+  fi
+
+  # 8c: after_goal NOT in response -> behavior unchanged.
+  AG_E2E_INPUT_ABSENT=$(ag_e2e_input \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/complete" \
+    '[{"name":"after_doing"},{"name":"before_review"},{"name":"after_review"}]')
+  AG_E2E_OUT_ABSENT=$(echo "$AG_E2E_INPUT_ABSENT" | CLAUDE_PROJECT_DIR="$AG_E2E_PROJ" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  AG_E2E_RC_ABSENT=$?
+  assert_exit "8c: end-to-end after_goal-absent exits 0" 0 "$AG_E2E_RC_ABSENT"
+  assert_contains "8c: primary before_review ran" "before_review_ran" "$AG_E2E_OUT_ABSENT"
+  if echo "$AG_E2E_OUT_ABSENT" | grep -qF "after_goal_ran"; then
+    echo -e "  ${RED}FAIL${RESET}: 8c: after_goal absent should NOT execute the section"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 8c: after_goal absent does not execute the section"
+    PASS=$((PASS + 1))
+  fi
+
+  # 8d: after_goal section command exits non-zero -> structured failure JSON
+  # on stdout; script exit code stays 0.
+  AG_E2E_PROJ_FAIL="$TMPDIR_TEST/after-goal-e2e-fail"
+  mkdir -p "$AG_E2E_PROJ_FAIL"
+  cat > "$AG_E2E_PROJ_FAIL/.stride.md" << 'STRIDE'
+## before_review
+```bash
+echo "before_review_ran"
+```
+
+## after_review
+```bash
+echo "after_review_ran"
+```
+
+## after_goal
+```bash
+bash -c 'exit 11'
+```
+STRIDE
+  AG_E2E_OUT_FAIL=$(echo "$AG_E2E_INPUT_PRESENT" | CLAUDE_PROJECT_DIR="$AG_E2E_PROJ_FAIL" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  AG_E2E_RC_FAIL=$?
+  assert_exit "8d: end-to-end after_goal-failure does not propagate as script exit" 0 \
+    "$AG_E2E_RC_FAIL"
+  assert_contains "8d: structured failed JSON references after_goal on stdout" \
+    '"hook": "after_goal"' "$AG_E2E_OUT_FAIL"
+  assert_contains "8d: structured failed JSON has status:failed" \
+    '"status": "failed"' "$AG_E2E_OUT_FAIL"
+  assert_contains "8d: structured failed JSON carries non-zero exit_code" \
+    '"exit_code": 11' "$AG_E2E_OUT_FAIL"
+
+  # 8e: mark_reviewed URL also routes after_goal.
+  AG_E2E_INPUT_MR=$(ag_e2e_input \
+    "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed" \
+    '[{"name":"after_review"},{"name":"after_goal"}]')
+  AG_E2E_OUT_MR=$(echo "$AG_E2E_INPUT_MR" | CLAUDE_PROJECT_DIR="$AG_E2E_PROJ" \
+    bash "$HOOK_SCRIPT" post 2>&1)
+  AG_E2E_RC_MR=$?
+  assert_exit "8e: end-to-end after_goal on mark_reviewed exits 0" 0 "$AG_E2E_RC_MR"
+  assert_contains "8e: mark_reviewed runs after_review" "after_review_ran" "$AG_E2E_OUT_MR"
+  assert_contains "8e: mark_reviewed runs after_goal" "after_goal_ran" "$AG_E2E_OUT_MR"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
