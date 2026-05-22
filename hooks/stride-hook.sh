@@ -208,9 +208,203 @@ finalize_after_doing() {
   fi
 }
 
+# --- Parse and execute one .stride.md hook section ---
+# Takes a single section name (e.g. "before_doing", "after_goal") and:
+#   1. Parses the first `## <section>` block from .stride.md (first-wins,
+#      single ```bash fence, identical to the four-hook routes).
+#   2. Returns 0 immediately when the section is missing OR the fenced body
+#      is empty — back-compat no-op. The finalize_after_doing snapshot
+#      write only fires when the section IS "after_doing" so calls for
+#      "after_goal" don't trigger an unrelated snapshot.
+#   3. Otherwise executes each command sequentially; on the first non-zero
+#      exit, emits the structured failed-JSON (or the plain-text fallback
+#      when $HAS_JQ=false, routed to stderr per Gemini's JSON-only stdout
+#      contract) and returns 2.
+#   4. On all-success, emits the structured success-JSON (jq-only) and
+#      returns 0.
+# Placed alongside capture_changed_files / finalize_after_doing so tests
+# can source the script and invoke the function in isolation.
+run_stride_section() {
+  local _section="$1"
+  local _commands=""
+  local _found=0
+  local _capture=0
+  local _line _heading
+
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in
+      "## "*)
+        [ "$_found" -eq 1 ] && break
+        _heading="${_line#\#\# }"
+        _heading="${_heading%"${_heading##*[![:space:]]}"}"
+        [ "$_heading" = "$_section" ] && _found=1
+        continue
+        ;;
+    esac
+    if [ "$_found" -eq 1 ]; then
+      case "$_line" in
+        '```bash'*) _capture=1; continue ;;
+        '```'*)     [ "$_capture" -eq 1 ] && break; continue ;;
+      esac
+      [ "$_capture" -eq 1 ] && _commands="${_commands}${_line}
+"
+    fi
+  done < "$STRIDE_MD"
+
+  if [ -z "$_commands" ]; then
+    [ "$_section" = "after_doing" ] && finalize_after_doing
+    return 0
+  fi
+
+  local _cmd _trimmed
+  local _cmd_list
+  _cmd_list=()
+  while IFS= read -r _cmd; do
+    _trimmed="${_cmd#"${_cmd%%[![:space:]]*}"}"
+    [ -z "$_trimmed" ] && continue
+    case "$_trimmed" in \#*) continue ;; esac
+    _cmd_list+=("$_trimmed")
+  done <<< "$_commands"
+
+  if [ ${#_cmd_list[@]} -eq 0 ]; then
+    [ "$_section" = "after_doing" ] && finalize_after_doing
+    return 0
+  fi
+
+  cd "$PROJECT_DIR"
+  local _completed_file
+  _completed_file=$(mktemp)
+  local _start_secs
+  _start_secs=$(date +%s)
+  local _cmd_index=0
+  local _cmd_total=${#_cmd_list[@]}
+  local _cmd_stdout_file _cmd_stderr_file _cmd_exit _cmd_stdout _cmd_stderr
+  local _remaining_file _completed_json _remaining_json _end_secs _duration _i
+
+  for _trimmed in "${_cmd_list[@]}"; do
+    _cmd_stdout_file=$(mktemp)
+    _cmd_stderr_file=$(mktemp)
+
+    set +uo pipefail
+    eval "$_trimmed" > "$_cmd_stdout_file" 2> "$_cmd_stderr_file"
+    _cmd_exit=$?
+    set -uo pipefail
+
+    if [ "$_cmd_exit" -eq 0 ]; then
+      echo "$_trimmed" >> "$_completed_file"
+      # Gemini requires JSON-only stdout — command output goes to stderr.
+      cat "$_cmd_stdout_file" >&2
+      cat "$_cmd_stderr_file" >&2
+    else
+      _cmd_stdout=$(tail -50 "$_cmd_stdout_file")
+      _cmd_stderr=$(tail -50 "$_cmd_stderr_file")
+      rm -f "$_cmd_stdout_file" "$_cmd_stderr_file"
+
+      _remaining_file=$(mktemp)
+      if [ $((_cmd_index + 1)) -lt $_cmd_total ]; then
+        for ((_i = _cmd_index + 1; _i < _cmd_total; _i++)); do
+          echo "${_cmd_list[$_i]}" >> "$_remaining_file"
+        done
+      fi
+
+      if [ "$HAS_JQ" = "true" ]; then
+        _completed_json=$(jq -R . < "$_completed_file" | jq -s . 2>/dev/null || echo "[]")
+        _remaining_json=$(jq -R . < "$_remaining_file" | jq -s . 2>/dev/null || echo "[]")
+
+        jq -n \
+          --arg hook "$_section" \
+          --arg failed "$_trimmed" \
+          --argjson index "$_cmd_index" \
+          --argjson exit_code "$_cmd_exit" \
+          --arg stdout "$_cmd_stdout" \
+          --arg stderr "$_cmd_stderr" \
+          --argjson completed "$_completed_json" \
+          --argjson remaining "$_remaining_json" \
+          '{
+            hook: $hook,
+            status: "failed",
+            failed_command: $failed,
+            command_index: $index,
+            exit_code: $exit_code,
+            stdout: $stdout,
+            stderr: $stderr,
+            commands_completed: $completed,
+            commands_remaining: $remaining
+          }'
+      else
+        # Gemini-specific: plain-text fallback goes to stderr, never stdout.
+        echo "HOOK=$_section STATUS=failed COMMAND=$_trimmed EXIT=$_cmd_exit" >&2
+      fi
+
+      echo "Stride $_section hook failed on command $((_cmd_index + 1))/$_cmd_total: $_trimmed" >&2
+      [ -n "$_cmd_stderr" ] && echo "$_cmd_stderr" >&2
+      rm -f "$_completed_file" "$_remaining_file"
+      return 2
+    fi
+
+    rm -f "$_cmd_stdout_file" "$_cmd_stderr_file"
+    _cmd_index=$((_cmd_index + 1))
+  done
+
+  _end_secs=$(date +%s)
+  _duration=$((_end_secs - _start_secs))
+
+  if [ "$HAS_JQ" = "true" ]; then
+    _completed_json=$(jq -R . < "$_completed_file" | jq -s . 2>/dev/null || echo "[]")
+
+    jq -n \
+      --arg hook "$_section" \
+      --argjson duration "$_duration" \
+      --argjson completed "$_completed_json" \
+      '{
+        hook: $hook,
+        status: "success",
+        commands_completed: $completed,
+        duration_seconds: $duration
+      }'
+  fi
+
+  rm -f "$_completed_file"
+
+  # Snapshot capture is gated on the section being after_doing — matches
+  # gemini's pre-W783 convention of guarding at every finalize call site.
+  [ "$_section" = "after_doing" ] && finalize_after_doing
+
+  return 0
+}
+
+# Detect an `after_goal` entry in the response's `hooks` array. Handles
+# Claude/Gemini-style wrapped form (`tool_response.stdout` is a JSON
+# string) and raw-API-JSON form. Returns 0 when an entry with
+# name == "after_goal" is found, 1 otherwise. Gated on $HAS_JQ —
+# environments without jq cannot parse the response and degrade cleanly.
+response_has_after_goal() {
+  local _hook_input="$1"
+  local _response _payload
+
+  [ "$HAS_JQ" = "true" ] || return 1
+  [ -n "$_hook_input" ] || return 1
+
+  _response=$(echo "$_hook_input" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
+  [ -n "$_response" ] || return 1
+
+  if echo "$_response" | jq -e 'type == "object" and has("stdout")' > /dev/null 2>&1; then
+    _payload=$(echo "$_response" | jq -r '.stdout // ""' 2>/dev/null)
+  else
+    _payload="$_response"
+  fi
+
+  [ -n "$_payload" ] || return 1
+
+  echo "$_payload" \
+    | jq -e '(.hooks // []) | map(select(.name == "after_goal")) | length > 0' \
+        > /dev/null 2>&1
+}
+
 # Exit early if no phase argument or no .stride.md. Placed AFTER the
-# capture_changed_files definition so tests can source this script to use the
-# function in isolation.
+# capture_changed_files, finalize_after_doing, run_stride_section, and
+# response_has_after_goal definitions so tests can source this script to
+# use the functions in isolation.
 if [ -z "$PHASE" ]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -334,163 +528,34 @@ if [ -f "$ENV_CACHE" ]; then
   set +a
 fi
 
-# --- Parse .stride.md for the hook section ---
-# Extracts lines from the first ```bash code block under ## <hook_name>
-# Uses pure bash to avoid awk/sed dependency (not available on all platforms)
-COMMANDS=""
-_found=0
-_capture=0
-while IFS= read -r _line || [ -n "$_line" ]; do
-  # Check for ## heading
-  case "$_line" in
-    "## "*)
-      [ "$_found" -eq 1 ] && break
-      _section="${_line#\#\# }"
-      # Trim trailing whitespace
-      _section="${_section%"${_section##*[![:space:]]}"}"
-      [ "$_section" = "$HOOK_NAME" ] && _found=1
-      continue
+# --- Execute the primary hook ---
+# run_stride_section emits structured JSON itself and (for after_doing) writes
+# the per-file diff snapshot via finalize_after_doing. Failure exits 2 here
+# to preserve the existing PreToolUse blocking semantic for after_doing.
+run_stride_section "$HOOK_NAME"
+PRIMARY_RC=$?
+
+if [ "$PRIMARY_RC" -ne 0 ]; then
+  exit "$PRIMARY_RC"
+fi
+
+# --- After-goal routing (W783 / mirrors stride v1.17.1 W504) ---
+# When the server bundles an `after_goal` entry in the response of /complete
+# or /mark_reviewed, run the local `## after_goal` section as a blocking
+# hook. Missing `## after_goal` in .stride.md is a clean no-op. Non-zero
+# exits surface via the same structured JSON shape as the primary hook;
+# we do NOT propagate as a non-zero script exit because the primary curl
+# already succeeded — failure is captured in stdout for the agent to
+# forward via PATCH /api/tasks/:goal_id/after_goal.
+if [ "$PHASE" = "post" ]; then
+  case "$COMMAND" in
+    */api/tasks/*/complete*|*/api/tasks/*/mark_reviewed*)
+      if response_has_after_goal "$INPUT"; then
+        run_stride_section "after_goal" || true
+      fi
       ;;
   esac
-  if [ "$_found" -eq 1 ]; then
-    case "$_line" in
-      '```bash'*) _capture=1; continue ;;
-      '```'*)     [ "$_capture" -eq 1 ] && break; continue ;;
-    esac
-    [ "$_capture" -eq 1 ] && COMMANDS="${COMMANDS}${_line}
-"
-  fi
-done < "$STRIDE_MD"
-
-# No commands for this hook — exit cleanly. after_doing still needs to write
-# the changed-files snapshot so /complete sees a populated array.
-if [ -z "$COMMANDS" ]; then
-  [ "$HOOK_NAME" = "after_doing" ] && finalize_after_doing
-  exit 0
 fi
-
-# --- Build command list for tracking ---
-# Split commands into an array for structured output
-CMD_LIST=()
-while IFS= read -r cmd; do
-  trimmed="${cmd#"${cmd%%[![:space:]]*}"}"
-  [ -z "$trimmed" ] && continue
-  case "$trimmed" in \#*) continue ;; esac
-  CMD_LIST+=("$trimmed")
-done <<< "$COMMANDS"
-
-# Nothing to execute after filtering — but after_doing still needs to write
-# the changed-files snapshot (e.g. an all-commented after_doing block).
-if [ ${#CMD_LIST[@]} -eq 0 ]; then
-  [ "$HOOK_NAME" = "after_doing" ] && finalize_after_doing
-  exit 0
-fi
-
-# --- Execute commands with structured output ---
-# Use temp files instead of bash arrays to avoid set -u issues with empty arrays
-cd "$PROJECT_DIR"
-COMPLETED_FILE=$(mktemp)
-START_SECS=$(date +%s)
-CMD_INDEX=0
-CMD_TOTAL=${#CMD_LIST[@]}
-
-for trimmed in "${CMD_LIST[@]}"; do
-  # Capture stdout and stderr separately
-  CMD_STDOUT_FILE=$(mktemp)
-  CMD_STDERR_FILE=$(mktemp)
-
-  # Relax `set -u` and `pipefail` for the user's command so a reference to an
-  # unset env var (e.g. $TASK_IDENTIFIER when env-cache failed to write) doesn't
-  # silently abort the eval before the actual command runs.
-  set +uo pipefail
-  eval "$trimmed" > "$CMD_STDOUT_FILE" 2> "$CMD_STDERR_FILE"
-  CMD_EXIT=$?
-  set -uo pipefail
-
-  if [ "$CMD_EXIT" -eq 0 ]; then
-    echo "$trimmed" >> "$COMPLETED_FILE"
-    # Print command output to stderr (Gemini requires JSON-only stdout)
-    cat "$CMD_STDOUT_FILE" >&2
-    cat "$CMD_STDERR_FILE" >&2
-  else
-    CMD_STDOUT=$(tail -50 "$CMD_STDOUT_FILE")
-    CMD_STDERR=$(tail -50 "$CMD_STDERR_FILE")
-    rm -f "$CMD_STDOUT_FILE" "$CMD_STDERR_FILE"
-
-    # Build remaining commands as a temp file
-    REMAINING_FILE=$(mktemp)
-    if [ $((CMD_INDEX + 1)) -lt $CMD_TOTAL ]; then
-      for ((i = CMD_INDEX + 1; i < CMD_TOTAL; i++)); do
-        echo "${CMD_LIST[$i]}" >> "$REMAINING_FILE"
-      done
-    fi
-
-    # Emit structured JSON on stdout for Gemini to parse
-    if [ "$HAS_JQ" = "true" ]; then
-      COMPLETED_JSON=$(jq -R . < "$COMPLETED_FILE" | jq -s . 2>/dev/null || echo "[]")
-      REMAINING_JSON=$(jq -R . < "$REMAINING_FILE" | jq -s . 2>/dev/null || echo "[]")
-
-      jq -n \
-        --arg hook "$HOOK_NAME" \
-        --arg failed "$trimmed" \
-        --argjson index "$CMD_INDEX" \
-        --argjson exit_code "$CMD_EXIT" \
-        --arg stdout "$CMD_STDOUT" \
-        --arg stderr "$CMD_STDERR" \
-        --argjson completed "$COMPLETED_JSON" \
-        --argjson remaining "$REMAINING_JSON" \
-        '{
-          hook: $hook,
-          status: "failed",
-          failed_command: $failed,
-          command_index: $index,
-          exit_code: $exit_code,
-          stdout: $stdout,
-          stderr: $stderr,
-          commands_completed: $completed,
-          commands_remaining: $remaining
-        }'
-    else
-      # Fallback: plain text to stderr (Gemini requires JSON-only stdout)
-      echo "HOOK=$HOOK_NAME STATUS=failed COMMAND=$trimmed EXIT=$CMD_EXIT" >&2
-    fi
-
-    # Human-readable error on stderr for Gemini's feedback
-    echo "Stride $HOOK_NAME hook failed on command $((CMD_INDEX + 1))/$CMD_TOTAL: $trimmed" >&2
-    [ -n "$CMD_STDERR" ] && echo "$CMD_STDERR" >&2
-    rm -f "$COMPLETED_FILE" "$REMAINING_FILE"
-    exit 2
-  fi
-
-  rm -f "$CMD_STDOUT_FILE" "$CMD_STDERR_FILE"
-  CMD_INDEX=$((CMD_INDEX + 1))
-done
-
-# --- Success output ---
-END_SECS=$(date +%s)
-DURATION=$((END_SECS - START_SECS))
-
-if [ "$HAS_JQ" = "true" ]; then
-  COMPLETED_JSON=$(jq -R . < "$COMPLETED_FILE" | jq -s . 2>/dev/null || echo "[]")
-
-  jq -n \
-    --arg hook "$HOOK_NAME" \
-    --argjson duration "$DURATION" \
-    --argjson completed "$COMPLETED_JSON" \
-    '{
-      hook: $hook,
-      status: "success",
-      commands_completed: $completed,
-      duration_seconds: $duration
-    }'
-fi
-
-rm -f "$COMPLETED_FILE"
-
-# Write the per-file diff snapshot after the after_doing block succeeds. The
-# subsequent /complete curl reads the file inline via cat-in-jq so reviewers
-# see uncommitted edits and untracked-new files in /review.
-[ "$HOOK_NAME" = "after_doing" ] && finalize_after_doing
 
 # Clean up env cache and changed-files snapshot after the final hook in the
 # lifecycle so the next task starts from a clean slate.
