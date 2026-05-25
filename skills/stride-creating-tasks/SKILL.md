@@ -23,6 +23,19 @@ The task API requires specific field formats that are ONLY documented here:
 
 **Attempting to create a task from memory results in malformed fields** that cause either API 422 errors or tasks that waste 3+ hours during implementation.
 
+## ⚠️ REVIEW QUEUE SCORING — THESE FOUR FIELDS ARE FIRST-CLASS DELIVERABLES ⚠️
+
+The **review_queue dashboard** scores every completed task on these four fields:
+
+- `acceptance_criteria`
+- `testing_strategy`
+- `pitfalls`
+- `patterns_to_follow`
+
+**If you omit any of them, the review_queue renders an empty pill for that field** — and the task is flagged as under-specified to every reviewer who opens it. Empty pills are visible, public, and persistent. They do not get back-filled later.
+
+Treat these four fields the same as `title` and `type`: not optional, not "I'll add it later," not "the agent will figure it out." If a field is genuinely not applicable (e.g. a doc-only task has no `testing_strategy.unit_tests`), populate it with the specific reason — never leave it null.
+
 ## Overview
 
 **Minimal tasks = 3+ hours wasted exploration. Rich tasks = 30 minutes focused implementation.**
@@ -202,8 +215,12 @@ Use array indices since identifiers don't exist yet - see stride-creating-goals 
 - "This is self-explanatory"
 - "I'll add details later if needed"
 - "Just need title and description"
+- "I'll skip acceptance_criteria — it's obvious from the title"
+- "testing_strategy doesn't really apply to this one"
+- "pitfalls is just nice-to-have, I'll come back to it"
+- "patterns_to_follow can stay empty — the agent has the codebase"
 
-**All of these mean: Add comprehensive details NOW.**
+**All of these mean: Add comprehensive details NOW.** The last four also mean: **an empty pill on the review_queue dashboard.**
 
 ## Rationalization Table
 
@@ -214,6 +231,10 @@ Use array indices since identifiers don't exist yet - see stride-creating-goals 
 | "Agent will ask questions" | Breaks flow, causes delays | Back-and-forth wastes 2+ hours |
 | "Add details later" | Never happens | Minimal task sits incomplete |
 | "Time pressure, need quick" | Rich task saves MORE time | Spending 5 min now saves 3 hours later |
+| "acceptance_criteria is obvious from the title" | Reviewers can't grade against a definition that doesn't exist | Empty pill on review_queue + ambiguous "done" |
+| "testing_strategy doesn't apply here" | Even doc tasks have verification (render, link-check, grep) | Empty pill on review_queue + no test gate |
+| "pitfalls is just nice-to-have" | Pitfalls is the cheapest way to prevent the wrong fix | Empty pill on review_queue + repeat mistakes |
+| "patterns_to_follow can stay empty" | Without referenced patterns, the agent invents inconsistent ones | Empty pill on review_queue + style drift |
 
 ## Common Mistakes
 
