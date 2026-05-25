@@ -151,6 +151,46 @@ if (Test-Path $EnvCache) {
     }
 }
 
+# Fire-and-forget upload of the per-file diff snapshot to the Stride server.
+# Mirror of stride-hook.sh's finalize_after_doing PUT path. URL and token are
+# parsed from the intercepted agent completion command in $Command — no new
+# env vars or auth file reads. Silently no-ops if any prerequisite is missing
+# (snapshot file, URL, token, TASK_ID) so behavior degrades to the legacy
+# on-disk-only snapshot.
+function Invoke-FinalizeAfterDoing {
+    if ($HookName -ne 'after_doing') { return }
+    $snapshotPath = Join-Path $ProjectDir '.stride-changed-files.json'
+    if (-not (Test-Path $snapshotPath)) { return }
+
+    $apiBase = ''
+    $token = ''
+    if ($Command -match 'https?://[A-Za-z0-9._-]+(:[0-9]+)?') { $apiBase = $Matches[0] }
+    if ($Command -match 'Bearer\s+([A-Za-z0-9._+/=-]+)') { $token = $Matches[1] }
+
+    $taskId = [System.Environment]::GetEnvironmentVariable('TASK_ID', 'Process')
+    if (-not $apiBase -or -not $token -or -not $taskId) { return }
+
+    try {
+        # Wrap the bare snapshot array as {"changed_files": [...]} so the
+        # server's params['changed_files'] receives the list. A bare top-level
+        # array would land at params['_json'] under Plug.Parsers and persist
+        # as NULL. Construct via hashtable + ConvertTo-Json so PowerShell
+        # handles JSON escaping itself rather than relying on string concat.
+        $snapshotData = Get-Content -Raw -Path $snapshotPath | ConvertFrom-Json
+        if ($null -eq $snapshotData) { $snapshotData = @() }
+        $body = @{ changed_files = @($snapshotData) } | ConvertTo-Json -Depth 100 -Compress
+        Invoke-WebRequest `
+            -Uri "$apiBase/api/tasks/$taskId/changed_files" `
+            -Method Put `
+            -Body $body `
+            -ContentType 'application/json' `
+            -Headers @{ Authorization = "Bearer $token" } `
+            -UseBasicParsing -TimeoutSec 10 -ErrorAction SilentlyContinue | Out-Null
+    } catch {
+        # Fire-and-forget — swallow all errors.
+    }
+}
+
 # --- Parse and execute one .stride.md hook section ---
 # Mirror of stride-hook.sh:run_stride_section. Takes a section name and
 # returns 0 on no-op / all-success, 2 on first failure. Emits structured
@@ -196,7 +236,10 @@ function Invoke-StrideSection {
         }
     }
 
-    if (-not $secCommands.Trim()) { return 0 }
+    if (-not $secCommands.Trim()) {
+        Invoke-FinalizeAfterDoing
+        return 0
+    }
 
     $secCmdList = @()
     foreach ($cmd in ($secCommands -split "`n")) {
@@ -206,7 +249,10 @@ function Invoke-StrideSection {
         $secCmdList += $trimmedCmd
     }
 
-    if ($secCmdList.Count -eq 0) { return 0 }
+    if ($secCmdList.Count -eq 0) {
+        Invoke-FinalizeAfterDoing
+        return 0
+    }
 
     Set-Location $ProjectDir
     $secCompletedCmds = @()
@@ -279,6 +325,10 @@ function Invoke-StrideSection {
 
         $secCmdIndex++
     }
+
+    # Per-file diff snapshot PUT — no-op outside after_doing (gates on the
+    # GLOBAL $HookName, so calling this for "after_goal" does not retrigger).
+    Invoke-FinalizeAfterDoing
 
     $secEndTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $secDuration = $secEndTime - $secStartTime

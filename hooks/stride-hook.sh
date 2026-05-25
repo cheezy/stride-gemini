@@ -194,17 +194,39 @@ ${trunc_marker}"
   rm -f "$jsonl_file"
 }
 
-# Writes the changed-files snapshot to $PROJECT_DIR/.stride-changed-files.json.
-# Invoked from every after_doing exit path (no-commands branch, all-comments
-# branch, and the post-command-loop success branch) so the file exists when
-# the subsequent /complete curl reads it inline. The function is a no-op when
-# TASK_BASE_REF is unset (e.g. the test harness sources the script without
-# claiming a task first).
+# Writes the changed-files snapshot to $PROJECT_DIR/.stride-changed-files.json,
+# then fire-and-forget PUTs it to the Stride server. Invoked from every
+# after_doing exit path (no-commands branch, all-comments branch, and the
+# post-command-loop success branch) so the file exists when the subsequent
+# /complete curl reads it inline. The function is a no-op when TASK_BASE_REF
+# is unset (e.g. the test harness sources the script without claiming a
+# task first). URL and token for the PUT are parsed from the intercepted
+# agent completion command in $COMMAND — no new env vars or auth file reads.
 finalize_after_doing() {
   local snapshot
   if [ -n "${TASK_BASE_REF:-}" ]; then
     snapshot=$(capture_changed_files "${TASK_BASE_REF:-}" 2>/dev/null || printf '[]')
     printf '%s\n' "$snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
+
+    # No-op silently if any prerequisite is missing — preserves the on-disk
+    # snapshot for legacy --argjson cf consumers.
+    if [ "${HAS_JQ:-false}" = "true" ] && command -v curl > /dev/null 2>&1 && [ -n "${TASK_ID:-}" ]; then
+      local _api_base _token
+      _api_base=$(printf '%s' "${COMMAND:-}" | grep -oE 'https?://[A-Za-z0-9._-]+(:[0-9]+)?' | head -n 1 || true)
+      _token=$(printf '%s' "${COMMAND:-}" | grep -oE 'Bearer +[A-Za-z0-9._+/=-]+' | head -n 1 | sed 's/^Bearer  *//' || true)
+      if [ -n "$_api_base" ] && [ -n "$_token" ]; then
+        # Wrap the bare snapshot array as {"changed_files": [...]} so the
+        # server's params['changed_files'] receives the list. A bare top-level
+        # array would land at params['_json'] under Plug.Parsers and persist
+        # as NULL — clearing the existing snapshot (G174 root cause).
+        curl -s -X PUT \
+          -H "Authorization: Bearer $_token" \
+          -H 'Content-Type: application/json' \
+          -d "{\"changed_files\":$(cat "$PROJECT_DIR/.stride-changed-files.json")}" \
+          "$_api_base/api/tasks/$TASK_ID/changed_files" \
+          > /dev/null 2>&1 || true
+      fi
+    fi
   fi
 }
 

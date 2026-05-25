@@ -2,6 +2,33 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.12.0] - 2026-05-25
+
+### Critical fix
+
+- **`hooks/stride-hook.sh`** and **`hooks/stride-hook.ps1`** — `finalize_after_doing` / `Invoke-FinalizeAfterDoing` now PUT the per-file diff snapshot to Stride immediately after writing `.stride-changed-files.json` to disk, with the body shaped as `{"changed_files": [...]}` (G162 + G174 ports from main stride 1.16.0 + 1.17.2 shipped together). URL and Bearer token are extracted from the intercepted agent completion command in `$COMMAND` / `$Command` — no new env vars, no `.stride_auth.md` read. The PUT is fire-and-forget (`-s ... > /dev/null 2>&1 || true` on bash; `try`/`catch` + `-ErrorAction SilentlyContinue` on PS) and silently no-ops when any prerequisite is missing (`HAS_JQ=false`, no `curl`, no `TASK_ID`, no URL/token in the command, no snapshot file on disk). The on-disk snapshot is preserved unchanged for legacy `--argjson cf` consumers on older deployments. **G162 and G174 ship together because the wrap is required for the PUT to work at all** — a bare top-level array lands at `params['_json']` under Plug.Parsers, validates as `{:ok, nil}`, and is persisted as NULL, silently clearing `changed_files`.
+
+### Added
+
+- **`hooks/test-stride-hook.sh`** — New Test Group 9 (W844) — 6 sub-cases covering PUT-success+round-trip (curl stub records the body), no-Bearer-token (PUT skipped, snapshot still written), no-`TASK_ID` (PUT skipped), empty-snapshot (`[]` still PUTs as wrapped `{"changed_files": []}`), PUT-failure (stub exits 1, hook still exits 0, snapshot persists), and `HAS_JQ=false` (PUT skipped via the sourced unit-test path). Bash suite total: 131 passed / 0 failed (117 prior + 14 new).
+- **`hooks/test-stride-hook.ps1`** — New Test Group 8 (W844) — HttpListener-backed PUT-success test (asserts method, path, Authorization header, body content, wrapped-object shape, snapshot round-trip) plus 4 wrapper-resilience cases (unreachable port doesn't propagate, no snapshot file no-ops, no Bearer token no-ops, no `TASK_ID` no-ops).
+
+### Gemini-specific adaptations preserved
+
+The PUT block sits inside the gemini-style `finalize_after_doing` shape — the outer guard remains `TASK_BASE_REF`, and the HOOK_NAME gating happens at the routing layer (`[ "$_section" = "after_doing" ] && finalize_after_doing` at the three after_doing exit paths). The PowerShell mirror gates on `$HookName -eq 'after_doing'` at function entry, matching the main stride contract. No new env vars, no `.stride_auth.md` read — URL+token come exclusively from the intercepted agent completion command.
+
+### Backward compatibility
+
+The wire-shape fix is fully backward-compatible at the server boundary. The four existing `.stride.md` hooks produce byte-identical output to v1.11.0, empirically confirmed by all 117 prior bash tests passing unchanged. The on-disk `.stride-changed-files.json` snapshot is preserved unchanged so legacy `--argjson cf` consumers on older deployments still read it.
+
+### Migration
+
+Install or update via your normal stride-gemini install flow. No `.stride.md`, `.stride_auth.md`, or `.gitignore` changes are required. No marketplace pin update — stride-gemini is not distributed through stride-marketplace. Against pre-1.16.0 Stride servers without the `PUT /api/tasks/:id/changed_files` endpoint, the hook PUT 404s harmlessly (fire-and-forget) and the inline-cat pattern in `stride-completing-tasks/SKILL.md` remains the path that carries the snapshot.
+
+### Source
+
+G162 (auto-PUT — bash port W842, PS port W843, test groups W844) + G174 (wrapped body — folded into W842/W843 since shipping the PUT without the wrap is the broken state that made stride 1.17.2 a critical fix). Mirrors the stride/ 1.16.0 + 1.17.2 releases into the Gemini variant.
+
 ## [1.11.0] - 2026-05-22
 
 ### Added
