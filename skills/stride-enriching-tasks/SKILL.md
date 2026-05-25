@@ -24,6 +24,19 @@ This skill transforms minimal specifications into complete ones by:
 
 **Without enrichment, the implementing agent spends 3+ hours doing this same exploration** in an unfocused way, often missing critical context.
 
+## ⚠️ REVIEW QUEUE SCORING — ENRICHMENT IS THE LAST CHANCE ⚠️
+
+The **review_queue dashboard** scores every completed task on these four fields:
+
+- `acceptance_criteria`
+- `testing_strategy`
+- `pitfalls`
+- `patterns_to_follow`
+
+Enrichment runs **before the claim** — it is the final point at which these can be populated before the task hits Doing. **Whatever you leave empty here will render as an empty pill on the review_queue dashboard at completion**, visible to every reviewer, and the implementing agent will not back-fill them mid-flight.
+
+Treat each of the four as a **mandatory-for-review** output of enrichment, not optional polish. If a field is genuinely not applicable (e.g. doc-only task has no `testing_strategy.unit_tests`), populate it with the specific reason — never leave it null and never bundle the four under a single checklist item.
+
 ## Overview
 
 **Minimal input + codebase exploration = complete task specification. No human round-trips required.**
@@ -158,10 +171,10 @@ Combine all discovered fields into the final task specification.
 - [ ] `key_files` is an array of objects with `file_path`, `note`, `position`
 - [ ] `dependencies` is an array (empty `[]` if none)
 - [ ] `verification_steps` is an array of objects with `step_type`, `step_text`, `position`
-- [ ] `testing_strategy` has `unit_tests`, `integration_tests`, `manual_tests` as arrays of strings
-- [ ] `acceptance_criteria` is a newline-separated string (NOT an array)
-- [ ] `patterns_to_follow` is a newline-separated string (NOT an array)
-- [ ] `pitfalls` is an array of strings
+- [ ] **`acceptance_criteria` is populated** — review_queue-scored; newline-separated string (NOT an array); blank or vague entries score as an empty pill
+- [ ] **`testing_strategy` is populated** — review_queue-scored; object with `unit_tests`, `integration_tests`, `manual_tests` as arrays of strings; empty arrays score as an empty pill
+- [ ] **`pitfalls` is populated** — review_queue-scored; array of strings; an empty array scores as an empty pill
+- [ ] **`patterns_to_follow` is populated** — review_queue-scored; newline-separated string with file references (NOT an array); blank scores as an empty pill
 - [ ] `needs_review` is set to `false`
 - [ ] No invented file paths — every entry is a path located via grep_search, glob, or read_file
 - [ ] All 16 fields above were considered for this task (none silently skipped)
@@ -261,8 +274,12 @@ The following shows a defect task after enrichment. `title`, `type`, and `descri
 - "Exploring the codebase takes too long, I'll guess"
 - "The human can add details later"
 - "This is a simple task, it doesn't need all 15 fields"
+- "I'll leave `acceptance_criteria` blank — the implementing agent will figure out 'done'"
+- "`testing_strategy` doesn't apply to this enrichment — empty object is fine"
+- "`pitfalls` is hard to predict — I'll ship an empty array"
+- "`patterns_to_follow` is optional polish — skip it"
 
-**All of these mean: Run the full enrichment process. Every field saves 15-30 minutes for the implementing agent.**
+**All of these mean: Run the full enrichment process. Every field saves 15-30 minutes for the implementing agent.** The last four also mean: **an empty pill on the review_queue dashboard at completion** — and enrichment is the last chance to prevent it.
 
 ---
 **References:** For the full enrichment procedure with decision logic, edge cases, and common mistakes, see `agents/task-enricher.md`. For the field reference, see `stride-creating-tasks` SKILL.md. For endpoint details, see the [API Reference](https://raw.githubusercontent.com/cheezy/kanban/refs/heads/main/docs/api/README.md).
