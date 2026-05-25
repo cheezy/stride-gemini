@@ -24,6 +24,19 @@ The batch API has a critical format requirement ONLY documented here:
 
 **Attempting to create goals from memory results in 422 errors** from the wrong root key in 80%+ of cases.
 
+## ⚠️ REVIEW QUEUE SCORING — NESTED TASKS ARE NOT EXEMPT ⚠️
+
+The **review_queue dashboard** scores every completed task on these four fields:
+
+- `acceptance_criteria`
+- `testing_strategy`
+- `pitfalls`
+- `patterns_to_follow`
+
+Goals decompose into nested tasks — and **every nested task is graded by the review_queue at completion, exactly like a flat task**. There is no "it's just a subtask" discount. Whatever you leave empty here renders as an empty pill on the dashboard at completion, visible to every reviewer, and the implementing agent will not back-fill it mid-flight.
+
+Treat all four fields as a minimum bar for every nested task you write — not optional polish, not "the goal-level description covers it."
+
 ## Overview
 
 **Flat tasks for simple work. Goals for complex initiatives. Wrong structure = API rejection.**
@@ -213,7 +226,16 @@ When depending on EXISTING tasks already in the system:
 - Specify acceptance_criteria
 - Include patterns_to_follow and pitfalls
 
-**Minimal nested tasks fail the same way as minimal flat tasks** - causing 3+ hour exploration.
+**The four review_queue-scored fields are the minimum bar for every nested task:**
+
+- `acceptance_criteria` — newline-separated string; the implementing agent's definition of done. **Blank → empty pill on the review_queue.**
+- `testing_strategy` — object with `unit_tests`, `integration_tests`, `manual_tests` arrays. **Empty arrays → empty pill on the review_queue.**
+- `pitfalls` — array of "don't do X" strings. **Empty array → empty pill on the review_queue.**
+- `patterns_to_follow` — newline-separated string with file references. **Blank → empty pill on the review_queue.**
+
+These four fields must be filled in on every nested task in the batch — the goal-level `description` does not satisfy any of them.
+
+**Minimal nested tasks fail the same way as minimal flat tasks** — causing 3+ hour exploration AND empty review_queue pills at completion.
 
 ## Red Flags - STOP
 
@@ -222,8 +244,12 @@ When depending on EXISTING tasks already in the system:
 - "Dependencies across goals will work in batch"
 - "I'll skip nested task details - they're just subtasks"
 - "25 hours? I'll just make flat tasks instead of a goal"
+- "I'll leave `acceptance_criteria` blank on the nested tasks — the goal description covers it"
+- "`testing_strategy` is goal-level — I'll skip it on each nested task"
+- "`pitfalls` on a nested task is overkill"
+- "`patterns_to_follow` is for the goal, not its children"
 
-**All of these mean: Use proper goal structure NOW.**
+**All of these mean: Use proper goal structure NOW.** The last four also mean: **empty pills on the review_queue dashboard for every nested task that completes.**
 
 ## Rationalization Table
 
@@ -235,6 +261,10 @@ When depending on EXISTING tasks already in the system:
 | "Simple nested tasks" | Each must follow full task spec | Minimal nested tasks fail same way |
 | "Easier as flat tasks" | Loses structure and coordination | Tasks overlap, no clear dependencies |
 | "Skip goal level details" | Goal needs same care as tasks | Poor goal structure confuses agents |
+| "acceptance_criteria is implied by the goal description" | review_queue grades each nested task on its own acceptance_criteria | Empty pill per nested task + undefined "done" |
+| "testing_strategy is goal-level only" | review_queue grades each nested task's testing_strategy | Empty pill per nested task + no test gate |
+| "pitfalls applies to the goal, not its children" | Nested tasks are graded individually | Empty pill per nested task + repeat mistakes |
+| "patterns_to_follow lives on the goal" | Each nested task carries its own pattern references | Empty pill per nested task + style drift |
 
 ## Common Mistakes
 
