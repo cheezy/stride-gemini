@@ -1,6 +1,7 @@
 ---
 name: stride-completing-tasks
 description: INTERNAL — invoked only by stride:stride-workflow. Do NOT invoke from a user prompt. Contains the completion API contract (PATCH /api/tasks/:id/complete required fields including completion_summary, actual_complexity, after_doing_result, before_review_result, explorer_result, reviewer_result), used during the orchestrator's completion phase.
+skills_version: 1.0
 ---
 
 # Stride: Completing Tasks
@@ -82,7 +83,7 @@ When the user initiates a Stride workflow, they have **already granted blanket p
 
 **If the automatic hooks fail:** The `BeforeTool` hook returns exit code 2 with structured JSON. Fix the issue and retry.
 
-**Check `/hooks panel`** to verify hooks are active.
+Use the Gemini CLI hooks panel to verify hooks are active.
 
 **If the extension is NOT installed:** Fall back to manual hook execution below.
 
@@ -345,7 +346,7 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
        after_doing_result: {exit_code: 0, output: "...", duration_ms: 45678},
        before_review_result: {exit_code: 0, output: "...", duration_ms: 2340},
        explorer_result: {dispatched: true, summary: "...", duration_ms: 12450},
-       reviewer_result: {dispatched: true, summary: "...", duration_ms: 15300, acceptance_criteria_checked: 5, issues_found: 0},
+       reviewer_result: {dispatched: true, duration_ms: 15300, summary: "...", issues_found: 0, acceptance_criteria_checked: 5, schema_version: "1.2", status: "approved", issue_counts: {critical: 0, important: 0, minor: 0}, issues: [], acceptance_criteria: [], project_checks: [], testing_strategy: {status: "passed"}, patterns: {status: "passed"}, pitfalls: {status: "passed"}},
        workflow_steps: [
          {name: "explorer", dispatched: true, duration_ms: 12450},
          {name: "planner", dispatched: true, duration_ms: 8200},
@@ -363,6 +364,7 @@ match the `--arg` / `--argjson` substitutions above):
 ```json
 {
   "agent_name": "Gemini CLI",
+  "skills_version": "1.0",
   "time_spent_minutes": 45,
   "completion_notes": "All tests passing. PR #123 created.",
   "completion_summary": "Brief one-line summary for tracking.",
@@ -389,10 +391,21 @@ match the `--arg` / `--argjson` substitutions above):
   },
   "reviewer_result": {
     "dispatched": true,
-    "summary": "Reviewed the diff against all 5 acceptance criteria and the 3 pitfalls; no issues found",
     "duration_ms": 15300,
+    "summary": "Reviewed the diff against all 5 acceptance criteria and the 3 pitfalls; no issues found",
+    "issues_found": 0,
     "acceptance_criteria_checked": 5,
-    "issues_found": 0
+    "schema_version": "1.2",
+    "status": "approved",
+    "issue_counts": {"critical": 0, "important": 0, "minor": 0},
+    "issues": [],
+    "acceptance_criteria": [
+      {"criterion": "Toggle persists across sessions", "status": "met", "evidence": "lib/foo.ex:142; test/foo_test.exs:88"}
+    ],
+    "project_checks": [],
+    "testing_strategy": {"status": "passed", "note": "Tests cover the new toggle persistence."},
+    "patterns": {"status": "passed", "note": "Follows the existing settings-update pattern."},
+    "pitfalls": {"status": "passed", "note": "No listed pitfall violated."}
   },
   "workflow_steps": [
     {"name": "explorer",       "dispatched": true,  "duration_ms": 12450},
@@ -404,6 +417,20 @@ match the `--arg` / `--argjson` substitutions above):
   ]
 }
 ```
+
+When the `task-reviewer` custom agent was dispatched, `reviewer_result` carries the
+reviewer agent's **structured JSON block** (`schema_version`, `status`,
+`issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]`, and the
+per-section `testing_strategy`/`patterns`/`pitfalls` verdicts — the
+fields the Kanban review queue actually renders) copied verbatim, **merged**
+with the dispatch telemetry (`dispatched: true`, `duration_ms`) and the derived
+legacy summary fields (`issues_found`, `acceptance_criteria_checked`,
+`summary`). Do NOT send only the thin legacy envelope — it strips the issues,
+acceptance verdicts, and code-review checks the reviewer produced. Extract the
+fenced ` ```json ` block per the **`stride-workflow` skill, "Extracting the
+structured review block" (Step 6)**; the block's schema is owned by
+`agents/task-reviewer.md`. The reviewer's full prose+JSON response is
+saved separately as `review_report`.
 
 **Critical:** `after_doing_result`, `before_review_result`, `explorer_result`, `reviewer_result`, and `workflow_steps` are all REQUIRED. The API will reject requests without them.
 
@@ -510,14 +537,49 @@ Every `/complete` call **must** include both `explorer_result` and `reviewer_res
 
 "reviewer_result": {
   "dispatched": true,
-  "summary": "<40+ non-whitespace characters describing what was reviewed>",
   "duration_ms": 8000,
+  "summary": "<40+ non-whitespace characters describing what was reviewed>",
+  "issues_found": 0,
   "acceptance_criteria_checked": 5,
-  "issues_found": 0
+  "schema_version": "1.2",
+  "status": "approved",
+  "issue_counts": {"critical": 0, "important": 0, "minor": 0},
+  "issues": [],
+  "acceptance_criteria": [
+    {"criterion": "<verbatim criterion>", "status": "met", "evidence": "<file:line>"}
+  ],
+  "project_checks": [],
+  "testing_strategy": {"status": "passed", "note": "<rationale>"},
+  "patterns": {"status": "passed", "note": "<rationale>"},
+  "pitfalls": {"status": "passed", "note": "<rationale>"}
 }
 ```
 
-`reviewer_result` additionally requires `acceptance_criteria_checked` and `issues_found` as non-negative integers when `dispatched` is `true`.
+When the `task-reviewer` custom agent was dispatched, `reviewer_result` is the reviewer
+agent's emitted structured JSON block (`schema_version`, `status`,
+`issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]`, and the
+per-section `testing_strategy`/`patterns`/`pitfalls` verdicts) copied
+verbatim and **merged** with the dispatch telemetry plus the derived legacy
+summary fields. The structured fields are what the Kanban review queue renders
+(issue list, acceptance verdicts, code-review checks); omitting them strips the
+review down to a count with no detail. Extract the fenced ` ```json ` block per
+the `stride-workflow` skill's "Extracting the structured review block" (Step 6)
+— that section owns the legacy↔structured field mapping (e.g. `issues_found` =
+the sum of the values in `issue_counts`, `acceptance_criteria_checked` = the
+number of entries in `acceptance_criteria`). The structured block's schema
+itself is owned by `agents/task-reviewer.md`; do not redefine it here. The
+legacy `acceptance_criteria_checked` and `issues_found` integers remain required
+(for back-compat) when `dispatched` is `true`. If the reviewer emitted no
+parseable ` ```json ` fence, fall back to the legacy-only envelope and omit the
+structured keys — never invent them (see the `stride-workflow` Step 6 fallback).
+
+Copy exactly the keys the reviewer agent produced. An approved review still
+emits `issues: []` and `project_checks: []` (the agent emits those arrays
+unconditionally), so the empty arrays in the examples above are real, not
+placeholders. But keys the agent did NOT emit — e.g. per-section
+`testing_strategy`/`patterns`/`pitfalls` verdicts on schema versions that don't
+produce them — must be omitted entirely, not sent as empty placeholders (per
+`stride-workflow` Step 6).
 
 ### Shape 2 — self-reported skip (for decision-matrix skips or no-custom-agent environments)
 
@@ -736,6 +798,7 @@ WITHOUT EXTENSION (manual hooks):
 API ENDPOINT: PATCH /api/tasks/:id/complete
 REQUIRED BODY: {
   "agent_name": "Gemini CLI",
+  "skills_version": "1.0",
   "time_spent_minutes": 45,
   "completion_notes": "...",
   "review_report": "..." (optional — include when task-reviewer ran),
@@ -756,10 +819,19 @@ REQUIRED BODY: {
   },
   "reviewer_result": {
     "dispatched": true,
-    "summary": "<40+ non-whitespace chars>",
     "duration_ms": 8000,
+    "summary": "<40+ non-whitespace chars>",
+    "issues_found": 0,
     "acceptance_criteria_checked": 5,
-    "issues_found": 0
+    "schema_version": "1.2",
+    "status": "approved",
+    "issue_counts": {"critical": 0, "important": 0, "minor": 0},
+    "issues": [],
+    "acceptance_criteria": [{"criterion": "<verbatim>", "status": "met", "evidence": "<file:line>"}],
+    "project_checks": [],
+    "testing_strategy": {"status": "passed"},
+    "patterns": {"status": "passed"},
+    "pitfalls": {"status": "passed"}
   },
   "workflow_steps": [
     {"name": "explorer",       "dispatched": true,  "duration_ms": 12450},
@@ -771,10 +843,17 @@ REQUIRED BODY: {
   ]
 }
 
+reviewer_result (dispatched) = the task-reviewer custom agent's fenced ```json block
+(schema_version/status/issue_counts/issues[]/acceptance_criteria[]/project_checks[]/testing_strategy/patterns/pitfalls)
+merged with dispatched:true + duration_ms + derived legacy issues_found/acceptance_criteria_checked.
+See stride-workflow Step 6 for extraction; schema owned by agents/task-reviewer.md.
+
 SKIP FORM for explorer_result / reviewer_result (when subagent not dispatched):
   {"dispatched": false, "reason": "<enum>", "summary": "<40+ non-whitespace chars>"}
 Reason enum: no_subagent_support, small_task_0_1_key_files, trivial_change_docs_only,
              self_reported_exploration, self_reported_review
+
+VERSION: Send skills_version from your SKILL.md frontmatter with every complete request
 ```
 
 ## Real-World Impact
@@ -808,7 +887,9 @@ Reason enum: no_subagent_support, small_task_0_1_key_files, trivial_change_docs_
 | `workflow_steps` | array | Yes | Telemetry array with one entry per step name. See stride-workflow skill for full schema. |
 | `explorer_result` | object | Yes | `task-explorer` custom agent dispatch result OR self-reported skip. See Explorer/Reviewer Result Schema section. |
 | `reviewer_result` | object | Yes | `task-reviewer` custom agent dispatch result OR self-reported skip. See Explorer/Reviewer Result Schema section. |
+| `changed_files` | array | No | Per-file diff entries — read inline via `$GEMINI_PROJECT_DIR/.stride-changed-files.json` |
 | `review_report` | string | No | Structured review report from task-reviewer custom agent. Include when a review was performed; omit when no review was done. |
+| `skills_version` | string | No | Your skills version from SKILL.md frontmatter |
 
 **WRONG — actual_files_changed as array:**
 ```json

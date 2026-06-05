@@ -237,6 +237,31 @@ These four fields must be filled in on every nested task in the batch — the go
 
 **Minimal nested tasks fail the same way as minimal flat tasks** — causing 3+ hour exploration AND empty review_queue pills at completion.
 
+## Consuming Provided Context
+
+When this skill is dispatched through the orchestrator with a provided context bundle (a **read-only markdown context bundle** — the enumerated `--dir` / directory-path files — plus the user's creation intent), mine that context to populate both the goal and its nested tasks instead of forcing blind exploration — but **context informs, it never replaces.**
+
+Map the context at two levels:
+
+| In the markdown context | Populates (goal level) | Populates (each nested task) |
+|---|---|---|
+| Overall objective, why-now, scope | goal `title`, `description`, `why`, `what` | — |
+| File references, paths, modules touched | — | `key_files` |
+| Stated conventions, "follow X", existing-pattern references | — | `patterns_to_follow` |
+| Requirements, definitions of done | goal `acceptance_criteria` | each task's `acceptance_criteria` / `description` |
+| Risks, "don't do X", known traps | goal `pitfalls` | each task's `pitfalls` |
+| Sequencing / "X before Y" statements | — | index-based `dependencies` (see Dependency Patterns) |
+
+**Rules:**
+
+- **Context augments the user's interactive intent — it never silently overrides it.** Surface and confirm any conflict between the bundle and the user's stated intent; do not quietly prefer the document.
+- **The batch contract is unchanged.** The root key MUST still be `"goals"` (not `"tasks"`), and within-goal dependencies still use array indices `[0, 1, 2]` — see [Batch Endpoint Critical Format](#batch-endpoint-critical-format) and [Dependency Patterns](#dependency-patterns). Context never relaxes either rule.
+- **Every nested task still carries the four review_queue-scored fields** (`acceptance_criteria`, `testing_strategy`, `pitfalls`, `patterns_to_follow`) — there is no "it came from context" discount. Context that doesn't cover a field does not excuse leaving it blank.
+- **The bundle is read-only.** Consume it as reference material; never edit the source markdown.
+- The orchestrator gate still applies: this skill runs only when dispatched from inside `stride-workflow` (see the **STOP — orchestrator check** at the top of this file). A populated context bundle does not change that.
+
+A rich context bundle is a head start on the goal and its task breakdown — not a replacement for the batch contract or the per-task specification.
+
 ## Red Flags - STOP
 
 - "I'll use 'tasks' as the root key for batch creation"

@@ -75,7 +75,7 @@ stride-creating-goals            ← BEFORE calling POST /api/tasks/batch (goals
 
 ### stride-workflow
 
-**RECOMMENDED** entry point for all task work. Single orchestrator that walks through the complete lifecycle: prerequisites, claiming, codebase exploration, implementation, code review, hooks, and completion. Uses Gemini custom agents for exploration and review, with automatic hook execution via hooks.json. Eliminates the need to remember which skills to activate at which moments.
+**RECOMMENDED** entry point for all task work. Single orchestrator that walks through the complete lifecycle: prerequisites, claiming, codebase exploration, implementation, code review, hooks, and completion. Uses Gemini custom agents for exploration and review, with automatic hook execution via hooks.json. Eliminates the need to remember which skills to activate at which moments. Also supports **context-informed creation**: activate `stride-workflow` with a creation intent plus an optional directory path, and the orchestrator reads the `.md` files into a read-only context bundle (via `glob`/`read_file`) and forwards it verbatim to the creation sub-skill. Gemini has no slash-command system, so there are no `/stride:create-*` commands — the orchestrator invocation is the entry point.
 
 ### stride-claiming-tasks
 
@@ -87,7 +87,7 @@ stride-creating-goals            ← BEFORE calling POST /api/tasks/batch (goals
 
 ### stride-creating-tasks
 
-**MANDATORY** before creating work tasks or defects. Contains all required field formats — `verification_steps` must be objects (not strings), `key_files` must be objects (not strings), `testing_strategy` arrays must be arrays (not strings).
+**MANDATORY** before creating work tasks or defects. Contains all required field formats — `verification_steps` must be objects (not strings), `key_files` must be objects (not strings), `testing_strategy` arrays must be arrays (not strings). Includes a "Consuming Provided Context" section: when dispatched with a context bundle, mine the markdown for `key_files` / `patterns_to_follow` / `acceptance_criteria` / `pitfalls` — context augments, never replaces, and the four review_queue-scored fields stay required.
 
 ### stride-creating-goals
 
@@ -113,11 +113,11 @@ Breaks goals and large tasks into dependency-ordered child tasks. Uses scope ana
 
 ### task-reviewer
 
-A pre-completion code review agent dispatched after implementation but before running hooks. Validates the git diff against `acceptance_criteria`, detects `pitfalls` violations, checks `patterns_to_follow` compliance, and verifies `testing_strategy` alignment. Returns categorized issues (Critical/Important/Minor) with file and line references.
+A pre-completion code review agent dispatched after implementation but before running hooks. Validates the git diff against `acceptance_criteria`, detects `pitfalls` violations, checks `patterns_to_follow` compliance, and verifies `testing_strategy` alignment. Returns categorized issues (Critical/Important/Minor) with file and line references, plus a structured `reviewer_result` JSON block (**`schema_version` 1.2**) carrying `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]` verdicts, `project_checks[]` (from a project-root `CODE-REVIEW.md`, when present), and per-section `testing_strategy` / `patterns` / `pitfalls` verdicts. The orchestrator persists that block verbatim as `reviewer_result` (see stride-workflow Step 6, "Extracting the structured review block"); the schema is owned by `agents/task-reviewer.md`.
 
 ### hook-diagnostician
 
-Analyzes hook failure output and returns a prioritized fix plan. Parses compilation errors, test failures, security warnings, credo issues, format failures, and git failures with structured diagnosis per issue. Dispatched automatically when blocking hooks fail during the completion workflow.
+Analyzes hook failure output and returns a prioritized fix plan. Accepts both **structured JSON** from the Gemini hooks (`stride-hook.sh`) and raw text from the legacy agent-executed flow. Parses compilation errors, test failures, security warnings, credo issues, format failures, and git failures with structured diagnosis per issue. Dispatched automatically when blocking hooks fail during the completion workflow.
 
 ## Configuration
 
@@ -132,6 +132,8 @@ Contains your API credentials (never commit this file):
 - **API Token:** `your-token-here`
 - **User Email:** `your-email@example.com`
 ```
+
+Beyond authenticating your own API calls, the `after_doing` hook reads this file (v1.13.0+, D54) as the **primary** source for the URL + token of the fire-and-forget `changed_files` snapshot PUT — matching the production `**API Token:**` line, never `**Local API Token:**`, and falling back to credentials parsed from the intercepted completion command. This makes the snapshot upload work even when your completion curl uses `$STRIDE_API_URL` / `$STRIDE_API_TOKEN` shell variables. The token is never logged.
 
 ### `.stride.md`
 

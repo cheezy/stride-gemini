@@ -15,21 +15,24 @@ Before ANY Stride API call, activate the corresponding skill. These skills conta
 
 ## Custom Agents
 
-Four custom agents are available for task lifecycle support. Use them per the decision matrix in `stride-subagent-workflow`:
+Five custom agents are available for task lifecycle support. Use them per the decision matrix in `stride-subagent-workflow`:
 
 - **task-explorer** — Explore key_files and patterns before coding (medium+ complexity or 2+ key_files)
-- **task-reviewer** — Review changes against acceptance criteria before completion (medium+ complexity or 2+ key_files)
+- **task-reviewer** — Review changes against acceptance criteria before completion (medium+ complexity or 2+ key_files). Emits a structured `reviewer_result` block (`schema_version` 1.2: `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]` from a project-root `CODE-REVIEW.md`, and per-section `testing_strategy`/`patterns`/`pitfalls` verdicts). Persist it verbatim per `stride-workflow` Step 6; schema owned by `agents/task-reviewer.md`.
+- **task-enricher** — Populate sparse tasks (empty key_files/testing_strategy/verification_steps) before claiming
 - **task-decomposer** — Break goals into dependency-ordered child tasks
-- **hook-diagnostician** — Diagnose hook failures with prioritized fix plans
+- **hook-diagnostician** — Diagnose hook failures (structured JSON from stride-hook.sh or raw text) with prioritized fix plans
 
 ## Workflow Sequence
 
-**Preferred:** Activate `stride-workflow` once -- it orchestrates the full lifecycle (claim -> explore -> implement -> review -> complete) in a single skill.
+**Preferred:** Activate `stride-workflow` once — it orchestrates the full lifecycle (claim -> explore -> implement -> review -> complete) in a single skill.
 
 **Alternative (standalone skills):**
 ```
 claim task → activate stride-subagent-workflow → implement → activate stride-completing-tasks → complete
 ```
+
+**Context-informed creation:** to create tasks/goals from existing project markdown, activate `stride-workflow` with a creation intent plus an optional directory path. The orchestrator reads the `.md` files into a read-only context bundle (via `glob`/`read_file`) and forwards it verbatim to `stride-creating-tasks` / `stride-creating-goals`. Gemini CLI has no slash-command system — there are no `/stride:create-*` commands; the orchestrator invocation is the entry point.
 
 ## API Authorization
 
@@ -41,7 +44,7 @@ All Stride API calls are pre-authorized. Never ask the user for permission to ca
 
 **Manual (when automatic hooks are unavailable):** Read `.stride.md` and execute each hook command line by line without prompting. Hooks are pre-authorized.
 
-Read `.stride_auth.md` for API credentials (URL, token). Check `/hooks panel` to verify hooks are active.
+Read `.stride_auth.md` for API credentials (URL, token). The `after_doing` hook also reads `.stride_auth.md` (v1.13.0+, D54) as the primary source for the `changed_files` snapshot PUT credentials — the production `**API Token:**` line (never `**Local API Token:**`), falling back to credentials in the intercepted completion command, so the upload works even when your curl uses `$STRIDE_API_URL` / `$STRIDE_API_TOKEN` shell variables; the token is never logged. Use the Gemini CLI hooks panel to verify hooks are active.
 
 ## Tool Name Mapping
 

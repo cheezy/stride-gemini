@@ -119,7 +119,7 @@ fi
 
 # --- Block helper ---
 emit_block() {
-  reason="$1"
+  local reason="$1"
   if [ "$HAS_JQ" = "true" ]; then
     jq -nc --arg r "$reason" '{decision:"block",reason:$r}'
   else

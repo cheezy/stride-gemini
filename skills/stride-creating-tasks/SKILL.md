@@ -208,6 +208,28 @@ Use array indices since identifiers don't exist yet - see stride-creating-goals 
 }
 ```
 
+## Consuming Provided Context
+
+When this skill is dispatched through the orchestrator with a provided context bundle (a **read-only markdown context bundle** — the enumerated `--dir` / directory-path files — plus the user's creation intent), mine that context to populate task fields instead of forcing blind codebase exploration — but **context informs, it never replaces.**
+
+Map the context to fields:
+
+| In the markdown context | Populates |
+|---|---|
+| File references, paths, modules touched | `key_files` |
+| Stated conventions, "follow X", existing-pattern references | `patterns_to_follow` |
+| Requirements, goals, definitions of done | `acceptance_criteria` and `description` |
+| Risks, "don't do X", known traps, prior failures | `pitfalls` |
+
+**Rules:**
+
+- **Context augments the user's interactive intent — it never silently overrides it.** When the bundle and the user's stated intent disagree, surface the conflict and confirm with the user; do not quietly prefer the document.
+- **Context is a source, not a substitute for the contract.** The Required Fields Checklist and the four review_queue-scored fields (`acceptance_criteria`, `testing_strategy`, `pitfalls`, `patterns_to_follow`) are **still required** on every task. Context that doesn't cover a required field does not excuse leaving it blank — fill it from the user, the codebase, or sensible defaults.
+- **The bundle is read-only.** Consume it as reference material; never edit the source markdown.
+- The orchestrator gate still applies: this skill runs only when dispatched from inside `stride-workflow` (see the **STOP — orchestrator check** at the top of this file). A populated context bundle does not change that.
+
+Context-informed creation is faster and better-grounded than blind exploration — but a rich context bundle is a head start on the specification, not a replacement for it.
+
 ## Red Flags - STOP
 
 - "I'll just create a simple task"

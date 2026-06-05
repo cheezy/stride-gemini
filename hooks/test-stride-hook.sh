@@ -1685,6 +1685,144 @@ STRIDE
 fi
 
 # ============================================================
+# Test Group 10: D54 changed_files credential resolution
+# ============================================================
+# resolve_stride_api_url / resolve_stride_api_token read $PROJECT_DIR/.stride_auth.md
+# as the PRIMARY source (production "**API Token:**" line, deliberately NOT the
+# "**Local API Token:**" line), falling back to the $COMMAND literals. The token
+# must never be logged. Sourcing the hook script with no PHASE defines the
+# functions without running the main flow (see the early-return guard).
+echo ""
+echo "=== Test Group 10: D54 credential resolution ==="
+
+# 10a: auth-file primary — resolvers return the values from .stride_auth.md
+D54_DIR=$(mktemp -d)
+cat > "$D54_DIR/.stride_auth.md" << 'AUTH'
+# Stride API Authentication
+- **API URL:** `https://www.stridelikeaboss.com`
+- **Local API Token:** `stride_dev_LOCALONLYTOKEN`
+- **API Token:** `stride_dev_PRODUCTIONTOKEN`
+AUTH
+RESULT=$(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null || true
+  PROJECT_DIR="$D54_DIR"; COMMAND=''
+  resolve_stride_api_token
+)
+assert_eq "10a: token resolved from .stride_auth.md (production line)" \
+  "stride_dev_PRODUCTIONTOKEN" "$RESULT"
+RESULT=$(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null || true
+  PROJECT_DIR="$D54_DIR"; COMMAND=''
+  resolve_stride_api_url
+)
+assert_eq "10a: URL resolved from .stride_auth.md" \
+  "https://www.stridelikeaboss.com" "$RESULT"
+
+# 10b: API-Token-vs-Local discrimination — never the Local API Token value
+RESULT=$(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null || true
+  PROJECT_DIR="$D54_DIR"; COMMAND=''
+  resolve_stride_api_token
+)
+if [ "$RESULT" = "stride_dev_LOCALONLYTOKEN" ]; then
+  echo -e "  ${RED}FAIL${RESET}: 10b: resolved the Local API Token instead of the production token"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 10b: Local API Token line is not resolved"
+  PASS=$((PASS + 1))
+fi
+rm -rf "$D54_DIR"
+
+# 10c: only the Local API Token line present + no $COMMAND → empty (never Local)
+LOCAL_DIR=$(mktemp -d)
+cat > "$LOCAL_DIR/.stride_auth.md" << 'AUTH'
+- **Local API Token:** `stride_dev_LOCALONLYTOKEN`
+AUTH
+RESULT=$(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null || true
+  PROJECT_DIR="$LOCAL_DIR"; COMMAND=''
+  resolve_stride_api_token
+)
+assert_eq "10c: only Local API Token present → empty token" "" "$RESULT"
+rm -rf "$LOCAL_DIR"
+
+# 10d: no auth file → fall back to the $COMMAND literals
+NOAUTH_DIR=$(mktemp -d)
+RESULT=$(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null || true
+  PROJECT_DIR="$NOAUTH_DIR"
+  COMMAND='curl -X PATCH https://stride.example.com/api/tasks/42/complete -H "Authorization: Bearer cmd_fallback_token"'
+  resolve_stride_api_token
+)
+assert_eq "10d: token falls back to \$COMMAND literal" "cmd_fallback_token" "$RESULT"
+RESULT=$(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null || true
+  PROJECT_DIR="$NOAUTH_DIR"
+  COMMAND='curl -X PATCH https://stride.example.com/api/tasks/42/complete -H "Authorization: Bearer cmd_fallback_token"'
+  resolve_stride_api_url
+)
+assert_eq "10d: URL falls back to \$COMMAND literal" "https://stride.example.com" "$RESULT"
+rm -rf "$NOAUTH_DIR"
+
+# 10e: shell-variable command + NO auth file → both empty (PUT silently skipped,
+# since finalize_after_doing gates on non-empty URL AND token)
+SHELLVAR_DIR=$(mktemp -d)
+RESULT=$(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null || true
+  PROJECT_DIR="$SHELLVAR_DIR"
+  COMMAND='curl -X PATCH "$STRIDE_API_URL/api/tasks/42/complete" -H "Authorization: Bearer $STRIDE_API_TOKEN"'
+  printf '%s|%s' "$(resolve_stride_api_url)" "$(resolve_stride_api_token)"
+)
+assert_eq "10e: shell-variable command + no auth file → no URL/token (PUT skipped)" "|" "$RESULT"
+rm -rf "$SHELLVAR_DIR"
+
+# 10f: shell-variable command + auth file PRESENT → auth file wins (PUT proceeds)
+SHELLVAR_AUTH_DIR=$(mktemp -d)
+cat > "$SHELLVAR_AUTH_DIR/.stride_auth.md" << 'AUTH'
+- **API URL:** `https://www.stridelikeaboss.com`
+- **API Token:** `stride_dev_PRODUCTIONTOKEN`
+AUTH
+RESULT=$(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null || true
+  PROJECT_DIR="$SHELLVAR_AUTH_DIR"
+  COMMAND='curl -X PATCH "$STRIDE_API_URL/api/tasks/42/complete" -H "Authorization: Bearer $STRIDE_API_TOKEN"'
+  printf '%s|%s' "$(resolve_stride_api_url)" "$(resolve_stride_api_token)"
+)
+assert_eq "10f: shell-variable command + auth file → auth-file URL+token win" \
+  "https://www.stridelikeaboss.com|stride_dev_PRODUCTIONTOKEN" "$RESULT"
+rm -rf "$SHELLVAR_AUTH_DIR"
+
+# 10g: no-token-logging — the resolver prints the token on stdout (consumed by
+# the caller) but must NEVER write it to stderr, even in error paths.
+LOG_DIR=$(mktemp -d)
+cat > "$LOG_DIR/.stride_auth.md" << 'AUTH'
+- **API Token:** `stride_dev_SECRETTOKEN`
+AUTH
+LOG_STDERR=$(mktemp)
+(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null || true
+  PROJECT_DIR="$LOG_DIR"; COMMAND=''
+  resolve_stride_api_token
+) > /dev/null 2>"$LOG_STDERR"
+if grep -q 'stride_dev_SECRETTOKEN' "$LOG_STDERR"; then
+  echo -e "  ${RED}FAIL${RESET}: 10g: token leaked to stderr"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: 10g: token not logged to stderr"
+  PASS=$((PASS + 1))
+fi
+rm -f "$LOG_STDERR"; rm -rf "$LOG_DIR"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

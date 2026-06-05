@@ -194,14 +194,50 @@ ${trunc_marker}"
   rm -f "$jsonl_file"
 }
 
+# Helper: resolve the Stride API base URL for the changed_files upload.
+# Primary source is $PROJECT_DIR/.stride_auth.md (the same file the agent
+# reads) — its `**API URL:** `<url>`` line. Falls back to a literal URL in the
+# intercepted $COMMAND for back-compat when the auth file is absent. Prints the
+# URL (or empty) on stdout.
+resolve_stride_api_url() {
+  local _auth="$PROJECT_DIR/.stride_auth.md" _url=""
+  if [ -f "$_auth" ]; then
+    _url=$(grep -E '\*\*API URL:\*\*' "$_auth" | grep -oE 'https?://[A-Za-z0-9._:/-]+' | head -n 1 || true)
+  fi
+  if [ -z "$_url" ]; then
+    _url=$(printf '%s' "${COMMAND:-}" | grep -oE 'https?://[A-Za-z0-9._-]+(:[0-9]+)?' | head -n 1 || true)
+  fi
+  printf '%s' "$_url"
+}
+
+# Helper: resolve the Stride API bearer token for the changed_files upload.
+# Primary source is the production `**API Token:** `<token>`` line in
+# $PROJECT_DIR/.stride_auth.md — deliberately NOT the `**Local API Token:**`
+# line (the `**API Token:**` pattern does not match `**Local API Token:**`).
+# Falls back to a literal `Bearer <token>` in the intercepted $COMMAND. Prints
+# the token (or empty) on stdout; never logs it.
+resolve_stride_api_token() {
+  local _auth="$PROJECT_DIR/.stride_auth.md" _tok=""
+  if [ -f "$_auth" ]; then
+    _tok=$(grep -E '\*\*API Token:\*\*' "$_auth" | grep -oE '`[^`]+`' | head -n 1 | tr -d '`' || true)
+  fi
+  if [ -z "$_tok" ]; then
+    _tok=$(printf '%s' "${COMMAND:-}" | grep -oE 'Bearer +[A-Za-z0-9._+/=-]+' | head -n 1 | sed 's/^Bearer  *//' || true)
+  fi
+  printf '%s' "$_tok"
+}
+
 # Writes the changed-files snapshot to $PROJECT_DIR/.stride-changed-files.json,
 # then fire-and-forget PUTs it to the Stride server. Invoked from every
 # after_doing exit path (no-commands branch, all-comments branch, and the
 # post-command-loop success branch) so the file exists when the subsequent
 # /complete curl reads it inline. The function is a no-op when TASK_BASE_REF
 # is unset (e.g. the test harness sources the script without claiming a
-# task first). URL and token for the PUT are parsed from the intercepted
-# agent completion command in $COMMAND — no new env vars or auth file reads.
+# task first). URL and token for the PUT are resolved by resolve_stride_api_url /
+# resolve_stride_api_token — preferring $PROJECT_DIR/.stride_auth.md so the
+# upload works whether the agent's completion curl used literal values or shell
+# variables ($STRIDE_API_URL / $STRIDE_API_TOKEN), with the $COMMAND literal
+# extraction kept as a back-compat fallback.
 finalize_after_doing() {
   local snapshot
   if [ -n "${TASK_BASE_REF:-}" ]; then
@@ -212,8 +248,8 @@ finalize_after_doing() {
     # snapshot for legacy --argjson cf consumers.
     if [ "${HAS_JQ:-false}" = "true" ] && command -v curl > /dev/null 2>&1 && [ -n "${TASK_ID:-}" ]; then
       local _api_base _token
-      _api_base=$(printf '%s' "${COMMAND:-}" | grep -oE 'https?://[A-Za-z0-9._-]+(:[0-9]+)?' | head -n 1 || true)
-      _token=$(printf '%s' "${COMMAND:-}" | grep -oE 'Bearer +[A-Za-z0-9._+/=-]+' | head -n 1 | sed 's/^Bearer  *//' || true)
+      _api_base=$(resolve_stride_api_url)
+      _token=$(resolve_stride_api_token)
       if [ -n "$_api_base" ] && [ -n "$_token" ]; then
         # Wrap the bare snapshot array as {"changed_files": [...]} so the
         # server's params['changed_files'] receives the list. A bare top-level
@@ -307,6 +343,9 @@ run_stride_section() {
     _cmd_stdout_file=$(mktemp)
     _cmd_stderr_file=$(mktemp)
 
+    # Relax `set -u` and `pipefail` for the user's command so that a reference
+    # to an unset env var doesn't silently abort the eval before the actual
+    # command runs; restore the strict flags immediately afterward.
     set +uo pipefail
     eval "$_trimmed" > "$_cmd_stdout_file" 2> "$_cmd_stderr_file"
     _cmd_exit=$?
@@ -523,7 +562,9 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
       # Capture the current git HEAD as TASK_BASE_REF so capture_changed_files
       # has an anchor pointing at when the task was claimed (consumed by
       # finalize_after_doing at the end of every after_doing exit path).
-      _base_ref=$(git rev-parse HEAD 2>/dev/null || printf '')
+      # cd into the project dir first so HEAD comes from the project's repo
+      # regardless of the hook process's current working directory.
+      _base_ref=$(cd "$PROJECT_DIR" && git rev-parse HEAD 2>/dev/null || printf '')
 
       # Values are single-quoted to handle spaces in titles/descriptions
       {

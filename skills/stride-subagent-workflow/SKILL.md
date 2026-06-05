@@ -218,7 +218,7 @@ Approved
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.2",
   "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
@@ -227,7 +227,11 @@ Approved
     {"criterion": "All task positions recalculate when a card moves columns", "status": "met", "evidence": "lib/kanban/tasks.ex:142-168"},
     {"criterion": "Existing position-stable behavior unchanged", "status": "met", "evidence": "test/kanban/tasks_test.exs:198-240"},
     {"criterion": "PubSub broadcast emitted exactly once per move", "status": "met", "evidence": "lib/kanban/tasks.ex:172"}
-  ]
+  ],
+  "project_checks": [],
+  "testing_strategy": {"status": "passed", "note": "Move + broadcast paths covered by tests."},
+  "patterns": {"status": "passed", "note": "Mirrors the existing reorder pattern."},
+  "pitfalls": {"status": "passed", "note": "None of the 4 listed pitfalls violated."}
 }
 ```
 ````
@@ -241,7 +245,7 @@ Approved
   "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
   "issues_found": 0,
   "acceptance_criteria_checked": 3,
-  "schema_version": "1.0",
+  "schema_version": "1.2",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
   "issues": [],
@@ -249,11 +253,15 @@ Approved
     {"criterion": "All task positions recalculate when a card moves columns", "status": "met", "evidence": "lib/kanban/tasks.ex:142-168"},
     {"criterion": "Existing position-stable behavior unchanged", "status": "met", "evidence": "test/kanban/tasks_test.exs:198-240"},
     {"criterion": "PubSub broadcast emitted exactly once per move", "status": "met", "evidence": "lib/kanban/tasks.ex:172"}
-  ]
+  ],
+  "project_checks": [],
+  "testing_strategy": {"status": "passed", "note": "Move + broadcast paths covered by tests."},
+  "patterns": {"status": "passed", "note": "Mirrors the existing reorder pattern."},
+  "pitfalls": {"status": "passed", "note": "None of the 4 listed pitfalls violated."}
 }
 ```
 
-Legacy + structured fields coexist in the same map; the server persists `reviewer_result` as `:jsonb` and tolerates the structured keys today (G143/W688 will validate them explicitly).
+Legacy + structured fields coexist in the same map; the server persists `reviewer_result` as `:jsonb` and tolerates the structured keys today.
 
 **Fallback when JSON parsing fails.** If no ```json block is present, or the block does not parse, do not abort the completion. Instead:
 

@@ -1,6 +1,7 @@
 ---
 name: stride-claiming-tasks
 description: INTERNAL — invoked only by stride:stride-workflow. Do NOT invoke from a user prompt. Contains the claim API contract (POST /api/tasks/claim payload and required before_doing_result shape) and the before_doing hook execution pattern, used during the orchestrator's claim phase.
+skills_version: 1.0
 ---
 
 # Stride: Claiming Tasks
@@ -84,7 +85,7 @@ When the user initiates a Stride workflow (e.g., "claim a task", "work on tasks"
 
 **If the automatic hooks fail:** The hook returns exit code 2 with structured JSON describing the failure. Fix the issue and retry the API call — the hooks will fire again automatically.
 
-**Check `/hooks panel`** to verify hooks are active after installation.
+Use the Gemini CLI hooks panel to verify hooks are active after installation.
 
 **If the extension is NOT installed (manual setup):** Fall back to the manual hook execution described below.
 
@@ -335,6 +336,7 @@ POST /api/tasks/claim
 {
   "identifier": "W47",
   "agent_name": "Gemini CLI",
+  "skills_version": "1.0",
   "before_doing_result": {
     "exit_code": 0,
     "output": "Already up to date.\nResolving Hex dependencies...\nAll dependencies are up to date",
@@ -479,6 +481,7 @@ API ENDPOINT: POST /api/tasks/claim
 REQUIRED BODY: {
   "identifier": "W47",
   "agent_name": "Gemini CLI",
+  "skills_version": "1.0",
   "before_doing_result": {
     "exit_code": 0,
     "output": "Executed by Gemini hooks system",
@@ -486,6 +489,7 @@ REQUIRED BODY: {
   }
 }
 
+VERSION: Send skills_version from your SKILL.md frontmatter with every claim request
 NEXT STEP: Immediately begin working on the task after successful claim
 ```
 
@@ -536,6 +540,7 @@ The `POST /api/tasks/claim` body MUST include:
 |-------|------|---------|
 | `identifier` | string | `"W47"` |
 | `agent_name` | string | `"Gemini CLI"` |
+| `skills_version` | string (optional) | `"1.0"` (from SKILL.md frontmatter) |
 | `before_doing_result` | object | See hook result format above |
 
 ## Handling Stale Skills

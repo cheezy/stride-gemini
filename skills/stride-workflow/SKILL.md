@@ -1,6 +1,7 @@
 ---
 name: stride-workflow
 description: Single orchestrator for the complete Stride task lifecycle. Invoke when the user asks to claim a task, work on the next stride task, work on stride tasks, complete a stride task, enrich a stride task, decompose a goal, or create a goal or stride tasks. Replaces invoking stride-claiming-tasks, stride-completing-tasks, stride-creating-tasks, stride-creating-goals, stride-enriching-tasks, or stride-subagent-workflow directly — those are dispatched from inside this orchestrator. Walks through prerequisites, claiming, exploration, implementation, review, hooks, and completion. Handles both Claude Code (with subagent dispatch) and other environments (Cursor/Windsurf/Continue without subagents).
+skills_version: 1.0
 ---
 
 # Stride: Workflow Orchestrator
@@ -78,6 +79,24 @@ You do NOT need to activate `stride-claiming-tasks`, `stride-subagent-workflow`,
 
 **Note:** The individual skills (`stride-claiming-tasks`, `stride-subagent-workflow`, `stride-completing-tasks`) remain available for standalone use when needed -- for example, when resuming a partially completed task or when only one phase needs to be repeated. This orchestrator is the preferred entry point for new task work.
 
+## Context-Informed Creation
+
+You can ask the orchestrator to create work informed by existing markdown context (for example, a requirements doc, or a directory of design notes). **Gemini CLI has no slash-command system**, so there are no `/stride:create-*` commands — instead, activate `stride-workflow` with a **creation intent** (what you want created — tasks/defects or a goal with nested tasks) and an **optional directory path** to the markdown context.
+
+The flow is:
+
+1. The orchestrator enumerates the markdown files at the provided directory path — listing the `.md` files with `glob` and reading each with `read_file` — and assembles a **read-only context bundle** (the enumerated file contents) plus the **creation intent**.
+2. The orchestrator writes the activation marker (Step 0) exactly as it does for any other run, then **forwards the context bundle verbatim** to the dispatched creation sub-skill (`stride-creating-tasks` or `stride-creating-goals`).
+
+**Contract:**
+
+- The context bundle is **read-only** — the creation sub-skills consume it as reference material; they never edit the source markdown.
+- The bundle is forwarded **verbatim** — the orchestrator does not summarize, truncate, or reinterpret it before dispatch.
+- The **activation marker is still mandatory.** Because context-informed creation routes through the orchestrator, Step 0 writes the marker (see [Orchestrator Activation Marker](#orchestrator-activation-marker)) so the skill gate permits the `stride-creating-tasks` / `stride-creating-goals` dispatch — the same sub-skill set that gate governs. Skipping the marker would block the dispatch exactly like a direct user-prompt activation.
+- Context-informed creation does **not** bypass or weaken the sub-skill STOP gate — it satisfies it the sanctioned way, by dispatching from inside the orchestrator.
+
+The task-field and batch-shape contracts the creation sub-skills enforce are **not** duplicated here — they live in `stride-creating-tasks` and `stride-creating-goals`.
+
 ## Automatic Hook Execution
 
 **When the stride-gemini extension is installed, hooks execute automatically.** The `hooks.json` registers `BeforeTool`/`AfterTool` hooks that intercept Stride API calls and execute the corresponding `.stride.md` commands via `stride-hook.sh`.
@@ -91,7 +110,7 @@ You do NOT need to activate `stride-claiming-tasks`, `stride-subagent-workflow`,
 
 **If automatic hooks fail:** The hook returns exit code 2 with structured JSON describing the failure. Fix the issue and retry the API call -- the hooks fire again automatically.
 
-**Check `/hooks panel`** to verify hooks are active after installation.
+Use the Gemini CLI hooks panel to verify hooks are active after installation.
 
 **If the extension is NOT installed (manual setup):** Fall back to reading `.stride.md` and executing each hook command line by line via `run_shell_command`.
 
@@ -165,6 +184,7 @@ Call `POST /api/tasks/claim` directly with:
 {
   "identifier": "<task identifier>",
   "agent_name": "Gemini CLI",
+  "skills_version": "1.0",
   "before_doing_result": {
     "exit_code": 0,
     "output": "Executed by Gemini hooks system",
@@ -236,12 +256,88 @@ Invoke the `task-reviewer` custom agent with:
 - The git diff of all your changes
 - The task's `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, and `testing_strategy`
 
-The reviewer returns "Approved" or a list of issues (Critical, Important, Minor).
+The reviewer returns a human-readable prose summary followed by a fenced ```json block. The schema of that block is owned by `agents/task-reviewer.md` — do not duplicate field definitions here.
 
 - **Fix all Critical issues** before proceeding
 - **Fix all Important issues** before proceeding
 - Minor issues are optional but recommended
-- **Save the reviewer's full output** -- you'll include it as `review_report` in Step 8
+- **Save the reviewer's full response (prose + JSON block)** -- you'll include it verbatim as `review_report` in Step 8
+
+#### Extracting the structured review block
+
+After the reviewer returns, extract the first fenced ```json block from its response and use it to populate `reviewer_result` in your Step 8 PATCH payload. The same `reviewer_result` map carries both the legacy summary fields (kept for backwards compatibility with older Kanban deploys) and the structured fields (the actual deliverable for downstream consumers — they live inside `reviewer_result`, never under a new top-level API key).
+
+**Extraction pattern** — scan the reviewer's response for the first fenced ```json block: the opening ` ```json ` fence through the next closing ` ``` ` fence. Take the text between those two fence lines (the fence markers themselves are not part of the payload) and parse it as JSON. The reviewer's response is already in your context, so no file read is needed; if the reviewer instead wrote its response to a file, use `read_file` to load it first, then scan for the same fence.
+
+**Field mapping into `reviewer_result`:**
+
+- Legacy fields (always populated):
+  - `summary` ← the structured block's `summary`
+  - `issues_found` ← the sum of the values in the structured `issue_counts` object (sum only the recognized severity keys you receive; pass through any unknown severity keys verbatim inside the structured `issue_counts` object)
+  - `acceptance_criteria_checked` ← the number of entries in the structured `acceptance_criteria` array
+  - `dispatched: true`, `duration_ms: <wall-clock ms>` (as before)
+- Structured fields (copied verbatim from the parsed JSON, but **omit any key the agent did not emit** — do not send empty placeholders):
+  - `status`, `issue_counts`, `issues`, `acceptance_criteria`, `testing_strategy`, `patterns`, `pitfalls`, `schema_version`
+
+**Worked example.** Given the reviewer response below (truncated for brevity)…
+
+````text
+Approved
+...prose summary + issue list + acceptance-criteria table...
+
+```json
+{
+  "schema_version": "1.2",
+  "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
+  "status": "approved",
+  "issue_counts": {"critical": 0, "important": 0, "minor": 0},
+  "issues": [],
+  "acceptance_criteria": [
+    {"criterion": "All task positions recalculate when a card moves columns", "status": "met", "evidence": "lib/kanban/tasks.ex:142-168"},
+    {"criterion": "Existing position-stable behavior unchanged", "status": "met", "evidence": "test/kanban/tasks_test.exs:198-240"},
+    {"criterion": "PubSub broadcast emitted exactly once per move", "status": "met", "evidence": "lib/kanban/tasks.ex:172"}
+  ],
+  "project_checks": [],
+  "testing_strategy": {"status": "passed", "note": "Move + broadcast paths covered by tests."},
+  "patterns": {"status": "passed", "note": "Mirrors the existing reorder pattern."},
+  "pitfalls": {"status": "passed", "note": "None of the 4 listed pitfalls violated."}
+}
+```
+````
+
+…the resulting `reviewer_result` value in the Step 8 PATCH payload is:
+
+```json
+"reviewer_result": {
+  "dispatched": true,
+  "duration_ms": 29560,
+  "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
+  "issues_found": 0,
+  "acceptance_criteria_checked": 3,
+  "schema_version": "1.2",
+  "status": "approved",
+  "issue_counts": {"critical": 0, "important": 0, "minor": 0},
+  "issues": [],
+  "acceptance_criteria": [
+    {"criterion": "All task positions recalculate when a card moves columns", "status": "met", "evidence": "lib/kanban/tasks.ex:142-168"},
+    {"criterion": "Existing position-stable behavior unchanged", "status": "met", "evidence": "test/kanban/tasks_test.exs:198-240"},
+    {"criterion": "PubSub broadcast emitted exactly once per move", "status": "met", "evidence": "lib/kanban/tasks.ex:172"}
+  ],
+  "project_checks": [],
+  "testing_strategy": {"status": "passed", "note": "Move + broadcast paths covered by tests."},
+  "patterns": {"status": "passed", "note": "Mirrors the existing reorder pattern."},
+  "pitfalls": {"status": "passed", "note": "None of the 4 listed pitfalls violated."}
+}
+```
+
+Legacy + structured fields coexist in the same map; the server persists `reviewer_result` as `:jsonb` and tolerates the structured keys today.
+
+**Fallback when JSON parsing fails.** If no ```json block is present, or the block does not parse, do not abort the completion. Instead:
+
+1. Fall back to substring-matching the prose summary line ("Approved" or "N issues found (X critical, Y important, Z minor)") to populate `reviewer_result.summary` and `reviewer_result.issues_found` as before this rollout.
+2. Set `acceptance_criteria_checked` from the count of criterion lines you find in the prose acceptance-criteria table, or to `0` if none can be parsed.
+3. **Omit** every structured field (`status`, `issue_counts`, `issues`, `acceptance_criteria`, `testing_strategy`, `patterns`, `pitfalls`, `schema_version`) from the PATCH payload — do not send empty placeholders. The Kanban server tolerates their absence (the ReviewReportPanel renders only what it receives).
+4. Keep `dispatched: true` and `duration_ms` as captured. The fallback path produces a degraded-but-valid completion, never a hard failure.
 
 ### Small tasks (0-1 key_files): Skip review. Omit `review_report` from completion.
 
@@ -342,6 +438,7 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
   "completion_summary": "Brief one-line summary for tracking.",
   "actual_complexity": "medium",
   "actual_files_changed": "lib/foo.ex, lib/bar.ex, test/foo_test.exs",
+  "skills_version": "1.0",
   "review_report": "## Review Summary\n\nApproved -- 0 issues found.\n...",
   "after_doing_result": {
     "exit_code": 0,
@@ -395,6 +492,7 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 | Field | Type | Notes |
 |---|---|---|
 | `review_report` | string | Include when task-reviewer ran; omit when skipped |
+| `skills_version` | string | From SKILL.md frontmatter |
 
 ---
 
