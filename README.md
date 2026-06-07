@@ -87,7 +87,7 @@ stride-creating-goals            ← BEFORE calling POST /api/tasks/batch (goals
 
 ### stride-creating-tasks
 
-**MANDATORY** before creating work tasks or defects. Contains all required field formats — `verification_steps` must be objects (not strings), `key_files` must be objects (not strings), `testing_strategy` arrays must be arrays (not strings). Includes a "Consuming Provided Context" section: when dispatched with a context bundle, mine the markdown for `key_files` / `patterns_to_follow` / `acceptance_criteria` / `pitfalls` — context augments, never replaces, and the four review_queue-scored fields stay required.
+**MANDATORY** before creating work tasks or defects. Contains all required field formats — `verification_steps` must be objects (not strings), `key_files` must be objects (not strings), `testing_strategy` arrays must be arrays (not strings). Includes a "Consuming Provided Context" section: when dispatched with a context bundle, mine the markdown for `key_files` / `patterns_to_follow` / `acceptance_criteria` / `pitfalls` — context augments, never replaces, and the five review_queue-scored fields (now including `security_considerations`) stay required.
 
 ### stride-creating-goals
 
@@ -113,7 +113,7 @@ Breaks goals and large tasks into dependency-ordered child tasks. Uses scope ana
 
 ### task-reviewer
 
-A pre-completion code review agent dispatched after implementation but before running hooks. Validates the git diff against `acceptance_criteria`, detects `pitfalls` violations, checks `patterns_to_follow` compliance, and verifies `testing_strategy` alignment. Returns categorized issues (Critical/Important/Minor) with file and line references, plus a structured `reviewer_result` JSON block (**`schema_version` 1.2**) carrying `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]` verdicts, `project_checks[]` (from a project-root `CODE-REVIEW.md`, when present), and per-section `testing_strategy` / `patterns` / `pitfalls` verdicts. The orchestrator persists that block verbatim as `reviewer_result` (see stride-workflow Step 6, "Extracting the structured review block"); the schema is owned by `agents/task-reviewer.md`.
+A pre-completion code review agent dispatched after implementation but before running hooks. Validates the git diff against `acceptance_criteria`, detects `pitfalls` violations, checks `patterns_to_follow` compliance, verifies `testing_strategy` alignment, and confirms the task's `security_considerations` were actually implemented (input validation, authorization boundaries, secret handling, injection surfaces, data exposure). Returns categorized issues (Critical/Important/Minor) with file and line references, plus a structured `reviewer_result` JSON block (**`schema_version` 1.3**) carrying `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]` verdicts, `project_checks[]` (from a project-root `CODE-REVIEW.md`, when present), and per-section `testing_strategy` / `patterns` / `pitfalls` / `security_considerations` verdicts (the fifth review_queue-scored field). The orchestrator persists that block verbatim as `reviewer_result` (see stride-workflow Step 6, "Extracting the structured review block"); the schema is owned by `agents/task-reviewer.md`.
 
 ### hook-diagnostician
 
