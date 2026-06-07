@@ -346,7 +346,7 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$TASK_ID/complete" \
        after_doing_result: {exit_code: 0, output: "...", duration_ms: 45678},
        before_review_result: {exit_code: 0, output: "...", duration_ms: 2340},
        explorer_result: {dispatched: true, summary: "...", duration_ms: 12450},
-       reviewer_result: {dispatched: true, duration_ms: 15300, summary: "...", issues_found: 0, acceptance_criteria_checked: 5, schema_version: "1.2", status: "approved", issue_counts: {critical: 0, important: 0, minor: 0}, issues: [], acceptance_criteria: [], project_checks: [], testing_strategy: {status: "passed"}, patterns: {status: "passed"}, pitfalls: {status: "passed"}},
+       reviewer_result: {dispatched: true, duration_ms: 15300, summary: "...", issues_found: 0, acceptance_criteria_checked: 5, schema_version: "1.3", status: "approved", issue_counts: {critical: 0, important: 0, minor: 0}, issues: [], acceptance_criteria: [], project_checks: [], testing_strategy: {status: "passed"}, patterns: {status: "passed"}, pitfalls: {status: "passed"}, security_considerations: {status: "passed"}},
        workflow_steps: [
          {name: "explorer", dispatched: true, duration_ms: 12450},
          {name: "planner", dispatched: true, duration_ms: 8200},
@@ -395,7 +395,7 @@ match the `--arg` / `--argjson` substitutions above):
     "summary": "Reviewed the diff against all 5 acceptance criteria and the 3 pitfalls; no issues found",
     "issues_found": 0,
     "acceptance_criteria_checked": 5,
-    "schema_version": "1.2",
+    "schema_version": "1.3",
     "status": "approved",
     "issue_counts": {"critical": 0, "important": 0, "minor": 0},
     "issues": [],
@@ -405,7 +405,8 @@ match the `--arg` / `--argjson` substitutions above):
     "project_checks": [],
     "testing_strategy": {"status": "passed", "note": "Tests cover the new toggle persistence."},
     "patterns": {"status": "passed", "note": "Follows the existing settings-update pattern."},
-    "pitfalls": {"status": "passed", "note": "No listed pitfall violated."}
+    "pitfalls": {"status": "passed", "note": "No listed pitfall violated."},
+    "security_considerations": {"status": "passed", "note": "Theme preference scoped to the authenticated user; no injection surface."}
   },
   "workflow_steps": [
     {"name": "explorer",       "dispatched": true,  "duration_ms": 12450},
@@ -421,7 +422,7 @@ match the `--arg` / `--argjson` substitutions above):
 When the `task-reviewer` custom agent was dispatched, `reviewer_result` carries the
 reviewer agent's **structured JSON block** (`schema_version`, `status`,
 `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]`, and the
-per-section `testing_strategy`/`patterns`/`pitfalls` verdicts — the
+per-section `testing_strategy`/`patterns`/`pitfalls`/`security_considerations` verdicts — the
 fields the Kanban review queue actually renders) copied verbatim, **merged**
 with the dispatch telemetry (`dispatched: true`, `duration_ms`) and the derived
 legacy summary fields (`issues_found`, `acceptance_criteria_checked`,
@@ -541,7 +542,7 @@ Every `/complete` call **must** include both `explorer_result` and `reviewer_res
   "summary": "<40+ non-whitespace characters describing what was reviewed>",
   "issues_found": 0,
   "acceptance_criteria_checked": 5,
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
   "issues": [],
@@ -551,14 +552,15 @@ Every `/complete` call **must** include both `explorer_result` and `reviewer_res
   "project_checks": [],
   "testing_strategy": {"status": "passed", "note": "<rationale>"},
   "patterns": {"status": "passed", "note": "<rationale>"},
-  "pitfalls": {"status": "passed", "note": "<rationale>"}
+  "pitfalls": {"status": "passed", "note": "<rationale>"},
+  "security_considerations": {"status": "passed", "note": "<rationale>"}
 }
 ```
 
 When the `task-reviewer` custom agent was dispatched, `reviewer_result` is the reviewer
 agent's emitted structured JSON block (`schema_version`, `status`,
 `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]`, and the
-per-section `testing_strategy`/`patterns`/`pitfalls` verdicts) copied
+per-section `testing_strategy`/`patterns`/`pitfalls`/`security_considerations` verdicts) copied
 verbatim and **merged** with the dispatch telemetry plus the derived legacy
 summary fields. The structured fields are what the Kanban review queue renders
 (issue list, acceptance verdicts, code-review checks); omitting them strips the
@@ -577,7 +579,7 @@ Copy exactly the keys the reviewer agent produced. An approved review still
 emits `issues: []` and `project_checks: []` (the agent emits those arrays
 unconditionally), so the empty arrays in the examples above are real, not
 placeholders. But keys the agent did NOT emit — e.g. per-section
-`testing_strategy`/`patterns`/`pitfalls` verdicts on schema versions that don't
+`testing_strategy`/`patterns`/`pitfalls`/`security_considerations` verdicts on schema versions that don't
 produce them — must be omitted entirely, not sent as empty placeholders (per
 `stride-workflow` Step 6).
 
@@ -823,7 +825,7 @@ REQUIRED BODY: {
     "summary": "<40+ non-whitespace chars>",
     "issues_found": 0,
     "acceptance_criteria_checked": 5,
-    "schema_version": "1.2",
+    "schema_version": "1.3",
     "status": "approved",
     "issue_counts": {"critical": 0, "important": 0, "minor": 0},
     "issues": [],
@@ -831,7 +833,8 @@ REQUIRED BODY: {
     "project_checks": [],
     "testing_strategy": {"status": "passed"},
     "patterns": {"status": "passed"},
-    "pitfalls": {"status": "passed"}
+    "pitfalls": {"status": "passed"},
+    "security_considerations": {"status": "passed"}
   },
   "workflow_steps": [
     {"name": "explorer",       "dispatched": true,  "duration_ms": 12450},
@@ -844,7 +847,7 @@ REQUIRED BODY: {
 }
 
 reviewer_result (dispatched) = the task-reviewer custom agent's fenced ```json block
-(schema_version/status/issue_counts/issues[]/acceptance_criteria[]/project_checks[]/testing_strategy/patterns/pitfalls)
+(schema_version/status/issue_counts/issues[]/acceptance_criteria[]/project_checks[]/testing_strategy/patterns/pitfalls/security_considerations)
 merged with dispatched:true + duration_ms + derived legacy issues_found/acceptance_criteria_checked.
 See stride-workflow Step 6 for extraction; schema owned by agents/task-reviewer.md.
 

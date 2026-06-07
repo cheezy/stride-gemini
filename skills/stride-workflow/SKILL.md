@@ -277,7 +277,7 @@ After the reviewer returns, extract the first fenced ```json block from its resp
   - `acceptance_criteria_checked` ← the number of entries in the structured `acceptance_criteria` array
   - `dispatched: true`, `duration_ms: <wall-clock ms>` (as before)
 - Structured fields (copied verbatim from the parsed JSON, but **omit any key the agent did not emit** — do not send empty placeholders):
-  - `status`, `issue_counts`, `issues`, `acceptance_criteria`, `testing_strategy`, `patterns`, `pitfalls`, `schema_version`
+  - `status`, `issue_counts`, `issues`, `acceptance_criteria`, `testing_strategy`, `patterns`, `pitfalls`, `security_considerations`, `schema_version`
 
 **Worked example.** Given the reviewer response below (truncated for brevity)…
 
@@ -287,7 +287,7 @@ Approved
 
 ```json
 {
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
@@ -300,7 +300,8 @@ Approved
   "project_checks": [],
   "testing_strategy": {"status": "passed", "note": "Move + broadcast paths covered by tests."},
   "patterns": {"status": "passed", "note": "Mirrors the existing reorder pattern."},
-  "pitfalls": {"status": "passed", "note": "None of the 4 listed pitfalls violated."}
+  "pitfalls": {"status": "passed", "note": "None of the 4 listed pitfalls violated."},
+  "security_considerations": {"status": "passed", "note": "Move query scoped to the current user's board; no new input or injection surface."}
 }
 ```
 ````
@@ -314,7 +315,7 @@ Approved
   "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
   "issues_found": 0,
   "acceptance_criteria_checked": 3,
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
   "issues": [],
@@ -326,7 +327,8 @@ Approved
   "project_checks": [],
   "testing_strategy": {"status": "passed", "note": "Move + broadcast paths covered by tests."},
   "patterns": {"status": "passed", "note": "Mirrors the existing reorder pattern."},
-  "pitfalls": {"status": "passed", "note": "None of the 4 listed pitfalls violated."}
+  "pitfalls": {"status": "passed", "note": "None of the 4 listed pitfalls violated."},
+  "security_considerations": {"status": "passed", "note": "Move query scoped to the current user's board; no new input or injection surface."}
 }
 ```
 
@@ -336,7 +338,7 @@ Legacy + structured fields coexist in the same map; the server persists `reviewe
 
 1. Fall back to substring-matching the prose summary line ("Approved" or "N issues found (X critical, Y important, Z minor)") to populate `reviewer_result.summary` and `reviewer_result.issues_found` as before this rollout.
 2. Set `acceptance_criteria_checked` from the count of criterion lines you find in the prose acceptance-criteria table, or to `0` if none can be parsed.
-3. **Omit** every structured field (`status`, `issue_counts`, `issues`, `acceptance_criteria`, `testing_strategy`, `patterns`, `pitfalls`, `schema_version`) from the PATCH payload — do not send empty placeholders. The Kanban server tolerates their absence (the ReviewReportPanel renders only what it receives).
+3. **Omit** every structured field (`status`, `issue_counts`, `issues`, `acceptance_criteria`, `testing_strategy`, `patterns`, `pitfalls`, `security_considerations`, `schema_version`) from the PATCH payload — do not send empty placeholders. The Kanban server tolerates their absence (the ReviewReportPanel renders only what it receives).
 4. Keep `dispatched: true` and `duration_ms` as captured. The fallback path produces a degraded-but-valid completion, never a hard failure.
 
 ### Small tasks (0-1 key_files): Skip review. Omit `review_report` from completion.
