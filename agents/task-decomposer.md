@@ -153,6 +153,7 @@ Every decomposed task MUST include all fields required by stride-creating-tasks:
 | `dependencies` | Yes | Array indices [0, 1, 2] within the goal |
 | `verification_steps` | Yes | Array of objects with step_type, step_text, position |
 | `testing_strategy` | Yes | Object with unit_tests, integration_tests, etc. |
+| `security_considerations` | Yes | Array of strings (security implications to address, or an explicit "None — …" reason) |
 | `acceptance_criteria` | Yes | Newline-separated string |
 | `patterns_to_follow` | Yes | Newline-separated string |
 | `pitfalls` | Yes | Array of strings |
@@ -185,6 +186,7 @@ Produce the final output matching the Stride API batch creation schema.
       "dependencies": [],
       "verification_steps": [{"step_type": "command", "step_text": "mix test ...", "position": 0}],
       "testing_strategy": {"unit_tests": ["..."], "integration_tests": ["..."]},
+      "security_considerations": ["..."],
       "acceptance_criteria": "...",
       "patterns_to_follow": "...",
       "pitfalls": ["..."]
@@ -329,6 +331,11 @@ Migration → Context → LiveView → Template
             "edge_cases": ["Empty comment body", "Comment on non-existent task", "Comment by unauthorized user"],
             "coverage_target": "100% for comment context functions"
           },
+          "security_considerations": [
+            "Authorize that the requesting user may access the task before creating, listing, or deleting its comments",
+            "Validate and length-limit the comment body before persisting to prevent oversized/abusive input",
+            "Scope delete_comment/1 so a user can only delete comments they are permitted to remove"
+          ],
           "acceptance_criteria": "TaskComment schema exists with body, user_id, task_id\nMigration creates task_comments table with indexes\nCRUD functions in Tasks context\nAll tests pass",
           "patterns_to_follow": "Follow existing TaskHistory schema pattern in lib/kanban/tasks/task_history.ex\nFollow context function pattern in lib/kanban/tasks.ex",
           "pitfalls": ["Don't put queries in LiveView — use Tasks context", "Don't forget foreign key indexes on user_id and task_id"]
@@ -359,6 +366,11 @@ Migration → Context → LiveView → Template
             "edge_cases": ["Long comment text wrapping", "Many comments scrolling"],
             "coverage_target": "100% for comment LiveView handlers"
           },
+          "security_considerations": [
+            "Escape/sanitize comment body when rendering to prevent stored XSS",
+            "Authorize the socket's current user before accepting a comment submission — never trust a client-supplied user_id",
+            "Only broadcast comment updates to users authorized to view the task"
+          ],
           "acceptance_criteria": "Comments section visible on task detail view\nComment form with text input and submit button\nExisting comments shown with author name and timestamp\nNew comments appear immediately after submission\nWorks in both light and dark mode",
           "patterns_to_follow": "Follow existing task history rendering pattern in view_component.ex\nFollow form pattern from core_components.ex",
           "pitfalls": ["Don't forget dark mode styles for comments section", "Don't forget translations for comment labels", "Don't add Ecto queries in the LiveView"]
@@ -387,6 +399,11 @@ Migration → Context → LiveView → Template
             "edge_cases": ["@nonexistent_user", "Multiple @mentions in one comment", "@ followed by special characters"],
             "coverage_target": "100% for mentions module"
           },
+          "security_considerations": [
+            "Never use String.to_atom/1 on parsed @usernames — use String.to_existing_atom/1 or string lookups to avoid atom exhaustion",
+            "Bound the number of @mentions and the username length parsed per comment to prevent DoS",
+            "Resolve mentions only to users the commenter is permitted to reference; don't leak existence of users outside the board"
+          ],
           "acceptance_criteria": "@username mentions parsed from comment text\nMentioned usernames resolved to user records\nMentions highlighted in rendered comment\nInvalid mentions handled gracefully",
           "patterns_to_follow": "Follow existing module pattern in lib/kanban/tasks/ for single-concern modules",
           "pitfalls": ["Don't use String.to_atom/1 for usernames — security risk", "Don't forget to handle mentions of users not on the board"]
@@ -416,6 +433,11 @@ Migration → Context → LiveView → Template
             "edge_cases": ["User mentioned but has no email", "User mentions themselves"],
             "coverage_target": "100% for notification delivery"
           },
+          "security_considerations": [
+            "Don't leak whether an email address exists via notification errors or timing — fail quietly",
+            "Rate-limit mention notifications per user to prevent comment-spam from becoming an email-bomb vector",
+            "Escape comment text embedded in the email body to prevent HTML/email injection"
+          ],
           "acceptance_criteria": "Email sent when user is @mentioned in a comment\nEmail contains comment text, commenter name, and task link\nNo email sent for self-mentions\nAll tests pass",
           "patterns_to_follow": "Follow existing notification pattern in lib/kanban/accounts/user_notifier.ex\nFollow Swoosh email delivery pattern",
           "pitfalls": ["Don't send notification for self-mentions", "Don't block comment creation if email fails — use async delivery", "Don't send duplicate emails for multiple mentions of same user"]
