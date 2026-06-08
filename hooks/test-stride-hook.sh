@@ -1491,26 +1491,38 @@ STRIDE
     assert_contains "9a: PUT call sends Bearer token from \$COMMAND" \
       "Bearer test_token_abc123" "$PUT_CONTENTS"
     assert_contains "9a: PUT call uses PUT method" "X PUT " "$PUT_CONTENTS"
-    assert_contains "9a: PUT body contains the changed file path" \
-      "tracked.txt" "$PUT_CONTENTS"
-
+    # D61: body must be a wrapped JSON object whose "changed_files" value is the
+    # transport-encoded envelope {encoding: "base64", data: <string>} — NOT a
+    # bare array (which lands at params['_json'] and persists as NULL) and NOT
+    # raw diff text (which an edge filter could reject).
     PUT_BODY=$(extract_body "$PUT_FIXTURE")
-    if [ -n "$PUT_BODY" ] && printf '%s' "$PUT_BODY" | jq -e 'type == "object" and has("changed_files")' > /dev/null 2>&1; then
-      echo -e "  ${GREEN}PASS${RESET}: 9a: PUT body parses as JSON object with 'changed_files' key (not bare array)"
+    if [ -n "$PUT_BODY" ] && printf '%s' "$PUT_BODY" | jq -e '.changed_files.encoding == "base64" and (.changed_files.data | type) == "string"' > /dev/null 2>&1; then
+      echo -e "  ${GREEN}PASS${RESET}: 9a: PUT body is the base64-encoded changed_files envelope"
       PASS=$((PASS + 1))
     else
-      echo -e "  ${RED}FAIL${RESET}: 9a: PUT body is not a wrapped object: $PUT_BODY"
+      echo -e "  ${RED}FAIL${RESET}: 9a: PUT body is not the encoded envelope: $PUT_BODY"
       FAIL=$((FAIL + 1))
     fi
 
-    SNAPSHOT_CONTENTS=$(cat "$PUT_DIR/.stride-changed-files.json")
-    BODY_INNER=$(printf '%s' "$PUT_BODY" | jq -c '.changed_files' 2>/dev/null)
-    SNAPSHOT_NORMALIZED=$(printf '%s' "$SNAPSHOT_CONTENTS" | jq -c '.' 2>/dev/null)
-    if [ -n "$BODY_INNER" ] && [ "$BODY_INNER" = "$SNAPSHOT_NORMALIZED" ]; then
-      echo -e "  ${GREEN}PASS${RESET}: 9a: PUT body's changed_files value equals snapshot file content"
+    # D61: the raw diff/path text MUST NOT appear in the wire body (it is
+    # base64-encoded so an edge filter cannot misread it as an attack).
+    if printf '%s' "$PUT_BODY" | grep -qF "tracked.txt"; then
+      echo -e "  ${RED}FAIL${RESET}: 9a: raw path leaked into the wire body (should be base64-encoded)"
+      FAIL=$((FAIL + 1))
+    else
+      echo -e "  ${GREEN}PASS${RESET}: 9a: raw diff text is absent from the wire body (encoded)"
+      PASS=$((PASS + 1))
+    fi
+
+    # D61: round-trip — re-encoding the snapshot the same way the hook does
+    # reproduces the envelope's data field (portable: encode-only, no decode flag).
+    EXPECTED_DATA=$(base64 < "$PUT_DIR/.stride-changed-files.json" 2>/dev/null | tr -d '\r\n')
+    ACTUAL_DATA=$(printf '%s' "$PUT_BODY" | jq -r '.changed_files.data' 2>/dev/null)
+    if [ -n "$EXPECTED_DATA" ] && [ "$ACTUAL_DATA" = "$EXPECTED_DATA" ]; then
+      echo -e "  ${GREEN}PASS${RESET}: 9a: encoded data round-trips to the snapshot file content"
       PASS=$((PASS + 1))
     else
-      echo -e "  ${RED}FAIL${RESET}: 9a: round-trip mismatch — body: $BODY_INNER vs snapshot: $SNAPSHOT_NORMALIZED"
+      echo -e "  ${RED}FAIL${RESET}: 9a: round-trip mismatch — data: $ACTUAL_DATA vs expected: $EXPECTED_DATA"
       FAIL=$((FAIL + 1))
     fi
   else
@@ -1619,12 +1631,19 @@ STRIDE
   if [ -f "$EMPTY_FIXTURE" ]; then
     EMPTY_CONTENTS=$(cat "$EMPTY_FIXTURE")
     assert_contains "9d: empty snapshot still triggers PUT" "X PUT " "$EMPTY_CONTENTS"
+    # D61: an empty snapshot must still wrap as the transport-encoded envelope
+    # whose data decodes back to an empty array (a legitimate clear), NOT a bare
+    # empty array. Verified portably by re-encoding the snapshot file.
     EMPTY_BODY=$(extract_body "$EMPTY_FIXTURE")
-    if [ -n "$EMPTY_BODY" ] && printf '%s' "$EMPTY_BODY" | jq -e 'type == "object" and .changed_files == []' > /dev/null 2>&1; then
-      echo -e "  ${GREEN}PASS${RESET}: 9d: empty snapshot wraps as {\"changed_files\": []}"
+    EMPTY_EXPECTED_DATA=$(base64 < "$EMPTY_DIR/.stride-changed-files.json" 2>/dev/null | tr -d '\r\n')
+    EMPTY_ACTUAL_DATA=$(printf '%s' "$EMPTY_BODY" | jq -r '.changed_files.data' 2>/dev/null)
+    if [ -n "$EMPTY_BODY" ] &&
+       printf '%s' "$EMPTY_BODY" | jq -e '.changed_files.encoding == "base64"' > /dev/null 2>&1 &&
+       [ -n "$EMPTY_EXPECTED_DATA" ] && [ "$EMPTY_ACTUAL_DATA" = "$EMPTY_EXPECTED_DATA" ]; then
+      echo -e "  ${GREEN}PASS${RESET}: 9d: empty snapshot wraps as the base64-encoded envelope"
       PASS=$((PASS + 1))
     else
-      echo -e "  ${RED}FAIL${RESET}: 9d: PUT body was not the wrapped empty form: $EMPTY_BODY"
+      echo -e "  ${RED}FAIL${RESET}: 9d: PUT body was not the encoded empty form: $EMPTY_BODY"
       FAIL=$((FAIL + 1))
     fi
   else

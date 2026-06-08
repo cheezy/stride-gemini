@@ -759,27 +759,39 @@ try {
         Assert-Eq "8a: PUT method" "PUT" $record.Method
         Assert-Contains "8a: PUT path targets /changed_files" "/api/tasks/99/changed_files" $record.Path
         Assert-Eq "8a: Bearer token from `$Command" "Bearer test_token_xyz" $record.Auth
-        Assert-Contains "8a: PUT body contains snapshot content" "foo.txt" $record.Body
-
+        # D61: body's changed_files value is the transport-encoded envelope
+        # {encoding: "base64", data: <string>}, NOT a bare array and NOT raw
+        # diff text (an edge filter could misread the raw text as an attack).
         try {
             $parsedBody = $record.Body | ConvertFrom-Json
-            if ($parsedBody -is [pscustomobject] -and $parsedBody.PSObject.Properties.Name -contains 'changed_files') {
-                Write-Host "  PASS: 8a: PUT body parses as JSON object with 'changed_files' key (not bare array)" -ForegroundColor Green
+            if ($parsedBody.changed_files.encoding -eq 'base64' -and
+                $parsedBody.changed_files.data -is [string] -and
+                $parsedBody.changed_files.data.Length -gt 0) {
+                Write-Host "  PASS: 8a: PUT body is the base64-encoded changed_files envelope" -ForegroundColor Green
                 $script:PASS++
             } else {
-                Write-Host "  FAIL: 8a: PUT body is not a wrapped object: $($record.Body)" -ForegroundColor Red
+                Write-Host "  FAIL: 8a: PUT body is not the encoded envelope: $($record.Body)" -ForegroundColor Red
                 $script:FAIL++
             }
 
-            $snapshotRaw = Get-Content -Raw -Path (Join-Path $putSuccessProj '.stride-changed-files.json')
-            $snapshotData = $snapshotRaw | ConvertFrom-Json
-            $bodyInner = $parsedBody.changed_files | ConvertTo-Json -Depth 100 -Compress
-            $snapshotInner = @($snapshotData) | ConvertTo-Json -Depth 100 -Compress
-            if ($bodyInner -eq $snapshotInner) {
-                Write-Host "  PASS: 8a: PUT body's changed_files value equals snapshot file content" -ForegroundColor Green
+            # D61: the raw diff/path text MUST NOT appear in the wire body.
+            if ($record.Body -like '*foo.txt*') {
+                Write-Host "  FAIL: 8a: raw path leaked into the wire body (should be base64-encoded)" -ForegroundColor Red
+                $script:FAIL++
+            } else {
+                Write-Host "  PASS: 8a: raw diff text is absent from the wire body (encoded)" -ForegroundColor Green
+                $script:PASS++
+            }
+
+            # D61: round-trip — encoding the snapshot bytes the same way the hook
+            # does reproduces the envelope's data field.
+            $expectedData = [System.Convert]::ToBase64String(
+                [System.IO.File]::ReadAllBytes((Join-Path $putSuccessProj '.stride-changed-files.json')))
+            if ($parsedBody.changed_files.data -eq $expectedData) {
+                Write-Host "  PASS: 8a: encoded data round-trips to the snapshot file content" -ForegroundColor Green
                 $script:PASS++
             } else {
-                Write-Host "  FAIL: 8a: round-trip mismatch — body: $bodyInner vs snapshot: $snapshotInner" -ForegroundColor Red
+                Write-Host "  FAIL: 8a: round-trip mismatch — data: $($parsedBody.changed_files.data) vs expected: $expectedData" -ForegroundColor Red
                 $script:FAIL++
             }
         } catch {
@@ -814,6 +826,8 @@ $failCmd = 'curl -X PATCH http://127.0.0.1:1/api/tasks/99/complete -H "Authoriza
 $failJson = "{`"tool_input`":{`"command`":`"$failCmd`"}}"
 $r = Invoke-HookScript -InputJson $failJson -Phase 'pre' -ProjectDir $putFailProj
 Assert-Exit "8b: hook exits 0 even when PUT fails" 0 $r.ExitCode
+# D61: a failed upload is surfaced to stderr (non-fatal), never silently dropped.
+Assert-Contains "8b: failed PUT warns to stderr" "stride-hook: changed_files upload failed for task" $r.Stderr
 $snapshotPath8b = Join-Path $putFailProj '.stride-changed-files.json'
 if (Test-Path $snapshotPath8b) {
     Write-Host "  PASS: 8b: snapshot file persists across failed PUT" -ForegroundColor Green

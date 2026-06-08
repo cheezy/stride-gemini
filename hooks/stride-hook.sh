@@ -251,16 +251,43 @@ finalize_after_doing() {
       _api_base=$(resolve_stride_api_url)
       _token=$(resolve_stride_api_token)
       if [ -n "$_api_base" ] && [ -n "$_token" ]; then
-        # Wrap the bare snapshot array as {"changed_files": [...]} so the
-        # server's params['changed_files'] receives the list. A bare top-level
-        # array would land at params['_json'] under Plug.Parsers and persist
-        # as NULL — clearing the existing snapshot (G174 root cause).
-        curl -s -X PUT \
-          -H "Authorization: Bearer $_token" \
-          -H 'Content-Type: application/json' \
-          -d "{\"changed_files\":$(cat "$PROJECT_DIR/.stride-changed-files.json")}" \
-          "$_api_base/api/tasks/$TASK_ID/changed_files" \
-          > /dev/null 2>&1 || true
+        # Upload the per-file diff snapshot. We send the transport-encoded
+        # envelope {"changed_files":{"encoding":"base64","data":"<b64>"}} rather
+        # than the raw array so an edge request filter does not misread a code
+        # diff as an attack and drop the upload (D61). The server decodes it
+        # back to the same list. The base64 MUST be single-line so the value is
+        # valid inside the JSON string (strip any wrap newlines). When base64 is
+        # unavailable we fall back to the raw {"changed_files":[...]} shape — a
+        # bare top-level array would land at params['_json'] and persist as NULL.
+        local _b64 _http_code
+        _b64=""
+        if command -v base64 > /dev/null 2>&1; then
+          _b64=$(base64 < "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null | tr -d '\r\n')
+        fi
+
+        if [ -n "$_b64" ]; then
+          _http_code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer $_token" \
+            -H 'Content-Type: application/json' \
+            -d "{\"changed_files\":{\"encoding\":\"base64\",\"data\":\"$_b64\"}}" \
+            "$_api_base/api/tasks/$TASK_ID/changed_files" 2>/dev/null || printf '000')
+        else
+          _http_code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer $_token" \
+            -H 'Content-Type: application/json' \
+            -d "{\"changed_files\":$(cat "$PROJECT_DIR/.stride-changed-files.json")}" \
+            "$_api_base/api/tasks/$TASK_ID/changed_files" 2>/dev/null || printf '000')
+        fi
+
+        # Surface a failed upload instead of dropping it silently. The diff is
+        # non-fatal to completion, so we warn rather than abort.
+        case "$_http_code" in
+          2*) : ;;
+          *)
+            printf 'stride-hook: changed_files upload failed (HTTP %s) for task %s\n' \
+              "$_http_code" "$TASK_ID" >&2
+            ;;
+        esac
       fi
     fi
   fi
