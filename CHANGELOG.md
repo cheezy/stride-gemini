@@ -2,6 +2,30 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.15.0] - 2026-06-08
+
+Bundled release covering two ports from the main `stride` plugin (G217 + G218 parity).
+
+### Added
+
+- **`hooks/stride-hook.sh`, `hooks/stride-hook.ps1`** (W1045 / D61) — The `after_doing` hook now uploads the per-file diff snapshot to `/api/tasks/:id/changed_files` as a **transport-encoded envelope** — `{"changed_files":{"encoding":"base64","data":"<single-line-base64>"}}` — instead of the raw `{"changed_files":[...]}` array. An edge request filter (WAF) in front of the Stride server can misread a dense code diff as an attack payload and silently drop the upload, leaving `changed_files` empty in the review queue; base64-wrapping the body neutralizes that false positive while the server decodes it back to the identical list. Falls back to the raw `{"changed_files":[...]}` object when `base64` is unavailable (never a bare top-level array). A non-2xx upload response is now surfaced as a stderr warning rather than discarded (non-fatal to completion; the bearer token is never logged). The PowerShell mirror uses `[System.Convert]::ToBase64String` and `[Console]::Error.WriteLine`. The `.sh` D61 block is byte-identical to the main plugin's; hook test suites assert the encoded envelope, raw-text absence, and base64 round-trip (`test-stride-hook.sh` 140/0).
+
+### Fixed
+
+- **`skills/stride-workflow/SKILL.md`, `skills/stride-subagent-workflow/SKILL.md`** (W1053 / D63) — Both skills' "Extracting the structured review block" guidance built `reviewer_result` from a hand-maintained enumerated copy-list of structured keys that omitted `project_checks`, so the reviewer's CODE-REVIEW.md per-bullet audit was silently dropped on completion and the Kanban review queue's **Code review** panel rendered nothing. The guidance is now a **verbatim passthrough**: copy the reviewer's entire parsed JSON object into `reviewer_result` and overlay only the legacy summary fields. The fallback (no parseable JSON block) was inverted to a legacy-only send list so it no longer enumerates structured keys either.
+
+### Updated
+
+- **`agents/task-reviewer.md`** (W1053 / W1049) — Added an explicit **consumption invariant**: the canonical schema is the only place the structured key-set is enumerated, and the completion path MUST persist the reviewer's emitted JSON verbatim and MUST NOT maintain its own allow-list of keys to copy.
+
+### Backward compatibility
+
+Wire-shape: the `changed_files` envelope requires a Stride server that accepts the `base64` / `gzip+base64` encodings on `/changed_files` (ships in the kanban repo); the raw-array fallback path remains byte-compatible with the prior hook. The `reviewer_result` change is documentation/skill-instruction only — `project_checks[]` already existed and is already rendered by the review queue; this release simply stops dropping it. No `.stride.md` / `.stride_auth.md` / `.gitignore` changes required. Not distributed through a marketplace.
+
+### Source
+
+W1045 (D61 base64 changed_files transport port), W1053 (D63 reviewer_result verbatim passthrough + W1049 consumption invariant). Mirrors the main `stride` plugin's 1.22.0 (D61) and 1.22.1 (project_checks) releases.
+
 ## [1.14.0] - 2026-06-07
 
 Parity release: brings the Gemini variant to G210 parity by adding `security_considerations` as the **fifth** review_queue-scored field across the creation, enrichment, decomposition, review, completion, and extraction skills/agents. Feature minor (1.13.0 → 1.14.0).
