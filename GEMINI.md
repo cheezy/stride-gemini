@@ -18,7 +18,7 @@ Before ANY Stride API call, activate the corresponding skill. These skills conta
 Five custom agents are available for task lifecycle support. Use them per the decision matrix in `stride-subagent-workflow`:
 
 - **task-explorer** — Explore key_files and patterns before coding (medium+ complexity or 2+ key_files)
-- **task-reviewer** — Review changes against acceptance criteria before completion (medium+ complexity or 2+ key_files). Emits a structured `reviewer_result` block (`schema_version` 1.3: `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]` from a project-root `CODE-REVIEW.md`, and per-section `testing_strategy`/`patterns`/`pitfalls`/`security_considerations` verdicts). Persist it verbatim per `stride-workflow` Step 6; schema owned by `agents/task-reviewer.md`.
+- **task-reviewer** — Review changes against acceptance criteria before completion (medium+ complexity or 2+ key_files). Emits a structured `reviewer_result` block (`schema_version` 1.4: `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]` from a project-root `CODE-REVIEW.md` with per-entry `status` enum `met`/`not_met`/`not_applicable` and full-checklist emission, and per-section `testing_strategy`/`patterns`/`pitfalls`/`security_considerations` verdicts). Persist it verbatim per `stride-workflow` Step 6; schema owned by `agents/task-reviewer.md`.
 - **task-enricher** — Populate sparse tasks (empty key_files/testing_strategy/verification_steps) before claiming
 - **task-decomposer** — Break goals into dependency-ordered child tasks
 - **hook-diagnostician** — Diagnose hook failures (structured JSON from stride-hook.sh or raw text) with prioritized fix plans
