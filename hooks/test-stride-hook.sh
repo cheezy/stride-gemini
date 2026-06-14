@@ -865,6 +865,8 @@ else
 .stride.md
 .stride-env-cache
 .stride-changed-files.json
+.stride-diff-upload-state
+curl-call.txt
 GITIGNORE
     echo "v1" > tracked.txt
     git add .gitignore tracked.txt > /dev/null
@@ -917,6 +919,8 @@ STRIDE
 .stride.md
 .stride-env-cache
 .stride-changed-files.json
+.stride-diff-upload-state
+curl-call.txt
 GITIGNORE
     git add .gitignore > /dev/null
     git commit -q -m "v1"
@@ -1443,8 +1447,11 @@ CURLSTUB
     chmod +x "$stub_dir/curl"
   }
 
+  # (W1093) after_doing now PUTs twice — an early pre-loop capture and a
+  # post-loop refresh — so the fixture records two BODY blocks. Return the
+  # LAST recorded body (the refresh), which is the final on-disk snapshot.
   extract_body() {
-    awk '/^BODY:$/{flag=1; next} flag && /^$/{flag=0} flag' "$1"
+    awk '/^BODY:$/{getline body} END{print body}' "$1"
   }
 
   setup_put_repo() {
@@ -1457,6 +1464,8 @@ CURLSTUB
 .stride.md
 .stride-env-cache
 .stride-changed-files.json
+.stride-diff-upload-state
+curl-call.txt
 GITIGNORE
     echo "v1" > tracked.txt
     git add .gitignore tracked.txt > /dev/null
@@ -1571,6 +1580,8 @@ STRIDE
 .stride.md
 .stride-env-cache
 .stride-changed-files.json
+.stride-diff-upload-state
+curl-call.txt
 GITIGNORE
     echo "v1" > x.txt
     git add .gitignore x.txt > /dev/null
@@ -1612,6 +1623,8 @@ STRIDE
 .stride.md
 .stride-env-cache
 .stride-changed-files.json
+.stride-diff-upload-state
+curl-call.txt
 GITIGNORE
     echo "v1" > y.txt
     git add .gitignore y.txt > /dev/null
@@ -1840,6 +1853,140 @@ else
   PASS=$((PASS + 1))
 fi
 rm -f "$LOG_STDERR"; rm -rf "$LOG_DIR"
+
+# ============================================================
+# Test Group 11: W1093 early capture + W1094 upload-state record
+# ============================================================
+echo ""
+echo "=== Test Group 11: early capture ordering + upload-state (W1093/W1094) ==="
+
+# Stub curl that records the call body, appends "PUT" to an order file, and
+# prints an HTTP code on stdout (mimics real curl -w '%{http_code}').
+make_order_stub() {
+  local stub_dir="$1" fixture="$2" order="$3" code="${4:-200}"
+  mkdir -p "$stub_dir"
+  cat > "$stub_dir/curl" << CURLSTUB
+#!/usr/bin/env bash
+{ printf 'ARGS:'; for a in "\$@"; do printf ' %s' "\$a"; done; printf '\n'; } >> "$fixture"
+prev=""
+for a in "\$@"; do
+  case "\$prev" in -d|--data|--data-raw) printf 'BODY:\n%s\n' "\$a" >> "$fixture" ;; esac
+  prev="\$a"
+done
+printf 'PUT\n' >> "$order"
+printf '%s' "$code"
+exit 0
+CURLSTUB
+  chmod +x "$stub_dir/curl"
+}
+
+if ! command -v jq > /dev/null 2>&1 || ! command -v git > /dev/null 2>&1; then
+  echo "  SKIP: jq or git missing — Group 11 requires both"
+else
+  # 11a: the early snapshot PUT runs BEFORE the first after_doing command, and
+  # the post-loop refresh runs after → exactly two PUTs, the first preceding
+  # the gate command in execution order.
+  EC_DIR=$(mktemp -d); EC_STUB=$(mktemp -d)
+  EC_ORDER="$EC_DIR.order"; EC_FIX="$EC_DIR.curl"
+  : > "$EC_ORDER"
+  make_order_stub "$EC_STUB" "$EC_FIX" "$EC_ORDER" 200
+  (
+    cd "$EC_DIR" || exit 1
+    git init -q; git config user.email t@t.local; git config user.name T
+    printf '.stride.md\n.stride-env-cache\n.stride-changed-files.json\n.stride-diff-upload-state\n' > .gitignore
+    echo v1 > f.txt; git add .gitignore f.txt > /dev/null; git commit -q -m v1
+    EC_BASE=$(git rev-parse HEAD)
+    echo v2 > f.txt; git add f.txt > /dev/null; git commit -q -m v2
+    printf '## after_doing\n```bash\nprintf '\''CMD\\n'\'' >> "%s"\n```\n' "$EC_ORDER" > .stride.md
+    printf "TASK_ID='42'\nTASK_BASE_REF='%s'\n" "$EC_BASE" > .stride-env-cache
+    J='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer tok\""}}'
+    echo "$J" | CLAUDE_PROJECT_DIR="$PWD" PATH="$EC_STUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  EC_SEQ=$(tr '\n' ' ' < "$EC_ORDER")
+  assert_eq "11a: early PUT precedes gate command, refresh follows" "PUT CMD PUT " "$EC_SEQ"
+  rm -rf "$EC_DIR" "$EC_STUB"; rm -f "$EC_ORDER" "$EC_FIX"
+
+  # 11b: .stride-diff-upload-state records task id + HTTP code ONLY — never the
+  # bearer token or the API URL.
+  ST_DIR=$(mktemp -d); ST_STUB=$(mktemp -d)
+  ST_ORDER="$ST_DIR.order"; ST_FIX="$ST_DIR.curl"; : > "$ST_ORDER"
+  make_order_stub "$ST_STUB" "$ST_FIX" "$ST_ORDER" 200
+  (
+    cd "$ST_DIR" || exit 1
+    git init -q; git config user.email t@t.local; git config user.name T
+    printf '.stride.md\n.stride-env-cache\n.stride-changed-files.json\n.stride-diff-upload-state\n' > .gitignore
+    echo v1 > f.txt; git add .gitignore f.txt > /dev/null; git commit -q -m v1
+    ST_BASE=$(git rev-parse HEAD)
+    echo v2 > f.txt; git add f.txt > /dev/null; git commit -q -m v2
+    printf '## after_doing\n```bash\necho ran\n```\n' > .stride.md
+    printf "TASK_ID='42'\nTASK_BASE_REF='%s'\n" "$ST_BASE" > .stride-env-cache
+    J='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer stride_dev_SECRETTOKEN\""}}'
+    echo "$J" | CLAUDE_PROJECT_DIR="$PWD" PATH="$ST_STUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  ST_STATE=$(cat "$ST_DIR/.stride-diff-upload-state" 2>/dev/null || true)
+  assert_contains "11b: upload-state records task_id" "task_id=42" "$ST_STATE"
+  assert_contains "11b: upload-state records http_code" "http_code=200" "$ST_STATE"
+  if printf '%s' "$ST_STATE" | grep -qE 'stride_dev_SECRETTOKEN|stride[.]example[.]com'; then
+    echo -e "  ${RED}FAIL${RESET}: 11b: upload-state leaked token or URL"; FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 11b: upload-state contains no token or URL"; PASS=$((PASS + 1))
+  fi
+  rm -rf "$ST_DIR" "$ST_STUB"; rm -f "$ST_ORDER" "$ST_FIX"
+fi
+
+# ============================================================
+# Test Group 12: W1094 before_review changed_files self-heal
+# ============================================================
+echo ""
+echo "=== Test Group 12: before_review self-heal (W1094) ==="
+
+if ! command -v jq > /dev/null 2>&1 || ! command -v git > /dev/null 2>&1; then
+  echo "  SKIP: jq or git missing — Group 12 requires both"
+else
+  # Runs the hook in POST phase on a /complete command (→ HOOK_NAME=before_review,
+  # which triggers self_heal_changed_files_upload before the empty section runs).
+  # $1 = state-file contents (empty string = no state file). Sets SELF_HEAL_SEQ
+  # to "PUT" when a retry upload fired, "" when none, and SELF_HEAL_RC to the exit.
+  run_self_heal() {
+    local state_contents="$1" dir stub order rc base
+    dir=$(mktemp -d); stub=$(mktemp -d); order="$dir.order"; : > "$order"
+    make_order_stub "$stub" "$dir.curl" "$order" 200
+    (
+      cd "$dir" || exit 1
+      git init -q; git config user.email t@t.local; git config user.name T
+      printf '.stride.md\n.stride-env-cache\n.stride-changed-files.json\n.stride-diff-upload-state\n' > .gitignore
+      echo v1 > f.txt; git add .gitignore f.txt > /dev/null; git commit -q -m v1
+      base=$(git rev-parse HEAD)
+      echo v2 > f.txt; git add f.txt > /dev/null; git commit -q -m v2
+      printf '## before_review\n```bash\n```\n' > .stride.md
+      printf "TASK_ID='42'\nTASK_BASE_REF='%s'\n" "$base" > .stride-env-cache
+      printf '[]\n' > .stride-changed-files.json
+      [ -n "$state_contents" ] && printf '%s\n' "$state_contents" > .stride-diff-upload-state
+      J='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer tok\""}}'
+      echo "$J" | CLAUDE_PROJECT_DIR="$PWD" PATH="$stub:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+    )
+    rc=$?
+    SELF_HEAL_SEQ=$(tr -d '\n' < "$order")
+    SELF_HEAL_RC=$rc
+    rm -rf "$dir" "$stub"; rm -f "$order" "$dir.curl"
+  }
+
+  run_self_heal ""
+  assert_eq "12a: missing state → re-uploads (retry PUT)" "PUT" "$SELF_HEAL_SEQ"
+  assert_exit "12a: self-heal does not fail the hook" 0 "$SELF_HEAL_RC"
+
+  run_self_heal "task_id=99
+http_code=200"
+  assert_eq "12b: different task id → re-uploads" "PUT" "$SELF_HEAL_SEQ"
+
+  run_self_heal "task_id=42
+http_code=500"
+  assert_eq "12c: recorded non-2xx → re-uploads" "PUT" "$SELF_HEAL_SEQ"
+
+  run_self_heal "task_id=42
+http_code=200"
+  assert_eq "12d: healthy 2xx for this task → no re-upload" "" "$SELF_HEAL_SEQ"
+fi
 
 # ============================================================
 # Summary

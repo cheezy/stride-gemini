@@ -46,6 +46,10 @@ All Stride API calls are pre-authorized. Never ask the user for permission to ca
 
 Read `.stride_auth.md` for API credentials (URL, token). The `after_doing` hook also reads `.stride_auth.md` (v1.13.0+, D54) as the primary source for the `changed_files` snapshot PUT credentials — the production `**API Token:**` line (never `**Local API Token:**`), falling back to credentials in the intercepted completion command, so the upload works even when your curl uses `$STRIDE_API_URL` / `$STRIDE_API_TOKEN` shell variables; the token is never logged. Use the Gemini CLI hooks panel to verify hooks are active.
 
+**`after_doing` time budget.** The two `run_shell_command` hook entries in `hooks/hooks.json` carry a **300000ms (5-minute) timeout** (the `activate_skill` gate stays at 10000ms). The timeout is a **ceiling, not a guarantee** — the entire `after_doing` section (your `.stride.md` quality gate plus the plugin's snapshot work) shares this one budget. The per-file diff snapshot is captured and PUT **before** the gate commands run, so a timeout no longer loses the diffs; if `after_doing` still overruns, the `before_review` hook re-uploads on its fresh budget. If your gate runs close to the ceiling, trim slow steps (move a full coverage run into CI) or raise the `timeout` values in a fork.
+
+**Temp files to `.gitignore`.** The hooks write `.stride-env-cache` (cached task metadata), `.stride-changed-files.json` (the per-file diff snapshot), and `.stride-diff-upload-state` (the last upload's task id + HTTP code, used by the `before_review` self-heal) between invocations. Add all three to your `.gitignore`; all are cleaned up after `after_review`.
+
 ## Tool Name Mapping
 
 When skills reference tool names, use Gemini CLI equivalents:

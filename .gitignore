@@ -13,3 +13,8 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Stride hook temp files (written between hook invocations, cleaned up after after_review)
+.stride-env-cache
+.stride-changed-files.json
+.stride-diff-upload-state

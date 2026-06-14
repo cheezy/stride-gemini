@@ -201,15 +201,23 @@ No platform-specific configuration needed — the single `hooks.json` entry hand
 
 - Hooks use `BeforeTool`/`AfterTool` events (not `PreToolUse`/`PostToolUse`)
 - Matcher targets `run_shell_command` (Gemini's shell tool name)
-- Timeouts are in milliseconds (120000ms = 2 minutes)
+- Timeouts are in milliseconds (300000ms = 5 minutes)
 - **JSON-only stdout**: The hook script sends all debug/progress output to stderr; only the final structured JSON result goes to stdout (Gemini requirement)
 - Hooks are visible and manageable via `/hooks panel`, `/hooks enable`, `/hooks disable`
+
+### The `after_doing` time budget
+
+The two `run_shell_command` hook entries in `hooks/hooks.json` carry a **300000ms (5-minute) timeout** (the `activate_skill` gate stays at 10000ms — it fires on every Skill invocation and must remain fast). The timeout is a **ceiling, not a guarantee**: the entire `after_doing` section — every command in your `.stride.md` quality gate (test suite with coverage, credo, sobelow, auto-commit) plus the plugin's own snapshot work — shares this one budget.
+
+When the budget is exceeded, Gemini CLI kills the hook process. With the early-capture fix the per-file diffs are already uploaded before your gate commands start, so a timeout no longer loses them — but the structured success JSON, the post-command snapshot refresh, and any not-yet-run gate commands are still lost, and the completion call is blocked as if the gate had failed.
+
+If your project's quality gate runs close to the ceiling, either trim the `.stride.md` `## after_doing` section (move slow steps like a full coverage run into CI) or raise the `timeout` values further in a fork of the plugin.
 
 ### Environment Variable Caching
 
 After a successful task claim, hook scripts extract task metadata (TASK_ID, TASK_IDENTIFIER, TASK_TITLE, etc.) from the API response and cache them to `.stride-env-cache`. Subsequent hooks can reference these variables in `.stride.md` commands (e.g., `$TASK_IDENTIFIER`). The cache is cleaned up after the `after_review` hook.
 
-Add `.stride-env-cache` to your `.gitignore`.
+Add `.stride-env-cache`, `.stride-changed-files.json`, and `.stride-diff-upload-state` to your `.gitignore` — all three are temp files written between hook invocations (`.stride-changed-files.json` holds the per-file diff snapshot; `.stride-diff-upload-state` records the last upload's task id + HTTP code so the `before_review` hook can re-upload on a fresh timeout budget when an `after_doing` upload was lost). All three are cleaned up automatically after the `after_review` hook.
 
 ### Troubleshooting
 
