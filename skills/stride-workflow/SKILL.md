@@ -254,7 +254,7 @@ Follow:
 
 Invoke the `task-reviewer` custom agent with:
 - The git diff of all your changes
-- The task's `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, and `testing_strategy`
+- **Every review field the task supplies — NO EXCEPTIONS:** the task's `acceptance_criteria`, `pitfalls`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `description`, `what`, and `why`. This list MUST match the reviewer agent's documented input contract (the "You will receive" line in `agents/task-reviewer.md`) — pass every field the task carries, never a subset, never with a small-task or brevity discount. Omitting a supplied field (most often `security_considerations`) is the exact defect this prevents: a section the reviewer is never handed comes back `not_assessed` even though the task specified it.
 
 The reviewer returns a human-readable prose summary followed by a fenced ```json block. The schema of that block is owned by `agents/task-reviewer.md` — do not duplicate field definitions here.
 
@@ -276,7 +276,12 @@ After the reviewer returns, extract the first fenced ```json block from its resp
   - `issues_found` ← the sum of the values in the structured `issue_counts` object (sum only the recognized severity keys you receive; pass through any unknown severity keys verbatim inside the structured `issue_counts` object)
   - `acceptance_criteria_checked` ← the number of entries in the structured `acceptance_criteria` array
   - `dispatched: true`, `duration_ms: <wall-clock ms>` (as before)
-- Structured fields — **copy the reviewer's entire parsed JSON object verbatim** into `reviewer_result`, then overlay the legacy fields above on top. Do **not** maintain an allow-list of which structured keys to copy: whatever the agent emitted is persisted as-is, so any field the schema gains later flows through automatically (this is exactly how `project_checks` was being dropped — an enumerated copy-list silently omitted it). The structured key-set is owned by `agents/task-reviewer.md`; passthrough it, never re-enumerate it here. Concretely, the reviewer currently emits `status`, `issue_counts`, `issues`, `acceptance_criteria`, `project_checks`, `testing_strategy`, `patterns`, `pitfalls`, `security_considerations`, and `schema_version` — but treat that as illustrative, not exhaustive. Because you copy the parsed JSON verbatim, keys the agent did not emit are simply absent (no empty placeholders to send).
+- Structured fields — **copy the reviewer's entire parsed JSON object verbatim** into `reviewer_result`, then overlay the legacy fields above on top. Do **not** maintain an allow-list of which structured keys to copy: whatever the agent emitted is persisted as-is, so any field the schema gains later flows through automatically (this is exactly how `project_checks` was being dropped — an enumerated copy-list silently omitted it). The structured key-set is owned by `agents/task-reviewer.md`; passthrough it, never re-enumerate it here. Concretely, the reviewer currently emits `status`, `issue_counts`, `issues`, `acceptance_criteria`, `project_checks`, `testing_strategy`, `patterns`, `pitfalls`, `security_considerations`, and `schema_version` — but treat that as illustrative, not exhaustive. Because you copy the parsed JSON verbatim, keys the agent did not emit are simply absent (no empty placeholders to send). **Hand-typing, re-typing, or sub-selecting `reviewer_result` is FORBIDDEN — no exceptions, no small-task or brevity shortcut. The mechanical whole-object copy + mandatory self-check below is the only correct path; if the self-check fails, fix the copy, never the requirement.**
+
+**Mandatory self-check — run before EVERY `/complete`, NO EXCEPTIONS.** After you build `reviewer_result` by the whole-object copy, verify both of these before submitting. A failure here means you trimmed the output: fix the copy, never weaken the check.
+
+- **Every section survives.** Every section key the reviewer emitted in its structured block is present in `reviewer_result` — nothing dropped (the whole-object copy guarantees this; the check confirms it).
+- **`project_checks` count matches.** The number of entries in `reviewer_result.project_checks` equals the number the reviewer emitted — never trimmed or sub-selected. Selecting a subset is exactly how `project_checks` got truncated (3 of 26 reached the server).
 
 **Worked example.** Given the reviewer response below (truncated for brevity)…
 
@@ -428,6 +433,8 @@ If automatic hooks are unavailable, execute hooks manually:
 ---
 
 ## Step 8: Complete the Task
+
+**FIRST run the mandatory pre-submission self-check** — the hard gate in `stride-completing-tasks` ("MANDATORY pre-submission self-check"). It must pass before you submit: every section the reviewer produced is present, the `project_checks` count equals the reviewer's, and no task-supplied section (especially `security_considerations`) comes back `not_assessed`. If it fails, re-run the reviewer with the full inputs or fix the passthrough — never submit a thin or task-inconsistent report (the Kanban server hard-rejects it anyway).
 
 Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 
