@@ -516,7 +516,19 @@ EXIT_CODE=$?
 FAIL_STDERR=$(cat "$FAIL_STDERR_FILE")
 rm -f "$FAIL_STDERR_FILE"
 assert_exit "failing hook exits 2" 2 "$EXIT_CODE"
-assert_contains "failing hook ran step one" "step one passes" "$FAIL_STDERR"
+# The failure message stays on stderr — load-bearing for the BeforeTool
+# blocking semantic (exit 2 + stderr message).
+assert_contains "failing hook reports failure on stderr" "hook failed on command 2/3" "$FAIL_STDERR"
+# D65: the earlier PASSING command's output must NOT leak to stderr. Before the
+# fix, a successful command's stdout/stderr was catted to fd 2, which the host
+# rendered under a false hook-error label even on exit 0.
+if echo "$FAIL_STDERR" | grep -qF "step one passes"; then
+  echo -e "  ${RED}FAIL${RESET}: passing command output must not appear on stderr"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${RESET}: passing command output kept off stderr"
+  PASS=$((PASS + 1))
+fi
 if echo "$FAIL_STDERR" | grep -qF "step three should not run"; then
   echo -e "  ${RED}FAIL${RESET}: should not run commands after failure"
   FAIL=$((FAIL + 1))
@@ -556,6 +568,72 @@ OUTPUT=$(echo "$COMPLETE_JSON" | GEMINI_PROJECT_DIR="$PARTIAL_PROJ" bash "$HOOK_
 EXIT_CODE=$?
 assert_exit "missing section exits 0" 0 "$EXIT_CODE"
 assert_eq "missing section no output" "" "$OUTPUT"
+
+# 5k: D65 — a fully PASSING gate writes nothing to stderr; per-command output
+# is folded into the success JSON's commands_output on stdout instead. Capture
+# stdout and stderr separately to assert the new contract.
+OK_PROJ="$TMPDIR_TEST/ok-stderr-project"
+mkdir -p "$OK_PROJ"
+cat > "$OK_PROJ/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+echo "gate_line_one"
+echo "gate_line_two"
+```
+STRIDE
+OK_STDOUT_FILE=$(mktemp)
+OK_STDERR_FILE=$(mktemp)
+echo "$COMPLETE_JSON" | GEMINI_PROJECT_DIR="$OK_PROJ" bash "$HOOK_SCRIPT" pre >"$OK_STDOUT_FILE" 2>"$OK_STDERR_FILE"
+EXIT_CODE=$?
+OK_STDOUT=$(cat "$OK_STDOUT_FILE")
+OK_STDERR=$(cat "$OK_STDERR_FILE")
+rm -f "$OK_STDOUT_FILE" "$OK_STDERR_FILE"
+assert_exit "passing gate exits 0" 0 "$EXIT_CODE"
+assert_eq "passing gate writes nothing to stderr" "" "$OK_STDERR"
+if command -v jq > /dev/null 2>&1; then
+  assert_contains "passing gate emits commands_output" "commands_output" "$OK_STDOUT"
+  assert_contains "passing gate output folded into JSON (1)" "gate_line_one" "$OK_STDOUT"
+  assert_contains "passing gate output folded into JSON (2)" "gate_line_two" "$OK_STDOUT"
+  if echo "$OK_STDOUT" | jq -e '.status == "success" and (.commands_output | type == "array")' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: success stdout is a single JSON object with commands_output array"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: success stdout not a valid JSON object: $OK_STDOUT"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  assert_eq "no-jq passing gate emits no stdout" "" "$OK_STDOUT"
+fi
+
+# 5l: D65 — a PASSING command that writes to STDERR (exit 0) is the exact
+# production trigger. Its stderr must NOT reach fd 2 (where the host mislabels
+# it); it must land in the success JSON's commands_output[].stderr instead.
+STDERR_OK_PROJ="$TMPDIR_TEST/stderr-ok-project"
+mkdir -p "$STDERR_OK_PROJ"
+cat > "$STDERR_OK_PROJ/.stride.md" << 'STRIDE'
+## after_doing
+```bash
+echo "compiling to stderr" >&2
+```
+STRIDE
+SO_STDOUT_FILE=$(mktemp)
+SO_STDERR_FILE=$(mktemp)
+echo "$COMPLETE_JSON" | GEMINI_PROJECT_DIR="$STDERR_OK_PROJ" bash "$HOOK_SCRIPT" pre >"$SO_STDOUT_FILE" 2>"$SO_STDERR_FILE"
+EXIT_CODE=$?
+SO_STDOUT=$(cat "$SO_STDOUT_FILE")
+SO_STDERR=$(cat "$SO_STDERR_FILE")
+rm -f "$SO_STDOUT_FILE" "$SO_STDERR_FILE"
+assert_exit "stderr-writing passing gate exits 0" 0 "$EXIT_CODE"
+assert_eq "stderr-writing passing gate writes nothing to fd 2" "" "$SO_STDERR"
+if command -v jq > /dev/null 2>&1; then
+  if echo "$SO_STDOUT" | jq -e '.commands_output[0].stderr | contains("compiling to stderr")' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: passing command's stderr folded into commands_output[].stderr"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: passing command's stderr not in commands_output: $SO_STDOUT"
+    FAIL=$((FAIL + 1))
+  fi
+fi
 
 # ============================================================
 # Test Group 6: Edge cases

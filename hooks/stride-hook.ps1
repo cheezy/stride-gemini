@@ -402,6 +402,11 @@ function Invoke-StrideSection {
     Invoke-FinalizeAfterDoing
 
     $secCompletedCmds = @()
+    # Parallel to $secCompletedCmds: one object per successful command holding
+    # its tail-truncated stdout/stderr, folded into the success JSON's
+    # commands_output array (D65). Keeps passing-gate output off Console.Error
+    # so the host does not render it under a false hook-error label.
+    $secCmdOutputs = @()
     $secStartTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $secCmdIndex = 0
     $secCmdTotal = $secCmdList.Count
@@ -439,13 +444,29 @@ function Invoke-StrideSection {
 
             if ($proc.ExitCode -eq 0) {
                 $secCompletedCmds += $execTrimmed
+                # Do NOT write the passing command's output to Console.Error:
+                # the host renders any hook stderr under a red hook-error label
+                # even on exit 0 (D65). Instead capture a tail-truncated copy —
+                # same -50 cap as the failure path below — into $secCmdOutputs,
+                # folded into the success JSON's commands_output array so agents
+                # keep visibility.
+                $secOkStdout = ''
+                $secOkStderr = ''
                 if (Test-Path $secStdoutFile) {
-                    $secStdout = Get-Content $secStdoutFile -Raw -Encoding UTF8
-                    if ($secStdout) { [Console]::Error.Write($secStdout) }
+                    # @() guards against $null (empty file) under StrictMode.
+                    $allLines = @(Get-Content $secStdoutFile -Encoding UTF8)
+                    if ($allLines.Count -gt 50) { $allLines = $allLines[-50..-1] }
+                    $secOkStdout = $allLines -join "`n"
                 }
                 if (Test-Path $secStderrFile) {
-                    $secStderr = Get-Content $secStderrFile -Raw -Encoding UTF8
-                    if ($secStderr) { [Console]::Error.Write($secStderr) }
+                    $allLines = @(Get-Content $secStderrFile -Encoding UTF8)
+                    if ($allLines.Count -gt 50) { $allLines = $allLines[-50..-1] }
+                    $secOkStderr = $allLines -join "`n"
+                }
+                $secCmdOutputs += [ordered]@{
+                    command = $execTrimmed
+                    stdout  = $secOkStdout
+                    stderr  = $secOkStderr
                 }
             } else {
                 $secCmdExit = $proc.ExitCode
@@ -507,9 +528,11 @@ function Invoke-StrideSection {
         hook               = $Section
         status             = 'success'
         commands_completed = $secCompletedCmds
+        commands_output    = $secCmdOutputs
         duration_seconds   = $secDuration
     }
-    [Console]::Out.WriteLine(($successResult | ConvertTo-Json -Depth 5 -Compress))
+    # Depth 6 so the commands_output array of objects serializes fully.
+    [Console]::Out.WriteLine(($successResult | ConvertTo-Json -Depth 6 -Compress))
 
     return 0
 }
