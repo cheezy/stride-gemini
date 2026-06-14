@@ -2,6 +2,47 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.28.0] - 2026-06-14
+
+Parity release: brings the Gemini variant up from canonical stride v1.23.0 (its own v1.16.0) to **canonical v1.28.0**, porting all five intervening canonical releases (v1.24.0–v1.28.0) into the Gemini hooks, skills, and reviewer prompt. The version jumps `1.16.0 → 1.28.0` to align the Gemini variant's number with the canonical release it now matches. Both hook test suites pass (bash 184/0, PowerShell 145/0). stride-gemini is not distributed through a marketplace, so there is no marketplace pin to update (goal G231).
+
+### Changed — complete-delivery review reports (canonical v1.24.0 / G222, W1120)
+
+- **`skills/stride-workflow/SKILL.md` + `skills/stride-subagent-workflow/SKILL.md`** — the reviewer-dispatch step now passes **every** review field the task supplies (`acceptance_criteria`, `pitfalls`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `description`, `what`, `why`) with emphatic no-exceptions wording, so a task-supplied section can never come back `not_assessed` because it was withheld from the reviewer.
+- **`agents/task-reviewer.md`** — `not_assessed` is reserved STRICTLY for a section the task itself left empty (per-section verdict clauses + a combined four-tile override rule), and the input contract is declared authoritative across variants.
+- **`skills/stride-workflow/SKILL.md` + `skills/stride-completing-tasks/SKILL.md`** — `reviewer_result` is built by a whole-object copy of the reviewer's JSON plus a mandatory self-check (every section present; `project_checks` count matches), backed by a hard pre-submission gate in `stride-completing-tasks`.
+
+### Fixed — the changed-files diff upload survives the after_doing timeout (canonical v1.25.0, W1093–W1096; D72)
+
+- **`hooks/stride-hook.sh` + `hooks/stride-hook.ps1`** — the per-file diff snapshot is captured and PUT **before** the `after_doing` gate commands run (with the post-loop call kept as a refresh), so a hook-timeout no longer loses the diffs. A new `.stride-diff-upload-state` file records the last upload's task id + HTTP code (no URL/token), and the `before_review` hook — running on a fresh timeout budget — re-uploads when no healthy upload is on record. The PowerShell hook gains the net-new `Invoke-ChangedFilesUpload`, `Write-DiffUploadState`, and `Invoke-SelfHealChangedFilesUpload` functions.
+- **`hooks/hooks.json`** — the two `run_shell_command` hook timeouts are raised `120000 → 300000` ms (5 minutes); the `activate_skill` gate stays at 10000 ms.
+
+### Fixed — a passing after_doing gate no longer renders as a red hook error (canonical v1.26.0 / D65; D73)
+
+- **`hooks/stride-hook.sh` + `hooks/stride-hook.ps1`** — the success branch no longer writes passing-command output to fd 2 / `Console.Error` (which the host mislabels as a hook error even on exit 0). Each passing command's tail-truncated stdout/stderr is folded into a new `commands_output` array on the success JSON, encoded via `jq --arg` / `ConvertTo-Json` so command output cannot inject JSON fields. The failure branch is unchanged; the no-jq path still emits no success JSON.
+
+### Changed — the task-reviewer restates acceptance criteria verbatim, including on re-review (canonical v1.26.0 / D66; W1121)
+
+- **`agents/task-reviewer.md`** — the `acceptance_criteria` array is governed by a hard 1:1 rule: exactly one entry per criterion line of the task's `acceptance_criteria`, verbatim and in order, never split/merged/reworded/added/dropped.
+- **`skills/stride-workflow/SKILL.md`** — Step 6 gains a re-review/follow-up dispatch rule and a self-check asserting the reviewer's `acceptance_criteria` count equals the task's own criterion-line count.
+
+### Fixed — the hook's own state artifacts are excluded from changed_files (canonical v1.27.0 / D67; part of D74)
+
+- **`hooks/stride-hook.sh`** — `capture_changed_files` excludes the repo-root `.stride-diff-upload-state` and `.stride-changed-files.json` (exact whole-line match; a same-named file in a subdirectory is still captured).
+- **`hooks/stride-hook.ps1`** — `Invoke-ChangedFilesUpload` strips the same root artifacts from the snapshot before PUT (the PowerShell hook has no capture step).
+
+### Fixed — claim-time TASK_BASE_REF is always refreshed (canonical v1.28.0 / G224, W1086/W1087; part of D74)
+
+- **`hooks/stride-hook.sh` + `hooks/stride-hook.ps1`** — the `before_doing` claim path adds a persisted-output-file fallback (read the "Full output saved to: &lt;path&gt;" file, validated as a regular file and parsed with jq / `ConvertFrom-Json` only — never sourced/eval'd; space/quote-tolerant) and refreshes `TASK_BASE_REF` to current HEAD **unconditionally**: even when no task JSON is obtainable it rewrites `TASK_BASE_REF`, clears the stale snapshot/upload-state, and preserves existing `TASK_` identity lines (skipping silently in a non-git dir). The PowerShell hook now **writes `TASK_BASE_REF` for the first time**, with `PSObject.Properties.Name` StrictMode guards on the response-parse cascade.
+
+### Backward compatibility
+
+D65 changes the success-path output shape only (stderr empty on a passing gate; the success JSON gains an additive `commands_output` array). D66, G222 are documentation/agent-contract changes with no wire-shape change. D72 (v1.25.0) raises hook timeouts and adds `.stride-diff-upload-state`; D67/G224 change capture and claim-time cache behavior. Add `.stride-env-cache`, `.stride-changed-files.json`, and `.stride-diff-upload-state` to your `.gitignore` (all are temp files cleaned up after `after_review`).
+
+### Source
+
+Goal G231 — the Gemini port of canonical stride v1.24.0 (G222), v1.25.0 (W1093–W1096), v1.26.0 (D65 + D66), v1.27.0 (D67), and v1.28.0 (G224), across child tasks W1120, D72, D73, W1121, and D74. stride-gemini is not distributed through a marketplace, so no marketplace pin update.
+
 ## [1.16.0] - 2026-06-08
 
 Parity release: brings the Gemini variant to G220/G219 parity for the reviewer `project_checks` `not_applicable` status and full-checklist emission (canonical: stride v1.23.0, commit a4e7e6f, W1057). Feature minor (1.15.0 → 1.16.0).
