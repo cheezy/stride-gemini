@@ -117,13 +117,73 @@ if ($HookName -eq 'before_doing') {
                 }
             }
 
-            # Shape 3: tool_response is raw API JSON object
+            # Shape 3: raw API JSON object directly in tool_response.
+            # Guard property access by name first — under Set-StrictMode Latest,
+            # reading a non-existent property (e.g. .data on the stdout-wrapper
+            # object) throws, which would otherwise abort the whole caching block
+            # before the persisted-output fallback and base-ref refresh run.
             if (-not $taskJson -and $response -is [PSCustomObject]) {
-                if ($response.data -and $response.data.id) {
+                $responseProps = $response.PSObject.Properties.Name
+                if (($responseProps -contains 'data') -and $response.data -and $response.data.id) {
                     $taskJson = $response.data
-                } elseif ($response.PSObject.Properties.Name -contains 'id' -and $response.id) {
+                } elseif (($responseProps -contains 'id') -and $response.id) {
                     $taskJson = $response
                 }
+            }
+
+            # Shape 4: persisted-output file fallback (W1087, mirrors the bash
+            # Shape 4). When the claim response is large, the host writes the
+            # tool output to a file and leaves only a "Full output saved to:
+            # <absolute path>" notice in stdout. Recover the API JSON by reading
+            # that file. The path is harness-controlled, so require an existing
+            # regular file and parse it with ConvertFrom-Json only — never
+            # invoke, dot-source, or write to it.
+            if (-not $taskJson) {
+                $notice = $null
+                if ($response -is [PSCustomObject] -and $response.PSObject.Properties.Name -contains 'stdout') {
+                    $notice = $response.stdout
+                } elseif ($response -is [string]) {
+                    $notice = $response
+                }
+                if ($notice -and ($notice -imatch 'saved to')) {
+                    # Keep the path from its first "/" to end of the notice line so
+                    # a path containing spaces survives; tolerate a wrapping quote.
+                    $noticeLine = ($notice -split "`n" | Where-Object { $_ -imatch 'saved to' } | Select-Object -First 1)
+                    if ($noticeLine) {
+                        $persistPath = '/' + ($noticeLine -replace '^[^/]*/', '')
+                        $persistPath = ($persistPath.TrimEnd()) -replace '"$', ''
+                        if (Test-Path -LiteralPath $persistPath -PathType Leaf) {
+                            try {
+                                $persistObj = (Get-Content -LiteralPath $persistPath -Raw -ErrorAction SilentlyContinue) | ConvertFrom-Json
+                                # Guard property access by name (StrictMode) so an
+                                # id-only persisted payload caches identity lines
+                                # exactly as the bash reference does, rather than
+                                # throwing and falling through to the base-ref-only
+                                # refresh.
+                                $persistProps = $persistObj.PSObject.Properties.Name
+                                if (($persistProps -contains 'data') -and $persistObj.data -and $persistObj.data.id) {
+                                    $taskJson = $persistObj.data
+                                } elseif (($persistProps -contains 'id') -and $persistObj.id) {
+                                    $taskJson = $persistObj
+                                }
+                            } catch {
+                                # persisted file not parseable JSON — fall through
+                            }
+                        }
+                    }
+                }
+            }
+
+            # (W1087) Compute the claim-time base ref once. A claim always opens a
+            # new task window, so TASK_BASE_REF must be refreshed on every claim.
+            # An empty result (not a git repo / git absent) is tolerated and must
+            # never throw — existing non-git env-cache tests rely on this.
+            $baseRef = ''
+            try {
+                $rev = & git -C $ProjectDir rev-parse HEAD 2>$null
+                if ($LASTEXITCODE -eq 0 -and $rev) { $baseRef = ($rev | Out-String).Trim() }
+            } catch {
+                $baseRef = ''
             }
 
             if ($taskJson) {
@@ -134,6 +194,7 @@ if ($HookName -eq 'before_doing') {
                     "TASK_STATUS=$($taskJson.status)"
                     "TASK_COMPLEXITY=$($taskJson.complexity)"
                     "TASK_PRIORITY=$($taskJson.priority)"
+                    "TASK_BASE_REF=$baseRef"
                 )
                 $cacheLines | Set-Content -Path $EnvCache -Encoding UTF8
                 # (W1095, mirrors the bash claim-refresh) Clear the previous
@@ -141,6 +202,21 @@ if ($HookName -eq 'before_doing') {
                 # suppress the before_review self-heal retry for the new
                 # task, and a stale snapshot must never be re-uploaded under
                 # the new task's id.
+                Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
+                Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+            } elseif ($baseRef) {
+                # (W1086/W1087) No parseable response and no usable persisted
+                # file. A claim still opens a new task window, so unconditionally
+                # refresh TASK_BASE_REF to current HEAD and clear the stale
+                # per-file snapshot — otherwise a base ref recorded under a
+                # previous claim survives. Existing TASK_ identity lines are
+                # preserved so a later completion can still recover TASK_ID.
+                $preserved = @()
+                if (Test-Path $EnvCache) {
+                    $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object { $_ -notmatch '^TASK_BASE_REF=' })
+                }
+                $newLines = $preserved + "TASK_BASE_REF=$baseRef"
+                $newLines | Set-Content -Path $EnvCache -Encoding UTF8
                 Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
                 Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
             }
@@ -214,6 +290,33 @@ function Invoke-ChangedFilesUpload {
     $httpCode = '000'
     try {
         $bytes = [System.IO.File]::ReadAllBytes($snapshotPath)
+        # D67: defensively strip the hook's OWN root artifacts from the snapshot
+        # before upload. The bash capture already excludes them, but this ps1
+        # may PUT a snapshot produced by an older/unfiltered capture or one that
+        # was committed into the repo. Match only the exact repo-root paths — a
+        # same-named file in a subdirectory has a path prefix and is kept. Only
+        # re-encode when an artifact was actually dropped, so an already-clean
+        # snapshot uploads byte-for-byte as before; an unparseable snapshot
+        # falls through to the raw bytes unchanged.
+        try {
+            $entries = @([System.Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json)
+            $filtered = @($entries | Where-Object {
+                $_.path -ne '.stride-diff-upload-state' -and $_.path -ne '.stride-changed-files.json'
+            })
+            if ($filtered.Count -ne $entries.Count) {
+                # Pipe (not -InputObject) so an array is not double-wrapped into
+                # [[...]]; guard the empty case explicitly because piping zero
+                # items emits nothing rather than `[]`.
+                if ($filtered.Count -eq 0) {
+                    $filteredJson = '[]'
+                } else {
+                    $filteredJson = $filtered | ConvertTo-Json -Depth 10 -Compress -AsArray
+                }
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($filteredJson)
+            }
+        } catch {
+            # Snapshot not parseable as the expected array — keep the raw bytes.
+        }
         $b64 = [System.Convert]::ToBase64String($bytes)
         $body = @{ changed_files = @{ encoding = 'base64'; data = $b64 } } |
             ConvertTo-Json -Depth 5 -Compress
