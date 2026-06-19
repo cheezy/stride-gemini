@@ -216,9 +216,15 @@ Use array indices since identifiers don't exist yet - see stride-creating-goals 
     "Don't modify existing color variables - create new dark mode variants",
     "Don't forget to test theme on all major pages",
     "Don't use localStorage directly - use Phoenix user preferences"
-  ]
+  ],
+  "technical_details": {
+    "data_shapes": {"theme_preference": "one of \"light\" | \"dark\", stored on the user record"},
+    "gotchas": ["Apply the theme before first paint to avoid a flash of the wrong theme"]
+  }
 }
 ```
+
+`technical_details` is an optional free-form object — see the Embedded Object Formats section below.
 
 ## Consuming Provided Context
 
@@ -345,6 +351,7 @@ Use these exact values — any other value will be rejected.
 | `patterns_to_follow` | string | Newline-separated text | No |
 | `dependencies` | array | Task identifiers `["W45", "W46"]` | No |
 | `pitfalls` | array | Strings `["Don't do X", "Avoid Y"]` | No |
+| `technical_details` | object | Free-form JSON object of any additional technical info | No |
 
 ## Embedded Object Formats — WRONG vs RIGHT
 
@@ -431,6 +438,22 @@ Use these exact values — any other value will be rejected.
 ```
 
 **Shape:** array of strings, each naming a specific security implication the implementing agent must address (input validation, authorization boundaries, secret handling, injection surfaces, data exposure). If the change genuinely has no security surface, state that explicitly (e.g. `["None — pure CSS/styling change, no input or authz touched"]`) rather than leaving it empty.
+
+### technical_details
+
+```json
+❌ WRONG (string — should be an object):
+"technical_details": "Uses ULIDs and retries 3x"
+
+✅ RIGHT (free-form object — any keys you like):
+"technical_details": {
+  "data_shapes": {"event": {"id": "uuid", "type": "string"}},
+  "gotchas": ["The webhook retries 3x with backoff", "IDs are ULIDs, not integers"],
+  "external_refs": ["https://example.com/api-docs"]
+}
+```
+
+**Shape:** a free-form JSON object holding any additional technical information that doesn't fit the structured fields — data shapes, gotchas, external references, sequencing notes, anything that helps the implementing agent. **Unlike `testing_strategy`, it has NO fixed `valid_keys`** — use whatever keys best describe the task. It is optional (omit it when there is nothing extra to capture) and is **not** one of the five review_queue-scored fields.
 
 ---
 **References:** For the full field reference, see `api_schema` in the onboarding response (`GET /api/agent/onboarding`). For endpoint details, see the [API Reference](https://raw.githubusercontent.com/cheezy/kanban/refs/heads/main/docs/api/README.md).

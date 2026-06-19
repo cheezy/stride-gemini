@@ -238,6 +238,8 @@ When depending on EXISTING tasks already in the system:
 
 These five fields must be filled in on every nested task in the batch — the goal-level `description` does not satisfy any of them.
 
+A nested task MAY also carry an optional free-form `technical_details` object (any keys — see `stride-creating-tasks`); it is **not** one of the five review_queue-scored fields and is never required.
+
 **Minimal nested tasks fail the same way as minimal flat tasks** — causing 3+ hour exploration AND empty review_queue pills at completion.
 
 ## Consuming Provided Context
