@@ -160,6 +160,7 @@ Review the returned task completely:
 - `verification_steps` -- how to verify
 - `needs_review` -- whether human approval is needed after completion
 - `complexity` -- drives the decision matrix in Step 3
+- `technical_details` -- optional free-form technical context the author/enricher recorded (not a scored field; may be empty)
 
 **Enrichment check:** If `key_files` is empty OR `testing_strategy` is missing OR `verification_steps` is empty OR `acceptance_criteria` is blank, the task needs enrichment before claiming. Well-specified tasks skip this check.
 
