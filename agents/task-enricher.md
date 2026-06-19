@@ -200,6 +200,14 @@ URL updates with page parameter
 All existing tests still pass
 ```
 
+### Optional: Capture Technical Details → `technical_details`
+
+If exploration surfaced concrete technical context that doesn't fit the structured fields — data shapes, gotchas, key decisions, or reference links — record it in an optional free-form `technical_details` object. Unlike the structured fields, it has no fixed keys: use whatever keys best describe what you found. This is an optional add-on beyond the six exploration steps, not a seventh required step.
+
+- **Optional and never fabricated.** Populate it only with context you actually discovered during Phase 2. When there is nothing substantive to capture, leave it as `{}` — a blank `technical_details` is expected and perfectly fine.
+- **Not review_queue-scored.** `technical_details` is NOT one of the five review_queue-scored fields (`acceptance_criteria`, `testing_strategy`, `security_considerations`, `pitfalls`, `patterns_to_follow`), so a blank value is never a scoring gap or an empty pill — never bump complexity or pad other fields to compensate for an empty `technical_details`.
+- **No secrets.** Because the object is free-form, never record tokens, passwords, credentials, or other secrets in it.
+
 ## Phase 3: Estimate Complexity
 
 | Signal | Complexity |
@@ -471,7 +479,11 @@ Your response is a single JSON object matching the Stride API task schema. Examp
   "security_considerations": [
     "Scope the paginated query to tasks the current user is authorized to view — never page across other users' data",
     "Coerce and bounds-check the page/page_size params (reject negatives and absurd sizes) to avoid resource-exhaustion queries"
-  ]
+  ],
+  "technical_details": {
+    "data_shapes": {"page_params": "page (1-based integer), page_size (defaults to 25)"},
+    "gotchas": ["The existing task query is unsorted — add a stable ORDER BY before paginating or pages will overlap"]
+  }
 }
 ```
 
@@ -484,6 +496,7 @@ Your response is a single JSON object matching the Stride API task schema. Examp
 - `patterns_to_follow`: Newline-separated string (NOT an array)
 - `pitfalls`: Array of strings `["Don't...", "Avoid..."]`
 - `estimated_files`: Optional string range like `"3-5"` — emit when the count is meaningful, omit otherwise
+- `technical_details`: Optional free-form object `{"data_shapes": {...}, "gotchas": ["..."]}` — any keys; leave `{}` when nothing substantive was found; NOT a review_queue-scored field; never record secrets
 
 ## Important Constraints
 

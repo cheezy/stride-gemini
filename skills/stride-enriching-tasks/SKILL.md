@@ -158,6 +158,8 @@ Convert intent to observable, testable outcomes. Format as newline-separated str
 
 **For defects:** search for the error string, include a regression test in `unit_tests`, add "Bug no longer reproducible" to `acceptance_criteria`.
 
+**Optional — `technical_details`:** If exploration surfaced concrete technical context that doesn't fit the structured fields (data shapes, gotchas, key decisions, reference links), record it in an optional free-form `technical_details` object — any keys you like. Populate it only with what you actually found; leave it as `{}` when there is nothing substantive — never fabricate it. It is **not** one of the five review_queue-scored fields, so a blank value is never an empty pill. Because it is free-form, never record secrets (tokens, passwords, credentials) in it.
+
 ### Phase 3: Estimate Complexity
 
 Estimate `complexity` as `"small"` (1–2 key_files, single module, existing pattern), `"medium"` (3–5 key_files, multiple modules, some new patterns, or any UI+backend work), or `"large"` (5+ key_files, new architecture, cross-cutting). Bump up one level when a database migration or new dependency is required. Defects: clear repro + obvious fix is `"small"`; cross-module investigation is `"medium"`; race conditions or complex system interactions are `"large"`. The full heuristic table lives in `agents/task-enricher.md` Phase 3.
@@ -232,6 +234,7 @@ curl -s -X PATCH \
 - `patterns_to_follow`: Newline-separated string (NOT an array)
 - `pitfalls`: Array of strings `["Don't...", "Avoid..."]`
 - `estimated_files`: Optional string range like `"3-5"` — emit when the count is meaningful, omit otherwise
+- `technical_details`: Optional free-form object `{"data_shapes": {...}, "gotchas": ["..."]}` — any keys; leave `{}` when nothing substantive was found; NOT a review_queue-scored field; never record secrets
 
 ## Output Example: Enriched Task
 

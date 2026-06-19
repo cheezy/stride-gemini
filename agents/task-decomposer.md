@@ -157,6 +157,9 @@ Every decomposed task MUST include all fields required by stride-creating-tasks:
 | `acceptance_criteria` | Yes | Newline-separated string |
 | `patterns_to_follow` | Yes | Newline-separated string |
 | `pitfalls` | Yes | Array of strings |
+| `technical_details` | No | Optional free-form object of additional technical context; any keys; NOT one of the five review_queue-scored fields |
+
+A decomposed task MAY also carry an optional free-form `technical_details` object (any keys — data shapes, gotchas, decisions, or reference links surfaced during scope analysis). It is never required and is **not** one of the five review_queue-scored fields, so leaving it as `{}` or omitting it is fine. Because it is free-form, never record secrets (tokens, passwords, credentials) in it.
 
 ### Step 6: Output Assembly
 
