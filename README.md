@@ -87,7 +87,7 @@ stride-creating-goals            ← BEFORE calling POST /api/tasks/batch (goals
 
 ### stride-creating-tasks
 
-**MANDATORY** before creating work tasks or defects. Contains all required field formats — `verification_steps` must be objects (not strings), `key_files` must be objects (not strings), `testing_strategy` arrays must be arrays (not strings). Includes a "Consuming Provided Context" section: when dispatched with a context bundle, mine the markdown for `key_files` / `patterns_to_follow` / `acceptance_criteria` / `pitfalls` — context augments, never replaces, and the five review_queue-scored fields (now including `security_considerations`) stay required.
+**MANDATORY** before creating work tasks or defects. Contains all required field formats — `verification_steps` must be objects (not strings), `key_files` must be objects (not strings), `testing_strategy` arrays must be arrays (not strings). Includes a "Consuming Provided Context" section: when dispatched with a context bundle, mine the markdown for `key_files` / `patterns_to_follow` / `acceptance_criteria` / `pitfalls` — context augments, never replaces, and the five review_queue-scored fields (now including `security_considerations`) stay required. Also documents the optional `technical_details` field — a free-form JSON object (no fixed keys) for any extra technical context; it is optional everywhere and is **not** one of the five review_queue-scored fields.
 
 ### stride-creating-goals
 

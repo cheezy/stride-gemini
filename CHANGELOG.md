@@ -2,6 +2,29 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.29.0] - 2026-06-19
+
+Documentation parity release: brings the Gemini variant to **canonical stride v1.29.0** (G225), porting the `technical_details` task-field documentation rollout into the Gemini skills and agents. The version tracks the canonical release it now matches. Delivered under tasks W1193, W1194, W1195, W1196. stride-gemini is not distributed through a marketplace, so there is no marketplace pin to update.
+
+### Added — the `technical_details` task field is now documented across the plugin
+
+`technical_details` is an **optional, free-form JSON object** a task may carry to hold any additional technical context that does not fit the structured fields — data shapes, gotchas, key decisions, reference links. Unlike `testing_strategy`, it has **no fixed keys**: a task author or enricher uses whatever keys best describe the work, and leaves it as `{}` when there is nothing substantive to record. It is **not** one of the five review_queue-scored fields (`acceptance_criteria`, `testing_strategy`, `security_considerations`, `pitfalls`, `patterns_to_follow`), so a blank value is never a scoring gap. The plugin previously had no documentation for this field; agents now have one consistent definition to follow.
+
+- **`skills/stride-creating-tasks/SKILL.md`** (W1193) — documents `technical_details` in the Field Quick Reference table, the complete-task example, and the Embedded Object Formats section (as a free-form object, explicitly contrasted with `testing_strategy`, which has fixed `valid_keys`).
+- **`skills/stride-creating-goals/SKILL.md`** (W1193) — notes that nested tasks MAY carry an optional free-form `technical_details` object and that it is not a review_queue-scored field.
+- **`agents/task-enricher.md` + `skills/stride-enriching-tasks/SKILL.md`** (W1194) — add `technical_details` to the enrichment guidance as an optional field the enricher MAY populate from discovered context — never fabricated, left as `{}` otherwise — with a no-secrets reminder since the object is free-form.
+- **`agents/task-decomposer.md`** (W1194) — notes that a decomposed task MAY include an optional `technical_details` object.
+- **`skills/stride-workflow/SKILL.md`** (W1195) — adds `technical_details` to the Step 1 task-field review list (optional free-form context; not a scored field).
+- **`agents/task-explorer.md`** (W1195) — the explorer folds any recorded `technical_details` into its summary so implementation benefits from it.
+
+### Backward compatibility
+
+Documentation-only. No hook (`stride-hook.sh` / `.ps1` / `hooks.json`), wire-shape, `.stride.md`, or `.stride_auth.md` changes; `technical_details` is optional everywhere it appears and is never added to any scored-field set. Tasks that omit it behave exactly as before.
+
+### Source
+
+Goal G246 — the Gemini port of canonical stride v1.29.0 (G225 / G243, W1179–W1182), across child tasks W1193 (creation contracts), W1194 (enrichment + decomposition), W1195 (workflow + exploration surfacing), and W1196 (this release-notes/version task). stride-gemini is not distributed through a marketplace, so no marketplace pin update.
+
 ## [1.28.0] - 2026-06-14
 
 Parity release: brings the Gemini variant up from canonical stride v1.23.0 (its own v1.16.0) to **canonical v1.28.0**, porting all five intervening canonical releases (v1.24.0–v1.28.0) into the Gemini hooks, skills, and reviewer prompt. The version jumps `1.16.0 → 1.28.0` to align the Gemini variant's number with the canonical release it now matches. Both hook test suites pass (bash 184/0, PowerShell 145/0). stride-gemini is not distributed through a marketplace, so there is no marketplace pin to update (goal G231).
