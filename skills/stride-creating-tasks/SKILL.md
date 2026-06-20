@@ -156,6 +156,7 @@ Use array indices since identifiers don't exist yet - see stride-creating-goals 
   "description": "Users need dark mode to reduce eye strain during night work. Add toggle switch in settings with persistent storage.",
   "complexity": "medium",
   "priority": "high",
+  "created_by_agent": "Gemini CLI",
   "why": "Reduce eye strain for users working in low-light environments",
   "what": "Dark mode toggle with theme persistence",
   "where_context": "Settings page - User Preferences section",
@@ -225,6 +226,8 @@ Use array indices since identifiers don't exist yet - see stride-creating-goals 
 ```
 
 `technical_details` is an optional free-form object — see the Embedded Object Formats section below.
+
+`created_by_agent` records **which agent created the task** so the `/agents` activity feed attributes the `created` row to that agent instead of an uninformative `?` avatar. Set it to **the plugin's own agent name — the exact same value you send as `agent_name` on claim and complete** (here, `"Gemini CLI"`). Use the plain agent name, never the `ai_agent:<model>` token form, so one agent stays one roster identity. `created_by_agent` is accepted **only on create** (`POST /api/tasks` and `POST /api/tasks/batch`); it is **forbidden on `PATCH`**, so it cannot be backfilled later — stamp it at creation time.
 
 ## Consuming Provided Context
 
@@ -347,6 +350,7 @@ Use these exact values — any other value will be rejected.
 | `priority` | enum | `"low"`, `"medium"`, `"high"`, `"critical"` | Yes |
 | `complexity` | enum | `"small"`, `"medium"`, `"large"` | No |
 | `needs_review` | boolean | `true`, `false` | No (default: false) |
+| `created_by_agent` | string | The plugin's agent name (same as `agent_name` on claim/complete) | No (create-only; forbidden on `PATCH`) |
 | `acceptance_criteria` | string | Newline-separated text | No |
 | `patterns_to_follow` | string | Newline-separated text | No |
 | `dependencies` | array | Task identifiers `["W45", "W46"]` | No |

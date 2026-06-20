@@ -2,6 +2,17 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.30.0] - 2026-06-20
+
+Documentation parity release: brings the Gemini variant to **canonical stride v1.30.0** (G254), porting the `created_by_agent` creation-skill documentation into the Gemini skills. The version tracks the canonical release it now matches.
+
+Agent-created tasks previously landed with `created_by_agent` nil, so the `/agents` activity feed rendered an uninformative `?` avatar on every `created` row. The creation skills now document the field on the create request bodies:
+
+- **`skills/stride-creating-tasks/SKILL.md`** — `created_by_agent` added to the complete-task example, the Field Quick Reference table (string, create-only, forbidden on `PATCH`), and an explanatory note: set it to the plugin's own agent name (`"Gemini CLI"` — the exact value sent as `agent_name` on claim/complete), never the `ai_agent:<model>` token form, so one agent stays one roster identity.
+- **`skills/stride-creating-goals/SKILL.md`** — `created_by_agent` added to the batch goal example with a note that the server propagates the goal's value to every nested child task.
+
+Documentation-only: no wire-shape, hook, or auth change; `created_by_agent` is optional on create, was already accepted by the API, and is forbidden on `PATCH`. stride-gemini is not distributed through a marketplace, so there is no marketplace pin to update. Delivered under task W1230.
+
 ## [1.29.0] - 2026-06-19
 
 Documentation parity release: brings the Gemini variant to **canonical stride v1.29.0** (G225), porting the `technical_details` task-field documentation rollout into the Gemini skills and agents. The version tracks the canonical release it now matches. Delivered under tasks W1193, W1194, W1195, W1196. stride-gemini is not distributed through a marketplace, so there is no marketplace pin to update.
