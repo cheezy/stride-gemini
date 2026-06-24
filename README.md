@@ -14,6 +14,8 @@ Install directly from GitHub using the Gemini CLI:
 gemini extensions install https://github.com/cheezy/stride-gemini
 ```
 
+The repo ships a [`gemini-extension.json`](gemini-extension.json) manifest at its root, so the command above installs it as a first-class Gemini CLI extension (`GEMINI.md` is loaded as the extension context file).
+
 Or clone manually and copy files into your project:
 
 ```bash

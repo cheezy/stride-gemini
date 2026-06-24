@@ -2,6 +2,15 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.31.0] - 2026-06-24
+
+Adds the `gemini-extension.json` manifest at the repo root, making stride-gemini a first-class installable Gemini CLI extension. Previously the repo carried only `GEMINI.md` and had no extension manifest, so `gemini extensions install https://github.com/cheezy/stride-gemini` had nothing to read.
+
+- **`gemini-extension.json`** (new) — declares `name` (`stride-gemini`), `version` (`1.31.0`), `description`, and `contextFileName` (`GEMINI.md`). No `mcpServers` are declared — the extension drives its workflow through `hooks/hooks.json` and skills, not an MCP server.
+- **`README.md`** — Installation section notes the manifest so the `gemini extensions install` flow is documented as first-class.
+
+No skill, agent, hook, or workflow behavior changed. Delivered under task W1342.
+
 ## [1.30.0] - 2026-06-20
 
 Documentation parity release: brings the Gemini variant to **canonical stride v1.30.0** (G254), porting the `created_by_agent` creation-skill documentation into the Gemini skills. The version tracks the canonical release it now matches.
