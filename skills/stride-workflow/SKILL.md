@@ -97,6 +97,30 @@ The flow is:
 
 The task-field and batch-shape contracts the creation sub-skills enforce are **not** duplicated here — they live in `stride-creating-tasks` and `stride-creating-goals`.
 
+### Creation Terminal State (`create-tasks` / `create-goals`)
+
+**When the orchestrator is entered with a creation intent — `intent=create-tasks` or `intent=create-goals` (the two commands above) — its terminal state is "work created," NOT "work built."** After the dispatched creation sub-skill returns and the goal/tasks are created:
+
+1. **Report** the created identifiers (the `G###` / `W###` values from the API response) to the user.
+2. **Clear** the orchestrator activation marker — the create path never reaches Step 9, so clear it here (using the same `PROJECT_DIR` fallback the marker was written with):
+   ```bash
+   PROJECT_DIR="${GEMINI_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}"
+   rm -f "$PROJECT_DIR/.stride/.orchestrator_active"
+   ```
+3. **STOP.** Do not proceed to Step 1 (Task Discovery), do not call `GET /api/tasks/next`, do not claim, and do not implement anything. Newly created tasks land in the **Backlog** and are intentionally **not** claimable until a human reviews them and promotes them to Ready.
+
+This mirrors the `stride-ideation` skill, whose terminal state is the written requirements document — it does not auto-invoke `/stridify` or push the user toward any next step. **Creating work and doing work are separate, explicitly-invoked actions.** Building a created task is a fresh request to work the task (which re-enters this orchestrator at Step 0), made by the user's choice — never an automatic continuation of creation.
+
+**Do NOT confuse this with the build loop.** Steps 1–9 below are the build path (claim → explore → implement → review → complete → loop). They apply when the user asks to *work* tasks — not when a create command dispatched the creation sub-skill. A creation intent uses Step 0 (marker) + the dispatch above + this terminal state, and nothing else.
+
+### Backlog Claim-Fail Guard
+
+Whether you arrive here from a creation intent or the build loop, **a claim failure is a terminal stop, never a fallback to building outside the lifecycle.** If `POST /api/tasks/claim` (or `GET /api/tasks/next`) reports a task is not available — most often because it is still in the **Backlog** (not yet promoted to Ready), already claimed, or blocked by dependencies — then:
+
+- **STOP and report it.** Tell the user the task is not claimable yet (e.g. "W### is still in the Backlog; move it to Ready to make it claimable") and end the turn.
+- **Never** implement, edit files for, or otherwise "build" a task whose claim did not succeed. Work performed without a successful claim has no hook execution, no review, and no completion record — it silently escapes the Stride lifecycle, which is the exact failure this guard prevents.
+- Promoting a Backlog task to Ready is a **human action** in the board UI. Do not work around a failed claim by building the task anyway, re-creating it, or moving it yourself.
+
 ## Automatic Hook Execution
 
 **When the stride-gemini extension is installed, hooks execute automatically.** The `hooks.json` registers `BeforeTool`/`AfterTool` hooks that intercept Stride API calls and execute the corresponding `.stride.md` commands via `stride-hook.sh`.

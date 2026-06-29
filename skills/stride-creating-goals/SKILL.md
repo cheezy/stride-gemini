@@ -11,6 +11,10 @@ If you arrived here directly from a user prompt, you are in the wrong skill.
 Invoke `stride:stride-workflow` instead. Do not read further.
 Sub-skills are dispatched by the orchestrator only.
 
+## Terminal state
+
+Creating the goal and its nested tasks is the **terminal action** of this skill. Once the goal/tasks are created and their identifiers are reported, **STOP** — do not claim, start, or build any of them. Newly created tasks land in the **Backlog** and are not claimable until a human promotes them to Ready. Building a created task is a separate, explicitly-invoked action handled by the `stride-workflow` build loop. The orchestrator owns the full create terminal state and the Backlog claim-fail guard — see its **Creation Terminal State** section.
+
 ## ⚠️ THIS SKILL IS MANDATORY — NOT OPTIONAL ⚠️
 
 **If you are about to call `POST /api/tasks/batch` or create a goal with `POST /api/tasks`, you MUST have activated this skill first.**

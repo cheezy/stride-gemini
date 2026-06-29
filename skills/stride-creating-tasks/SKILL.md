@@ -11,6 +11,10 @@ If you arrived here directly from a user prompt, you are in the wrong skill.
 Invoke `stride:stride-workflow` instead. Do not read further.
 Sub-skills are dispatched by the orchestrator only.
 
+## Terminal state
+
+Creating the task(s) is the **terminal action** of this skill. Once the task is created and its identifier is reported, **STOP** — do not claim, start, or build it. A newly created task lands in the **Backlog** and is not claimable until a human promotes it to Ready. Building a created task is a separate, explicitly-invoked action handled by the `stride-workflow` build loop. The orchestrator owns the full create terminal state and the Backlog claim-fail guard — see its **Creation Terminal State** section.
+
 ## ⚠️ THIS SKILL IS MANDATORY — NOT OPTIONAL ⚠️
 
 **If you are about to call `POST /api/tasks` to create a work task or defect, you MUST have activated this skill first.**
