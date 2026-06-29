@@ -2,6 +2,19 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.32.0] - 2026-06-29
+
+### Added — `create-tasks`/`create-goals` now have an explicit terminal state, plus a Backlog claim-fail guard (G284 / W1403)
+
+In an autonomous/build context the create-tasks/create-goals flow could create a task and then fall straight through the `stride-workflow` orchestrator's build loop — auto-claiming and building the just-created task. The claim fails because newly created tasks sit in the Backlog (not Ready), and the agent would then build the work outside the Stride lifecycle (no claim, no hooks, no completion record). The orchestrator had no terminal state for the create intent, unlike `stride-ideation` which stops at the written document.
+
+- **`skills/stride-workflow/SKILL.md`** — Added a **Creation Terminal State** section: on a create-tasks/create-goals intent the orchestrator now reports the created identifiers, clears the activation marker (`$PROJECT_DIR/.stride/.orchestrator_active`, with the `GEMINI_PROJECT_DIR` fallback chain), and STOPS without entering Task Discovery, claiming, or implementation. Added a **Backlog Claim-Fail Guard**: a failed claim is a terminal stop, never a fallback to building outside the lifecycle. The build loop (Steps 1–9) is unchanged.
+- **`skills/stride-creating-tasks/SKILL.md`**, **`skills/stride-creating-goals/SKILL.md`** — Added a `## Terminal state` note: creation ends the turn; building is a separate, explicitly-invoked action.
+
+### Backward compatibility
+
+Documentation/skill-text only. No hook, `.stride.md`, or wire-shape change. The build loop is unchanged; only the create-intent path gains an explicit stop.
+
 ## [1.31.0] - 2026-06-24
 
 Adds the `gemini-extension.json` manifest at the repo root, making stride-gemini a first-class installable Gemini CLI extension. Previously the repo carried only `GEMINI.md` and had no extension manifest, so `gemini extensions install https://github.com/cheezy/stride-gemini` had nothing to read.
