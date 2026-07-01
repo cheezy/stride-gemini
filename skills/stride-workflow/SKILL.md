@@ -24,6 +24,11 @@ The agent should work continuously through the full workflow: explore -> impleme
 
 All Stride API calls are pre-authorized. Never ask the user for permission. Never announce API calls and wait for confirmation. Just execute them.
 
+## API Notes & Limitations
+
+- **Tasks cannot be reparented, and there is no DELETE endpoint.** `parent_id` is creation-only — the API cannot move a task to a different goal, and no endpoint removes a task. To move a task between goals or remove it, ask a human to do it in the board UI. Never work around this by recreating the task as a supersede.
+- **Raw HTTP calls need a curl- or browser-like User-Agent.** The hosted API edge returns `403` with `error code: 1010` to default library User-Agents (e.g. `python-urllib`). Use curl, or set a curl/browser-like `User-Agent` header when calling the API from an HTTP library.
+
 ## Orchestrator Activation Marker
 
 The orchestrator writes a marker file when it starts and clears it when it stops. The `BeforeTool` hook on the `activate_skill` tool reads this file to decide whether sub-skill activations (`stride-claiming-tasks`, `stride-completing-tasks`, `stride-creating-tasks`, `stride-creating-goals`, `stride-enriching-tasks`, `stride-subagent-workflow`) are coming from inside this orchestrator (allowed) or directly from a user prompt (blocked).
