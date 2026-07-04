@@ -67,7 +67,7 @@ stride-creating-goals            ← BEFORE calling POST /api/tasks/batch (goals
 | Without skill | What happens |
 |---------------|-------------|
 | Claim without `stride-claiming-tasks` | API rejects — missing `before_doing_result` |
-| Complete without `stride-completing-tasks` | 3+ failed API calls — missing `completion_summary`, `actual_complexity`, `actual_files_changed`, `after_doing_result`, `before_review_result` |
+| Complete without `stride-completing-tasks` | 3+ failed API calls — missing `completion_summary`, `actual_complexity`, `actual_files_changed`, `after_doing_result`, `before_review_result`, `explorer_result`, `reviewer_result`, and the `workflow_steps` array |
 | Create task without `stride-creating-tasks` | Malformed `verification_steps`, `key_files`, `testing_strategy` — causes 3+ hours wasted during implementation |
 | Create goal without `stride-creating-goals` | 422 error — wrong root key (`"tasks"` instead of `"goals"`) |
 | Skip `stride-subagent-workflow` | No codebase exploration, no code review — wrong approach, missed acceptance criteria |
@@ -85,7 +85,7 @@ stride-creating-goals            ← BEFORE calling POST /api/tasks/batch (goals
 
 ### stride-completing-tasks
 
-**MANDATORY** before any task completion API call. Contains ALL 5 required completion fields and both hook execution patterns (after_doing + before_review). Skipping causes 3+ failed API calls as missing fields are discovered one at a time.
+**MANDATORY** before any task completion API call. Contains ALL required completion fields — `completion_summary`, `actual_complexity`, `actual_files_changed`, `after_doing_result`, `before_review_result`, `explorer_result`, `reviewer_result`, plus the required `workflow_steps` array — and both hook execution patterns (after_doing + before_review). Skipping causes 3+ failed API calls as missing fields are discovered one at a time.
 
 ### stride-creating-tasks
 
