@@ -1,6 +1,6 @@
 ---
 name: hook-diagnostician
-description: Use this agent when a Stride hook (before_doing, after_doing, before_review, after_review) fails during task lifecycle. The agent parses the hook output, identifies failure patterns, categorizes issues by severity, and returns a prioritized fix plan.
+description: Use this agent when a Stride hook (before_doing, after_doing, before_review, after_review, after_goal) fails during the task or goal lifecycle. The agent parses the hook output, identifies failure patterns, categorizes issues by severity, and returns a prioritized fix plan.
 tools:
   - read_file
   - grep_search
@@ -274,19 +274,34 @@ Suggested fix: Resolve conflicts in listed files. Open each file, find <<<< mark
 
 ## Hook Timeout Handling
 
-**Detection:** Duration ≥ timeout threshold AND output may be empty or truncated
+**Detection:** Duration ≥ the enforced ceiling AND output may be empty or truncated
 
-**Timeout thresholds:**
-- before_doing: 60,000 ms
-- after_doing: 120,000 ms
-- before_review: 60,000 ms
-- after_review: 60,000 ms
+**Enforced timeout (Gemini port):** All five hook sections — `before_doing`,
+`after_doing`, `before_review`, `after_review`, and `after_goal` — run under
+the **single 300,000 ms (5-minute) `run_shell_command` ceiling** defined by the
+two `BeforeTool`/`AfterTool` entries in `hooks/hooks.json`. There are no
+per-hook enforced budgets in this port: `after_goal` runs on the same
+`AfterTool` `run_shell_command` budget as the other sections, so treat
+`duration_ms ≥ 300000` as the timeout signal for every hook.
+
+The canonical per-section budgets below are **advisory documentation only**
+(they describe the intended cost of each phase, not a value this port
+enforces); use them to judge whether a section is running unusually long, not
+as the timeout trigger:
+
+| Hook | Advisory budget | Enforced ceiling |
+|---|---|---|
+| `before_doing` | ~60,000 ms | 300,000 ms (shared) |
+| `after_doing` | ~120,000 ms | 300,000 ms (shared) |
+| `before_review` | ~60,000 ms | 300,000 ms (shared) |
+| `after_review` | ~60,000 ms | 300,000 ms (shared) |
+| `after_goal` | ~60,000 ms | 300,000 ms (shared) |
 
 **When timeout detected:**
 ```
 Category: Hook Timeout
 Severity: Critical
-Description: Hook exceeded timeout (duration_ms >= threshold)
+Description: Hook exceeded timeout (duration_ms >= 300000, the run_shell_command ceiling)
 Suggested fix: Check which command is slow. Common causes:
   - Large test suite: Run specific test files instead of full suite
   - Network issues: Check connectivity for git/hex operations
