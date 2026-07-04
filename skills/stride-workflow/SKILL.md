@@ -33,7 +33,7 @@ All Stride API calls are pre-authorized. Never ask the user for permission. Neve
 
 The orchestrator writes a marker file when it starts and clears it when it stops. The `BeforeTool` hook on the `activate_skill` tool reads this file to decide whether sub-skill activations (`stride-claiming-tasks`, `stride-completing-tasks`, `stride-creating-tasks`, `stride-creating-goals`, `stride-enriching-tasks`, `stride-subagent-workflow`) are coming from inside this orchestrator (allowed) or directly from a user prompt (blocked).
 
-**Without the marker, the hook blocks sub-skill activations.** Writing it in Step 0 and clearing it in Step 9 is therefore mandatory — skipping the write means the orchestrator's own dispatches are blocked; skipping the clear means the next session inherits a stale marker.
+**Without the marker, the hook blocks sub-skill activations.** Writing it in Step 0 and clearing it in Step 8 is therefore mandatory — skipping the write means the orchestrator's own dispatches are blocked; skipping the clear means the next session inherits a stale marker.
 
 ### Marker Contract
 
@@ -41,7 +41,7 @@ The orchestrator writes a marker file when it starts and clears it when it stops
 |---|---|
 | Path | `<project-root>/.stride/.orchestrator_active` |
 | Format | Single-line JSON: `{"session_id": "<id>", "started_at": "<ISO8601>", "pid": <pid>}` |
-| Lifecycle | Written in Step 0, cleared in Step 9 (success OR abort) |
+| Lifecycle | Written in Step 0, cleared in Step 8 (success OR abort) |
 | Freshness window | 4 hours — markers older than `started_at + 4h` are treated as stale |
 | Stale handling | The `BeforeTool` hook treats stale markers as missing (and may delete them) |
 | Directory | `.stride/` is created with `mkdir -p` if absent |
@@ -61,7 +61,7 @@ printf '{"session_id":"%s","started_at":"%s","pid":%d}\n' \
   > "$PROJECT_DIR/.stride/.orchestrator_active"
 ```
 
-### Clear Command (Step 9)
+### Clear Command (Step 8)
 
 ```bash
 PROJECT_DIR="${GEMINI_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}"
@@ -107,7 +107,7 @@ The task-field and batch-shape contracts the creation sub-skills enforce are **n
 **When the orchestrator is entered with a creation intent — `intent=create-tasks` or `intent=create-goals` (the two commands above) — its terminal state is "work created," NOT "work built."** After the dispatched creation sub-skill returns and the goal/tasks are created:
 
 1. **Report** the created identifiers (the `G###` / `W###` values from the API response) to the user.
-2. **Clear** the orchestrator activation marker — the create path never reaches Step 9, so clear it here (using the same `PROJECT_DIR` fallback the marker was written with):
+2. **Clear** the orchestrator activation marker — the create path never reaches Step 8, so clear it here (using the same `PROJECT_DIR` fallback the marker was written with):
    ```bash
    PROJECT_DIR="${GEMINI_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}"
    rm -f "$PROJECT_DIR/.stride/.orchestrator_active"
@@ -116,7 +116,7 @@ The task-field and batch-shape contracts the creation sub-skills enforce are **n
 
 This mirrors the `stride-ideation` skill, whose terminal state is the written requirements document — it does not auto-invoke `/stridify` or push the user toward any next step. **Creating work and doing work are separate, explicitly-invoked actions.** Building a created task is a fresh request to work the task (which re-enters this orchestrator at Step 0), made by the user's choice — never an automatic continuation of creation.
 
-**Do NOT confuse this with the build loop.** Steps 1–9 below are the build path (claim → explore → implement → review → complete → loop). They apply when the user asks to *work* tasks — not when a create command dispatched the creation sub-skill. A creation intent uses Step 0 (marker) + the dispatch above + this terminal state, and nothing else.
+**Do NOT confuse this with the build loop.** Steps 1–8 below are the build path (claim → explore → implement → review → complete → loop). They apply when the user asks to *work* tasks — not when a create command dispatched the creation sub-skill. A creation intent uses Step 0 (marker) + the dispatch above + this terminal state, and nothing else.
 
 ### Backlog Claim-Fail Guard
 
@@ -233,7 +233,7 @@ The `hooks.json` `AfterTool` handler automatically executes `.stride.md` `## bef
 
 ### Decision Matrix
 
-| Task Attributes | Decompose | Explore | Plan | Review (Step 6) |
+| Task Attributes | Decompose | Explore | Plan | Review (Step 5) |
 |---|---|---|---|---|
 | Goal type OR large+undecomposed OR 25+ hours | YES | -- | -- | -- |
 | small, 0-1 key_files | Skip | Skip | Skip | Skip |
@@ -278,7 +278,7 @@ Follow:
 
 ---
 
-## Step 6: Code Review (Decision Matrix)
+## Step 5: Code Review (Decision Matrix)
 
 **Check the decision matrix from Step 3.** If the task is medium+ OR has 2+ key_files, review is required.
 
@@ -293,11 +293,11 @@ The reviewer returns a human-readable prose summary followed by a fenced ```json
 - **Fix all Critical issues** before proceeding
 - **Fix all Important issues** before proceeding
 - Minor issues are optional but recommended
-- **Save the reviewer's full response (prose + JSON block)** -- you'll include it verbatim as `review_report` in Step 8
+- **Save the reviewer's full response (prose + JSON block)** -- you'll include it verbatim as `review_report` in Step 7
 
 #### Extracting the structured review block
 
-After the reviewer returns, extract the first fenced ```json block from its response and use it to populate `reviewer_result` in your Step 8 PATCH payload. The same `reviewer_result` map carries both the legacy summary fields (kept for backwards compatibility with older Kanban deploys) and the structured fields (the actual deliverable for downstream consumers — they live inside `reviewer_result`, never under a new top-level API key).
+After the reviewer returns, extract the first fenced ```json block from its response and use it to populate `reviewer_result` in your Step 7 PATCH payload. The same `reviewer_result` map carries both the legacy summary fields (kept for backwards compatibility with older Kanban deploys) and the structured fields (the actual deliverable for downstream consumers — they live inside `reviewer_result`, never under a new top-level API key).
 
 **Extraction pattern** — scan the reviewer's response for the first fenced ```json block: the opening ` ```json ` fence through the next closing ` ``` ` fence. Take the text between those two fence lines (the fence markers themselves are not part of the payload) and parse it as JSON. The reviewer's response is already in your context, so no file read is needed; if the reviewer instead wrote its response to a file, use `read_file` to load it first, then scan for the same fence.
 
@@ -343,7 +343,7 @@ Approved
 ```
 ````
 
-…the resulting `reviewer_result` value in the Step 8 PATCH payload is:
+…the resulting `reviewer_result` value in the Step 7 PATCH payload is:
 
 ```json
 "reviewer_result": {
@@ -382,7 +382,7 @@ Legacy + structured fields coexist in the same map; the server persists `reviewe
 
 ---
 
-## Step 7: Execute Hooks
+## Step 6: Execute Hooks
 
 ### Hooks Reference
 
@@ -439,7 +439,7 @@ gh pr create \
 
 ### Automatic Hook Execution
 
-Hooks fire automatically when you make the completion API call in Step 8:
+Hooks fire automatically when you make the completion API call in Step 7:
 - **`BeforeTool`** fires `after_doing` BEFORE the call executes (blocks if it fails)
 - **`AfterTool`** fires `before_review` AFTER the call succeeds
 
@@ -465,7 +465,7 @@ If automatic hooks are unavailable, execute hooks manually:
 
 ---
 
-## Step 8: Complete the Task
+## Step 7: Complete the Task
 
 **FIRST run the mandatory pre-submission self-check** — the hard gate in `stride-completing-tasks` ("MANDATORY pre-submission self-check"). It must pass before you submit: every section the reviewer produced is present, the `project_checks` count equals the reviewer's, and no task-supplied section (especially `security_considerations`) comes back `not_assessed`. If it fails, re-run the reviewer with the full inputs or fix the passthrough — never submit a thin or task-inconsistent report (the Kanban server hard-rejects it anyway).
 
@@ -537,7 +537,7 @@ Call `PATCH /api/tasks/:id/complete` with ALL required fields:
 
 ---
 
-## Step 9: Post-Completion Decision
+## Step 8: Post-Completion Decision
 
 ### If `needs_review=true`:
 1. Task moves to Review column
@@ -566,13 +566,13 @@ curl -X PATCH "$STRIDE_API_URL/api/tasks/$GOAL_ID/after_goal" \
   -d "$AFTER_GOAL_RESULT_JSON"
 ```
 
-`$GOAL_ID` is supplied in the hook's `GOAL_ID` / `GOAL_IDENTIFIER` env vars (see Step 7's env-var matrix). A `2xx` with `exit_code == 0` transitions the goal to Done. A `2xx` with `exit_code != 0` records the failure on the goal's `after_goal_attempts` audit log and leaves the goal In Progress for the user to investigate.
+`$GOAL_ID` is supplied in the hook's `GOAL_ID` / `GOAL_IDENTIFIER` env vars (see Step 6's env-var matrix). A `2xx` with `exit_code == 0` transitions the goal to Done. A `2xx` with `exit_code != 0` records the failure on the goal's `after_goal_attempts` audit log and leaves the goal In Progress for the user to investigate.
 
 **Back-compat (for older agent runtimes):**
 
 - If `.stride.md` has no `## after_goal` section, the hook bridge silently no-ops. The server's grace-window worker promotes the goal to Done automatically after the configured wait.
 - If the agent doesn't POST the result at all (older plugin versions), the same grace-window worker covers the gap. The goal transitions to Done after the wait expires with a synthetic attempt tagged `source: "after_goal_grace_worker"`.
-- The `## after_goal` hook is general-purpose — Slack notifications, artifact archival, release pipelines, project-level smoke tests are all valid uses. See Step 7's "Canonical Hook Examples".
+- The `## after_goal` hook is general-purpose — Slack notifications, artifact archival, release pipelines, project-level smoke tests are all valid uses. See Step 6's "Canonical Hook Examples".
 
 ### Clearing the Orchestrator Activation Marker
 
@@ -591,7 +591,7 @@ Leaving a stale marker behind allows direct sub-skill activations to slip past t
 
 Every task completion **must** include a `workflow_steps` array in the `PATCH /api/tasks/:id/complete` payload. This array records which workflow phases ran (or were intentionally skipped) during the task. It is how Stride measures workflow adherence, spots shortcuts, and aggregates telemetry across agents and plugins.
 
-**Build the array incrementally as you progress through the workflow.** Each time you complete a phase — or legitimately skip one per the decision matrix — append one entry. Submit the completed six-entry array in Step 8.
+**Build the array incrementally as you progress through the workflow.** Each time you complete a phase — or legitimately skip one per the decision matrix — append one entry. Submit the completed six-entry array in Step 7.
 
 ### Step Name Vocabulary
 
@@ -602,9 +602,9 @@ The `name` field must be one of these six values. Do not invent new names — co
 | `explorer` | Codebase exploration (`task-explorer` custom agent, or manual file reads when the extension is unavailable) | Step 3 |
 | `planner` | Implementation planning (manual outline of approach for medium+ tasks) | Step 3 |
 | `implementation` | Writing code | Step 4 |
-| `reviewer` | Code review (`task-reviewer` custom agent) | Step 6 |
-| `after_doing` | The `after_doing` hook execution | Step 7 |
-| `before_review` | The `before_review` hook execution | Step 7 |
+| `reviewer` | Code review (`task-reviewer` custom agent) | Step 5 |
+| `after_doing` | The `after_doing` hook execution | Step 6 |
+| `before_review` | The `before_review` hook execution | Step 6 |
 
 ### Per-Step Schema
 
@@ -667,7 +667,7 @@ The server is rolling out hard enforcement behind a feature flag `:strict_comple
 | **Grace (current)** | Missing or invalid results log a structured warning and the request succeeds | Emit the fields correctly now; the warning volume is a preview of the strict-mode rejection volume |
 | **Strict (after all 5 plugins release)** | Missing or invalid results return `422` with a `failures` list | Any agent not emitting valid fields is locked out of completion |
 
-**Why this matters for the orchestrator:** Steps 3 (explorer dispatch) and 6 (reviewer dispatch) already capture the durations and summaries needed for these fields. Persist those into `explorer_result` and `reviewer_result` in the Step 8 payload. When the decision matrix skips a step — or when you self-explore/self-review — submit the skip form with a reason from the enum and a substantive summary explaining what you did instead. See `stride-completing-tasks` for the exact shape, rejection examples, and minimum-length rule.
+**Why this matters for the orchestrator:** Steps 3 (explorer dispatch) and 5 (reviewer dispatch) already capture the durations and summaries needed for these fields. Persist those into `explorer_result` and `reviewer_result` in the Step 7 payload. When the decision matrix skips a step — or when you self-explore/self-review — submit the skip form with a reason from the enum and a substantive summary explaining what you did instead. See `stride-completing-tasks` for the exact shape, rejection examples, and minimum-length rule.
 
 ---
 
@@ -680,7 +680,7 @@ The server is rolling out hard enforcement behind a feature flag `:strict_comple
 - Never skip a blocking hook or call complete with a failed hook result
 
 ### Task that needs_review=true
-- Stop after Step 8. Do not claim the next task.
+- Stop after Step 7. Do not claim the next task.
 - The human reviewer will handle the review cycle.
 - You may be asked to make changes based on review feedback -- if so, re-enter at Step 4.
 
@@ -724,22 +724,22 @@ STEP 4: Implement
   Follow patterns_to_follow, avoid pitfalls
   |
   v
-STEP 6: Code Review (Decision Matrix)
-  Small, 0-1 key_files? --> Skip to Step 7
+STEP 5: Code Review (Decision Matrix)
+  Small, 0-1 key_files? --> Skip to Step 6
   Otherwise:
     Invoke task-reviewer, fix Critical/Important issues
   |
   v
-STEP 7: Execute Hooks
+STEP 6: Execute Hooks
   Automatic via hooks.json (fires on API call)
   Hook fails? --> Invoke hook-diagnostician, fix, retry
   |
   v
-STEP 8: Complete
+STEP 7: Complete
   PATCH /api/tasks/:id/complete with ALL required fields
   |
   v
-STEP 9: Post-Completion
+STEP 8: Post-Completion
   needs_review=true?  --> STOP, wait for human
   needs_review=false? --> after_review fires automatically, loop to Step 1
 ```
@@ -751,9 +751,9 @@ STEP 9: Post-Completion
 | Failure Mode | Old Pattern | This Skill |
 |---|---|---|
 | Forgot to explore | Agent skipped stride-subagent-workflow | Step 3 is inline -- can't be missed |
-| Forgot to review | Agent jumped to completion | Step 6 is inline -- can't be missed |
-| Wrong API fields | Agent guessed from memory | Step 8 has the exact format |
-| Skipped hooks | Agent called complete directly | Step 7 blocks Step 8 |
+| Forgot to review | Agent jumped to completion | Step 5 is inline -- can't be missed |
+| Wrong API fields | Agent guessed from memory | Step 7 has the exact format |
+| Skipped hooks | Agent called complete directly | Step 6 blocks Step 7 |
 | Asked user permission | Agent prompted between steps | Automation notice says don't |
 | Speed over process | Agent optimized for throughput | Every step is framed as mandatory |
 
@@ -771,12 +771,12 @@ GEMINI CLI WORKFLOW:
 │     ├─ Small, 0-1 key_files → Skip to Step 4
 │     └─ Otherwise → Invoke task-explorer (+ outline approach if medium+)
 ├─ 4. Implement: Write code using explorer output and task metadata
-├─ 6. Review (check decision matrix):
-│     ├─ Small, 0-1 key_files → Skip to Step 7
+├─ 5. Review (check decision matrix):
+│     ├─ Small, 0-1 key_files → Skip to Step 6
 │     └─ Otherwise → Invoke task-reviewer, fix issues
-├─ 7. Hooks: Automatic via hooks.json (fires on API call)
-├─ 8. Complete: PATCH /api/tasks/:id/complete with ALL fields
-└─ 9. Loop: needs_review=false → Step 1 | needs_review=true → STOP
+├─ 6. Hooks: Automatic via hooks.json (fires on API call)
+├─ 7. Complete: PATCH /api/tasks/:id/complete with ALL fields
+└─ 8. Loop: needs_review=false → Step 1 | needs_review=true → STOP
 
 DECISION MATRIX QUICK CHECK:
   small + 0-1 key_files  → Skip explore, plan, review
