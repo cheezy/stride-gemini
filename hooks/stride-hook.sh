@@ -97,9 +97,13 @@ capture_changed_files() {
   # whole-line match anchors to the ROOT artifacts only; a same-named file in a
   # subdirectory (e.g. sub/.stride-changed-files.json) has a path prefix and is
   # still captured.
+  # (W1457) Also hard-exclude by name: .stride.md (the hook script config,
+  # routinely dirty in working repos), .stride_auth.md (credentials — must
+  # NEVER be uploaded, tracked, untracked, or edited), and the claim-time
+  # dirty-baseline state file (a hook artifact like the two above).
   local all_files
   all_files=$(printf '%s\n%s\n' "$tracked_files" "$untracked_files" \
-    | awk 'NF && $0 != ".stride-diff-upload-state" && $0 != ".stride-changed-files.json" && !seen[$0]++')
+    | awk 'NF && $0 != ".stride-diff-upload-state" && $0 != ".stride-changed-files.json" && $0 != ".stride-dirty-baseline" && $0 != ".stride.md" && $0 != ".stride_auth.md" && !seen[$0]++')
 
   if [ -z "$all_files" ]; then
     printf '[]\n'
@@ -115,9 +119,37 @@ capture_changed_files() {
   local jsonl_file
   jsonl_file=$(mktemp)
 
+  # (W1457) Claim-time dirty baseline: paths that were already modified or
+  # untracked when the task was claimed are excluded from the snapshot
+  # UNLESS the file changed again after claim (blob hash differs). When in
+  # doubt — unhashable, deleted-after-claim, hash mismatch — include: one
+  # extra diff beats silently losing task work. A missing/empty baseline
+  # (older claim, non-git dir) falls back to the unfiltered behavior.
+  local _baseline_file="${PROJECT_DIR:-.}/.stride-dirty-baseline"
+
   local file
   while IFS= read -r file; do
     [ -z "$file" ] && continue
+
+    if [ -s "$_baseline_file" ]; then
+      local _bl _bl_hash _bl_path _cur_hash _bl_excluded=0
+      while IFS= read -r _bl; do
+        _bl_hash="${_bl%% *}"
+        _bl_path="${_bl#* }"
+        if [ "$_bl_path" = "$file" ]; then
+          if [ -f "$file" ]; then
+            _cur_hash=$(git hash-object -- "$file" 2>/dev/null || echo "unhashable-now")
+          else
+            _cur_hash="absent"
+          fi
+          if [ "$_cur_hash" = "$_bl_hash" ] && [ "$_bl_hash" != "unhashable" ]; then
+            _bl_excluded=1
+          fi
+          break
+        fi
+      done < "$_baseline_file"
+      [ "$_bl_excluded" -eq 1 ] && continue
+    fi
 
     # Determine whether this path is in the untracked list (membership lookup,
     # not just empty check — tracked_files and untracked_files were merged
@@ -398,6 +430,119 @@ self_heal_changed_files_upload() {
 #      returns 0.
 # Placed alongside capture_changed_files / finalize_after_doing so tests
 # can source the script and invoke the function in isolation.
+
+# (W1457) Record the set of paths already modified or untracked at claim time,
+# each with its current blob hash, so capture_changed_files can exclude changes
+# that predate the claim. Persisted on disk (claim and completion can happen in
+# different sessions) and cleaned up with the other hook artifacts. Best-effort:
+# any failure leaves an absent/empty baseline, which capture treats as "no
+# exclusion".
+record_dirty_baseline() {
+  local _base="$1"
+  local _bl_file="$PROJECT_DIR/.stride-dirty-baseline"
+  rm -f "$_bl_file" 2>/dev/null || true
+  command -v git > /dev/null 2>&1 || return 0
+  [ -n "$_base" ] || return 0
+  local _paths _p _h
+  _paths=$( (cd "$PROJECT_DIR" 2>/dev/null && {
+    git diff --name-only "$_base" 2>/dev/null
+    git ls-files --others --exclude-standard 2>/dev/null
+  } | awk 'NF && !seen[$0]++') || true )
+  [ -n "$_paths" ] || return 0
+  while IFS= read -r _p; do
+    [ -z "$_p" ] && continue
+    if [ -f "$PROJECT_DIR/$_p" ]; then
+      _h=$( (cd "$PROJECT_DIR" && git hash-object -- "$_p") 2>/dev/null || echo "unhashable")
+    else
+      _h="absent"
+    fi
+    printf '%s %s\n' "$_h" "$_p" >> "$_bl_file" 2>/dev/null || true
+  done <<< "$_paths"
+  return 0
+}
+
+# (W1456) True when the accumulated LOGICAL line ends in a backslash that
+# escapes the newline — i.e. the backslash is unescaped and not inside single
+# quotes. Mirrors real shell rules: outside quotes and inside double quotes,
+# backslash-newline is a continuation; inside single quotes a backslash is a
+# literal character; `\\` at end of line is an escaped backslash, not a
+# continuation. Callers pass the accumulated logical line so quote state
+# carries across joins.
+line_continues() {
+  # NOTE: _len must be declared in a SEPARATE local statement — the words of a
+  # single `local a=$1 b=${#a}` command are expanded before any assignment
+  # lands, so ${#_line} would read the (unset) outer variable and abort under
+  # `set -u`.
+  local _line="$1"
+  local _i=0 _len=${#_line} _state="none" _c
+  while [ "$_i" -lt "$_len" ]; do
+    _c="${_line:_i:1}"
+    if [ "$_state" = "single" ]; then
+      [ "$_c" = "'" ] && _state="none"
+      _i=$((_i + 1))
+    elif [ "$_c" = "\\" ]; then
+      # Backslash escapes the next char; with no next char it escapes the
+      # newline — that IS the continuation marker.
+      [ $((_i + 1)) -eq "$_len" ] && return 0
+      _i=$((_i + 2))
+    elif [ "$_state" = "double" ]; then
+      [ "$_c" = '"' ] && _state="none"
+      _i=$((_i + 1))
+    else
+      case "$_c" in
+        "'") _state="single" ;;
+        '"') _state="double" ;;
+      esac
+      _i=$((_i + 1))
+    fi
+  done
+  return 1
+}
+
+# (W1455) Portable millisecond clock. GNU date supports %N (nanoseconds);
+# BSD/macOS date prints a literal trailing 'N', so probe once and fall back to
+# perl Time::HiRes (ships with macOS), then to whole-second granularity times
+# 1000. STRIDE_HOOK_TIME_SOURCE forces the source for tests: ns|perl|seconds.
+STRIDE_TIME_SOURCE_RESOLVED=""
+resolve_time_source() {
+  if [ -z "$STRIDE_TIME_SOURCE_RESOLVED" ]; then
+    case "${STRIDE_HOOK_TIME_SOURCE:-}" in
+      ns|perl|seconds) STRIDE_TIME_SOURCE_RESOLVED="${STRIDE_HOOK_TIME_SOURCE}" ;;
+      *)
+        if [[ "$(date +%s%N 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+          STRIDE_TIME_SOURCE_RESOLVED="ns"
+        elif command -v perl >/dev/null 2>&1 && \
+             [[ "$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000' 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+          STRIDE_TIME_SOURCE_RESOLVED="perl"
+        else
+          STRIDE_TIME_SOURCE_RESOLVED="seconds"
+        fi ;;
+    esac
+  fi
+  printf '%s' "$STRIDE_TIME_SOURCE_RESOLVED"
+}
+
+# Current wall-clock time in integer milliseconds via the resolved source.
+# Callers invoke this through $(now_ms), a subshell — so the cache only helps
+# when the PARENT shell warmed it first (run_stride_section does) and the
+# subshell inherits the resolved value.
+now_ms() {
+  resolve_time_source > /dev/null
+  case "$STRIDE_TIME_SOURCE_RESOLVED" in
+    ns)
+      local _ns
+      _ns=$(date +%s%N)
+      printf '%s' $(( _ns / 1000000 ))
+      ;;
+    perl)
+      perl -MTime::HiRes=time -e 'printf "%d", time()*1000'
+      ;;
+    *)
+      printf '%s' $(( $(date +%s) * 1000 ))
+      ;;
+  esac
+}
+
 run_stride_section() {
   local _section="$1"
   local _commands=""
@@ -431,14 +576,48 @@ run_stride_section() {
   fi
 
   local _cmd _trimmed
-  local _cmd_list
+  local _cmd_list _pending
   _cmd_list=()
+  _pending=""
+  # (W1456) Physical lines are joined into LOGICAL lines first: a line ending
+  # in an unquoted, unescaped backslash continues onto the next physical line
+  # (the backslash-newline pair is removed, per shell semantics). Trimming and
+  # comment/blank skipping apply to logical lines AFTER joining — a `#` on a
+  # continuation line is part of the joined command (where the shell treats it
+  # as a trailing comment), never a skip. One command per logical line remains
+  # the model.
   while IFS= read -r _cmd; do
+    _cmd="${_cmd%$'\r'}"
+    if [ -n "$_pending" ]; then
+      _cmd="${_pending}${_cmd}"
+      _pending=""
+    else
+      # Comments never continue: `#` lexes to end-of-line in shell, so a
+      # trailing backslash on a standalone comment line is inert — skip the
+      # line here so it cannot swallow the next command. (A `#` on a
+      # continuation body line still joins, handled above.)
+      case "${_cmd#"${_cmd%%[![:space:]]*}"}" in
+        \#*) continue ;;
+      esac
+    fi
+    if line_continues "$_cmd"; then
+      _pending="${_cmd%\\}"
+      continue
+    fi
     _trimmed="${_cmd#"${_cmd%%[![:space:]]*}"}"
     [ -z "$_trimmed" ] && continue
     case "$_trimmed" in \#*) continue ;; esac
     _cmd_list+=("$_trimmed")
   done <<< "$_commands"
+  # A trailing backslash on the section's last line: emit the accumulated
+  # command with the continuation marker already stripped — never hang or
+  # drop it.
+  if [ -n "$_pending" ]; then
+    _trimmed="${_pending#"${_pending%%[![:space:]]*}"}"
+    if [ -n "$_trimmed" ]; then
+      case "$_trimmed" in \#*) : ;; *) _cmd_list+=("$_trimmed") ;; esac
+    fi
+  fi
 
   if [ ${#_cmd_list[@]} -eq 0 ]; then
     [ "$_section" = "after_doing" ] && finalize_after_doing
@@ -467,6 +646,13 @@ run_stride_section() {
   _output_file=$(mktemp)
   local _start_secs
   _start_secs=$(date +%s)
+  # (W1455) Millisecond wall clock for duration_ms reporting; the seconds clock
+  # above stays for any whole-second bookkeeping. Warm the time-source cache in
+  # THIS shell first — $(now_ms) runs in a subshell, so without this the probe
+  # would repeat on every call.
+  local _start_ms
+  resolve_time_source > /dev/null
+  _start_ms=$(now_ms)
   local _cmd_index=0
   local _cmd_total=${#_cmd_list[@]}
   local _cmd_stdout_file _cmd_stderr_file _cmd_exit _cmd_stdout _cmd_stderr
@@ -554,14 +740,23 @@ run_stride_section() {
 
   _end_secs=$(date +%s)
   _duration=$((_end_secs - _start_secs))
+  # (W1455) duration_ms is the hook-execution.md contract field. Guard against
+  # clock weirdness — never emit a negative duration.
+  local _duration_ms
+  _duration_ms=$(( $(now_ms) - _start_ms ))
+  [ "$_duration_ms" -lt 0 ] && _duration_ms=0
 
   if [ "$HAS_JQ" = "true" ]; then
     _completed_json=$(jq -R . < "$_completed_file" | jq -s . 2>/dev/null || echo "[]")
     _output_json=$(jq -s . < "$_output_file" 2>/dev/null || echo "[]")
 
+    # duration_seconds is DEPRECATED in favor of duration_ms (the
+    # hook-execution.md field name) — kept for one release for any consumer
+    # still parsing it.
     jq -n \
       --arg hook "$_section" \
       --argjson duration "$_duration" \
+      --argjson duration_ms "$_duration_ms" \
       --argjson completed "$_completed_json" \
       --argjson outputs "$_output_json" \
       '{
@@ -569,6 +764,7 @@ run_stride_section() {
         status: "success",
         commands_completed: $completed,
         commands_output: $outputs,
+        duration_ms: $duration_ms,
         duration_seconds: $duration
       }'
   fi
@@ -897,6 +1093,9 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
     # (W1094) Clear the previous task's upload state — a stale 2xx would
     # suppress the before_review self-heal retry for the new task.
     rm -f "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
+    # (W1457) Snapshot the paths already dirty at claim time so the
+    # after_doing changed-files capture excludes edits that predate this claim.
+    record_dirty_baseline "$_base_ref"
   else
     # (W1086) No parseable response and no usable persisted file. A claim
     # always opens a new task window, so unconditionally refresh TASK_BASE_REF
@@ -918,6 +1117,9 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
       fi
       rm -f "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
       rm -f "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
+      # (W1457) Same claim-time dirty snapshot as the parsed-response path —
+      # the claim window opened even though the response was unparseable.
+      record_dirty_baseline "$_base_ref"
     fi
   fi
 fi
@@ -998,6 +1200,8 @@ if [ "$HOOK_NAME" = "after_review" ]; then
   fi
   rm -f "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
   rm -f "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
+  # (W1457) Clear the claim-time dirty baseline alongside the other artifacts.
+  rm -f "$PROJECT_DIR/.stride-dirty-baseline" 2>/dev/null || true
 fi
 
 exit 0

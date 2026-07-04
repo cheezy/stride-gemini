@@ -2477,6 +2477,159 @@ STRIDE
 fi
 
 # ============================================================
+# Test Group 16: hook-executor fixes — ms durations, backslash
+# line-continuation, and pre-existing-edit snapshot guard (W1520)
+# ============================================================
+echo ""
+echo "=== Test Group 16: hook-executor fixes (W1520) ==="
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "  SKIP: jq missing — Group 16 requires jq"
+else
+  EXEC_PROJ="$TMPDIR_TEST/exec-fixes"
+  mkdir -p "$EXEC_PROJ"
+  cat > "$EXEC_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "ran"
+```
+STRIDE
+
+  # 16a: the success JSON reports duration_ms as a number (sub-second
+  # resolution), replacing the whole-second-only duration_seconds.
+  EXEC_OUT_A=$(echo "$CLAIM_JSON" | GEMINI_PROJECT_DIR="$EXEC_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  assert_exit "16a: before_doing with duration_ms exits 0" 0 $?
+  if echo "$EXEC_OUT_A" | jq -e '.duration_ms | type == "number" and . >= 0 and . < 60000' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: 16a: success JSON reports a numeric duration_ms"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 16a: duration_ms missing or non-numeric: $(echo "$EXEC_OUT_A" | head -c 200)"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # 16b: the whole-second fallback time source still yields a numeric duration_ms.
+  EXEC_OUT_B=$(echo "$CLAIM_JSON" | GEMINI_PROJECT_DIR="$EXEC_PROJ" STRIDE_HOOK_TIME_SOURCE=seconds bash "$HOOK_SCRIPT" post 2>&1)
+  if echo "$EXEC_OUT_B" | jq -e '.duration_ms | type == "number" and . >= 0' > /dev/null 2>&1; then
+    echo -e "  ${GREEN}PASS${RESET}: 16b: seconds fallback still emits numeric duration_ms"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 16b: seconds fallback duration_ms bad: $(echo "$EXEC_OUT_B" | head -c 200)"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # 16c: line_continues unit — sourced directly from the hook script.
+  lc_check() {
+    ( source "$HOOK_SCRIPT" 2>/dev/null || true
+      if line_continues "$1"; then echo yes; else echo no; fi )
+  }
+  assert_eq "16c: trailing unescaped backslash continues" "yes" "$(lc_check 'echo one \')"
+  assert_eq "16c: escaped double-backslash does NOT continue" "no" "$(lc_check 'echo done \\')"
+  assert_eq "16c: backslash inside single quotes does NOT continue" "no" "$(lc_check "echo 'literal \\'")"
+  assert_eq "16c: plain line does NOT continue" "no" "$(lc_check 'echo plain')"
+
+  # 16d: a .stride.md command split across lines with a trailing backslash
+  # executes as ONE command. Without the join, `two` runs as its own command
+  # (not found) and the section fails with exit 2.
+  BSLASH_PROJ="$TMPDIR_TEST/backslash-cont"
+  mkdir -p "$BSLASH_PROJ"
+  printf '## before_doing\n```bash\necho one \\\ntwo\n```\n' > "$BSLASH_PROJ/.stride.md"
+  BSLASH_OUT=$(echo "$CLAIM_JSON" | GEMINI_PROJECT_DIR="$BSLASH_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  assert_exit "16d: backslash-continued command exits 0 (joined, not split)" 0 $?
+  assert_contains "16d: continuation joined into one echo" "one two" "$BSLASH_OUT"
+
+  # 16e: a standalone comment line ending in a backslash is inert — it must NOT
+  # swallow the following command.
+  CMT_PROJ="$TMPDIR_TEST/backslash-comment"
+  mkdir -p "$CMT_PROJ"
+  printf '## before_doing\n```bash\n# a trailing-backslash comment \\\necho after_comment\n```\n' > "$CMT_PROJ/.stride.md"
+  CMT_OUT=$(echo "$CLAIM_JSON" | GEMINI_PROJECT_DIR="$CMT_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  assert_exit "16e: comment-with-backslash exits 0" 0 $?
+  assert_contains "16e: comment did not swallow the next command" "after_comment" "$CMT_OUT"
+
+  # 16f: pre-existing-edit snapshot guard — a file dirty at claim time is
+  # excluded from the snapshot; a task-introduced change to another file is
+  # still captured.
+  if command -v git > /dev/null 2>&1; then
+    GUARD_DIR=$(mktemp -d)
+    GUARD_OUT=$(
+      cd "$GUARD_DIR" || exit 1
+      git init -q; git config user.email t@t.local; git config user.name Test
+      echo "v1" > pre_existing.txt
+      echo "v1" > task_file.txt
+      git add . > /dev/null; git commit -q -m initial
+      BASE=$(git rev-parse HEAD)
+      # Simulate a working-tree edit that predates the claim, THEN claim.
+      echo "dirty-before-claim" > pre_existing.txt
+      source "$HOOK_SCRIPT" 2>/dev/null || true
+      record_dirty_baseline "$BASE"
+      # Task-introduced change to a DIFFERENT file, after the claim.
+      echo "task-change" > task_file.txt
+      capture_changed_files "$BASE"
+    )
+    if echo "$GUARD_OUT" | jq -e 'any(.[]; .path == "task_file.txt")' > /dev/null 2>&1; then
+      echo -e "  ${GREEN}PASS${RESET}: 16f: task-introduced change is captured"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${RESET}: 16f: task-introduced change missing: $(echo "$GUARD_OUT" | head -c 200)"
+      FAIL=$((FAIL + 1))
+    fi
+    if echo "$GUARD_OUT" | jq -e 'any(.[]; .path == "pre_existing.txt")' > /dev/null 2>&1; then
+      echo -e "  ${RED}FAIL${RESET}: 16f: pre-existing dirty file leaked into the snapshot"
+      FAIL=$((FAIL + 1))
+    else
+      echo -e "  ${GREEN}PASS${RESET}: 16f: pre-existing dirty file excluded from the snapshot"
+      PASS=$((PASS + 1))
+    fi
+    rm -rf "$GUARD_DIR"
+
+    # 16g: a pre-existing dirty file that the task FURTHER modifies reappears
+    # (blob hash differs from the claim-time baseline) — task work is not lost.
+    GUARD2_DIR=$(mktemp -d)
+    GUARD2_OUT=$(
+      cd "$GUARD2_DIR" || exit 1
+      git init -q; git config user.email t@t.local; git config user.name Test
+      echo "v1" > shared.txt
+      git add . > /dev/null; git commit -q -m initial
+      BASE=$(git rev-parse HEAD)
+      echo "dirty-before-claim" > shared.txt
+      source "$HOOK_SCRIPT" 2>/dev/null || true
+      record_dirty_baseline "$BASE"
+      # Task modifies the SAME file again after claim.
+      echo "task-modified-further" > shared.txt
+      capture_changed_files "$BASE"
+    )
+    if echo "$GUARD2_OUT" | jq -e 'any(.[]; .path == "shared.txt")' > /dev/null 2>&1; then
+      echo -e "  ${GREEN}PASS${RESET}: 16g: further-modified pre-existing file reappears (hash differs)"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${RESET}: 16g: task's further change to a pre-existing file was lost"
+      FAIL=$((FAIL + 1))
+    fi
+    rm -rf "$GUARD2_DIR"
+
+    # 16h: record_dirty_baseline fires end-to-end at claim time — a claim in a
+    # repo with a pre-existing dirty file writes the .stride-dirty-baseline.
+    BL_DIR=$(mktemp -d)
+    (
+      setup_put_repo "$BL_DIR" || exit 1
+      echo "dirty" > preexisting_dirty.txt
+      BL_CLAIM='{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"{\"data\":{\"id\":42,\"identifier\":\"W42\",\"title\":\"T\",\"status\":\"in_progress\",\"complexity\":\"small\",\"priority\":\"low\"}}","stderr":"","interrupted":false}}'
+      echo "$BL_CLAIM" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+    )
+    if [ -s "$BL_DIR/.stride-dirty-baseline" ] && grep -q 'preexisting_dirty.txt' "$BL_DIR/.stride-dirty-baseline"; then
+      echo -e "  ${GREEN}PASS${RESET}: 16h: claim records the dirty baseline end-to-end"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${RESET}: 16h: claim did not record .stride-dirty-baseline"
+      FAIL=$((FAIL + 1))
+    fi
+    rm -rf "$BL_DIR"
+  else
+    echo "  SKIP: 16f/16g/16h dirty-baseline tests (git not available)"
+  fi
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

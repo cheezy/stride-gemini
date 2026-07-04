@@ -1456,6 +1456,180 @@ Assert-Contains "11d: supplied GOAL_IDENTIFIER still present alongside the empty
 Remove-Item -Force (Join-Path $efProj '.stride-env-cache') -ErrorAction SilentlyContinue
 
 # ============================================================
+# Test Group 12: hook-executor fixes — ms durations, backslash
+# line-continuation, and pre-existing-edit snapshot guard (W1520)
+# ============================================================
+# Mirrors test-stride-hook.sh Test Group 16.
+Write-Host ""
+Write-Host "=== Test Group 12: hook-executor fixes (W1520) ==="
+
+$execProj = Join-Path $TmpDir 'exec-fixes'
+New-Item -ItemType Directory -Path $execProj -Force | Out-Null
+Set-Content -Path (Join-Path $execProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+
+# 12a: the success JSON reports duration_ms as a number (sub-second
+# resolution), replacing the whole-second-only duration_seconds.
+$claim12 = '{"tool_input":{"command":"curl -X POST https://stridelikeaboss.com/api/tasks/claim"}}'
+$r = Invoke-HookScript -InputJson $claim12 -Phase 'post' -ProjectDir $execProj
+Assert-Exit "12a: before_doing with duration_ms exits 0" 0 $r.ExitCode
+$durOk = $false
+try {
+    $parsed12 = $r.Stdout | ConvertFrom-Json
+    if ($parsed12.PSObject.Properties.Name -contains 'duration_ms' -and
+        $parsed12.duration_ms -is [int64] -or $parsed12.duration_ms -is [int]) {
+        if ([int64]$parsed12.duration_ms -ge 0 -and [int64]$parsed12.duration_ms -lt 60000) { $durOk = $true }
+    }
+} catch { $durOk = $false }
+if ($durOk) {
+    Write-Host "  PASS: 12a: success JSON reports a numeric duration_ms" -ForegroundColor Green
+    $script:PASS++
+} else {
+    Write-Host "  FAIL: 12a: duration_ms missing or non-numeric: $($r.Stdout)" -ForegroundColor Red
+    $script:FAIL++
+}
+Remove-Item -Force (Join-Path $execProj '.stride-env-cache') -ErrorAction SilentlyContinue
+
+# 12b: a .stride.md command split across lines with a trailing backslash
+# executes as ONE command. Without the join, `two` runs on its own (not found)
+# and the section fails with exit 2.
+$bslashProj = Join-Path $TmpDir 'backslash-cont'
+New-Item -ItemType Directory -Path $bslashProj -Force | Out-Null
+Set-Content -Path (Join-Path $bslashProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo one \
+two
+```
+'@ -Encoding UTF8
+$r = Invoke-HookScript -InputJson $claim12 -Phase 'post' -ProjectDir $bslashProj
+Assert-Exit "12b: backslash-continued command exits 0 (joined, not split)" 0 $r.ExitCode
+Assert-Contains "12b: continuation joined into one echo" "one two" $r.Stdout
+Remove-Item -Force (Join-Path $bslashProj '.stride-env-cache') -ErrorAction SilentlyContinue
+
+# 12c: a standalone comment line ending in a backslash is inert — it must NOT
+# swallow the following command.
+$cmtProj = Join-Path $TmpDir 'backslash-comment'
+New-Item -ItemType Directory -Path $cmtProj -Force | Out-Null
+Set-Content -Path (Join-Path $cmtProj '.stride.md') -Value @'
+## before_doing
+```bash
+# a trailing-backslash comment \
+echo after_comment
+```
+'@ -Encoding UTF8
+$r = Invoke-HookScript -InputJson $claim12 -Phase 'post' -ProjectDir $cmtProj
+Assert-Exit "12c: comment-with-backslash exits 0" 0 $r.ExitCode
+Assert-Contains "12c: comment did not swallow the next command" "after_comment" $r.Stdout
+Remove-Item -Force (Join-Path $cmtProj '.stride-env-cache') -ErrorAction SilentlyContinue
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: 12d/12e dirty-baseline tests (git not available)" -ForegroundColor Yellow
+} else {
+    # 12d: pre-existing-edit snapshot guard at upload time — a file whose path
+    # was dirty at claim AND is hash-identical now is filtered out of the PUT
+    # body; a task-introduced file is kept.
+    $dbProj = Join-Path $TmpDir 'dirty-baseline-filter'
+    New-Item -ItemType Directory -Path $dbProj -Force | Out-Null
+    & git -C $dbProj init -q 2>$null | Out-Null
+    & git -C $dbProj config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $dbProj config user.name 'Test' 2>$null | Out-Null
+    Set-Content -Path (Join-Path $dbProj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+    Set-Content -Path (Join-Path $dbProj 'pre_existing.txt') -Value 'dirty-at-claim' -Encoding UTF8 -NoNewline
+    Set-Content -Path (Join-Path $dbProj 'task_file.txt') -Value 'task-content' -Encoding UTF8 -NoNewline
+    $preHash = (& git -C $dbProj hash-object 'pre_existing.txt' | Out-String).Trim()
+    # Baseline lists pre_existing.txt at its CURRENT hash (matches -> excluded);
+    # task_file.txt is absent from the baseline (kept).
+    Set-Content -Path (Join-Path $dbProj '.stride-dirty-baseline') -Value "$preHash pre_existing.txt" -Encoding UTF8
+    Set-Content -Path (Join-Path $dbProj '.stride-changed-files.json') `
+        -Value '[{"path":"pre_existing.txt","diff":"pre body"},{"path":"task_file.txt","diff":"task body"}]' -Encoding UTF8
+    Set-Content -Path (Join-Path $dbProj '.stride-env-cache') -Value "TASK_ID=99`nTASK_BASE_REF=abc" -Encoding UTF8
+
+    $dbPort = 18893
+    $dbFixture = Join-Path $TmpDir 'dirty-baseline-fixture.json'
+    if (Test-Path $dbFixture) { Remove-Item -Force $dbFixture }
+    $dbListenerJob = Start-Job -ArgumentList $dbPort, $dbFixture -ScriptBlock {
+        param($Port, $Fixture)
+        $l = [System.Net.HttpListener]::new()
+        $l.Prefixes.Add("http://localhost:$Port/")
+        try {
+            $l.Start()
+            $ctx = $l.GetContext()
+            $reader = [System.IO.StreamReader]::new($ctx.Request.InputStream)
+            $body = $reader.ReadToEnd()
+            @{ Body = $body } | ConvertTo-Json -Compress | Set-Content -Path $Fixture -Encoding UTF8
+            $ctx.Response.StatusCode = 200
+            $ctx.Response.OutputStream.Close()
+        } catch {
+        } finally {
+            if ($l.IsListening) { $l.Stop() }
+        }
+    }
+    try {
+        $null = Wait-ForListener -Port $dbPort
+        $dbCmd = "curl -X PATCH http://localhost:$dbPort/api/tasks/99/complete -H `"Authorization: Bearer test_token_xyz`""
+        $dbJson = @{ tool_input = @{ command = $dbCmd } } | ConvertTo-Json -Compress
+        $r = Invoke-HookScript -InputJson $dbJson -Phase 'pre' -ProjectDir $dbProj
+        Assert-Exit "12d: hook exits 0 after filtered PUT" 0 $r.ExitCode
+        Wait-Job $dbListenerJob -Timeout 8 | Out-Null
+        Remove-Job $dbListenerJob -Force -ErrorAction SilentlyContinue
+        if (Test-Path $dbFixture) {
+            $record = Get-Content -Raw -Path $dbFixture | ConvertFrom-Json
+            $parsedBody = $record.Body | ConvertFrom-Json
+            $decoded = [System.Convert]::FromBase64String($parsedBody.changed_files.data)
+            $entries = @(([System.Text.Encoding]::UTF8.GetString($decoded)) | ConvertFrom-Json)
+            $paths = @($entries | ForEach-Object { $_.path })
+            if ($paths -contains 'task_file.txt') {
+                Write-Host "  PASS: 12d: task-introduced file survives the baseline filter" -ForegroundColor Green
+                $script:PASS++
+            } else {
+                Write-Host "  FAIL: 12d: task_file.txt was dropped: $($paths -join ', ')" -ForegroundColor Red
+                $script:FAIL++
+            }
+            if ($paths -notcontains 'pre_existing.txt') {
+                Write-Host "  PASS: 12d: pre-existing dirty file excluded from PUT body" -ForegroundColor Green
+                $script:PASS++
+            } else {
+                Write-Host "  FAIL: 12d: pre-existing dirty file leaked into PUT body: $($paths -join ', ')" -ForegroundColor Red
+                $script:FAIL++
+            }
+        } else {
+            Write-Host "  FAIL: 12d: filtered PUT did not arrive at listener" -ForegroundColor Red
+            $script:FAIL++
+        }
+    } finally {
+        if ($dbListenerJob -and $dbListenerJob.State -eq 'Running') {
+            Stop-Job $dbListenerJob -ErrorAction SilentlyContinue
+            Remove-Job $dbListenerJob -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # 12e: Write-DirtyBaseline fires end-to-end at claim time — a claim in a
+    # repo with a pre-existing dirty file writes the .stride-dirty-baseline.
+    $blRepo = New-GitRepo -Name 'g12-baseline'
+    Set-Content -Path (Join-Path $blRepo 'preexisting_dirty.txt') -Value 'dirty' -Encoding UTF8 -NoNewline
+    $blClaim = '{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"{\"data\":{\"id\":42,\"identifier\":\"W42\",\"title\":\"T\",\"status\":\"in_progress\",\"complexity\":\"small\",\"priority\":\"low\"}}","stderr":"","interrupted":false}}'
+    $null = Invoke-HookScript -InputJson $blClaim -Phase 'post' -ProjectDir $blRepo
+    $blFile = Join-Path $blRepo '.stride-dirty-baseline'
+    if ((Test-Path $blFile) -and ((Get-Content -Raw $blFile) -match 'preexisting_dirty\.txt')) {
+        Write-Host "  PASS: 12e: claim records the dirty baseline end-to-end" -ForegroundColor Green
+        $script:PASS++
+    } else {
+        Write-Host "  FAIL: 12e: claim did not record .stride-dirty-baseline" -ForegroundColor Red
+        $script:FAIL++
+    }
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

@@ -30,6 +30,57 @@ $EnvCache = Join-Path $ProjectDir '.stride-env-cache'
 # server-omitted GOAL_* must be visible as empty, never trigger set -u aborts).
 $StrideEmptyEnvKeys = @()
 
+# (W1457) Record the set of paths already modified or untracked at claim time,
+# each with its current blob hash, so Invoke-ChangedFilesUpload can exclude
+# changes that predate the claim. Persisted on disk (claim and completion can
+# happen in different sessions), cleaned up with the other hook artifacts.
+# Best-effort: failure leaves an absent baseline, which the filter treats as
+# "no exclusion".
+function Write-DirtyBaseline {
+    param([string]$BaseRef)
+    $blFile = Join-Path $ProjectDir '.stride-dirty-baseline'
+    Remove-Item -Force $blFile -ErrorAction SilentlyContinue
+    if (-not $BaseRef) { return }
+    try {
+        $tracked = @(& git -C $ProjectDir diff --name-only $BaseRef 2>$null)
+        if ($LASTEXITCODE -ne 0) { $tracked = @() }
+        $untracked = @(& git -C $ProjectDir ls-files --others --exclude-standard 2>$null)
+        if ($LASTEXITCODE -ne 0) { $untracked = @() }
+        $paths = @(($tracked + $untracked) | Where-Object { $_ } | Select-Object -Unique)
+        if ($paths.Count -eq 0) { return }
+        $lines = @()
+        foreach ($p in $paths) {
+            $full = Join-Path $ProjectDir $p
+            if (Test-Path -LiteralPath $full -PathType Leaf) {
+                $h = (& git -C $ProjectDir hash-object -- $p 2>$null | Out-String).Trim()
+                if ($LASTEXITCODE -ne 0 -or -not $h) { $h = 'unhashable' }
+            } else {
+                $h = 'absent'
+            }
+            $lines += "$h $p"
+        }
+        Set-Content -Path $blFile -Value $lines -Encoding UTF8
+    } catch {
+        # Best-effort — an absent baseline just means no exclusion.
+    }
+}
+
+# (W1457) Load the dirty baseline as a path->hash map; $null when absent.
+function Read-DirtyBaseline {
+    $blFile = Join-Path $ProjectDir '.stride-dirty-baseline'
+    if (-not (Test-Path -LiteralPath $blFile -PathType Leaf)) { return $null }
+    $map = @{}
+    try {
+        foreach ($line in Get-Content -Path $blFile -Encoding UTF8) {
+            if ($line -match '^(\S+) (.+)$') { $map[$Matches[2]] = $Matches[1] }
+        }
+    } catch {
+        return $null
+    }
+    if ($map.Count -eq 0) { return $null }
+    return $map
+}
+
 # Exit early if no phase argument or no .stride.md
 if (-not $Phase) { exit 0 }
 if (-not (Test-Path $StrideMd)) { exit 0 }
@@ -210,6 +261,10 @@ if ($HookName -eq 'before_doing') {
                 # the new task's id.
                 Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
                 Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+                # (W1457) Snapshot the paths already dirty at claim time so the
+                # after_doing changed-files upload excludes edits that predate
+                # this claim.
+                Write-DirtyBaseline -BaseRef $baseRef
             } elseif ($baseRef) {
                 # (W1086/W1087) No parseable response and no usable persisted
                 # file. A claim still opens a new task window, so unconditionally
@@ -225,6 +280,10 @@ if ($HookName -eq 'before_doing') {
                 $newLines | Set-Content -Path $EnvCache -Encoding UTF8
                 Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
                 Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+                # (W1457) Same claim-time dirty snapshot as the parsed-response
+                # path — the claim window opened even though the response was
+                # unparseable.
+                Write-DirtyBaseline -BaseRef $baseRef
             }
         }
     } catch {
@@ -306,8 +365,32 @@ function Invoke-ChangedFilesUpload {
         # falls through to the raw bytes unchanged.
         try {
             $entries = @([System.Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json)
+            # (W1457) Hard name exclusions (.stride.md, .stride_auth.md — the
+            # auth file must NEVER be uploaded — and the baseline artifact),
+            # plus the claim-time dirty-baseline exclusion: entries whose path
+            # was already dirty at claim AND whose file is hash-identical now
+            # are pre-existing unrelated edits, not task work. Hash mismatch,
+            # deletion, or unhashable -> keep (include when in doubt).
+            $dirtyBaseline = Read-DirtyBaseline
             $filtered = @($entries | Where-Object {
-                $_.path -ne '.stride-diff-upload-state' -and $_.path -ne '.stride-changed-files.json'
+                if ($_.path -eq '.stride-diff-upload-state' -or
+                    $_.path -eq '.stride-changed-files.json' -or
+                    $_.path -eq '.stride-dirty-baseline' -or
+                    $_.path -eq '.stride.md' -or
+                    $_.path -eq '.stride_auth.md') { return $false }
+                if ($dirtyBaseline -and $dirtyBaseline.ContainsKey($_.path)) {
+                    $blHash = $dirtyBaseline[$_.path]
+                    if ($blHash -eq 'unhashable') { return $true }
+                    $full = Join-Path $ProjectDir $_.path
+                    if (Test-Path -LiteralPath $full -PathType Leaf) {
+                        $curHash = (& git -C $ProjectDir hash-object -- $_.path 2>$null | Out-String).Trim()
+                        if ($LASTEXITCODE -ne 0 -or -not $curHash) { return $true }
+                    } else {
+                        $curHash = 'absent'
+                    }
+                    return ($curHash -ne $blHash)
+                }
+                return $true
             })
             if ($filtered.Count -ne $entries.Count) {
                 # Pipe (not -InputObject) so an array is not double-wrapped into
@@ -435,6 +518,37 @@ function Invoke-SelfHealChangedFilesUpload {
     Write-DiffUploadState -TaskId $taskId -HttpCode $httpCode
 }
 
+# (W1456) Shell-semantics line-continuation check for the bash-section parser
+# — mirror of line_continues in stride-hook.sh. Returns $true when the LOGICAL
+# line ends in a backslash that escapes the newline: unescaped and not inside
+# single quotes. Inside single quotes a backslash is a literal character; a
+# trailing `\\` is an escaped backslash, not a continuation. Callers pass the
+# accumulated logical line so quote state carries across joins.
+function Test-LineContinues {
+    param([string]$Line)
+
+    $i = 0
+    $state = 'none'
+    while ($i -lt $Line.Length) {
+        $c = $Line[$i]
+        if ($state -eq 'single') {
+            if ($c -eq "'") { $state = 'none' }
+            $i++
+        } elseif ($c -eq '\') {
+            if (($i + 1) -eq $Line.Length) { return $true }
+            $i += 2
+        } elseif ($state -eq 'double') {
+            if ($c -eq '"') { $state = 'none' }
+            $i++
+        } else {
+            if ($c -eq "'") { $state = 'single' }
+            elseif ($c -eq '"') { $state = 'double' }
+            $i++
+        }
+    }
+    return $false
+}
+
 # --- Parse and execute one .stride.md hook section ---
 # Mirror of stride-hook.sh:run_stride_section. Takes a section name and
 # returns 0 on no-op / all-success, 2 on first failure. Emits structured
@@ -485,12 +599,39 @@ function Invoke-StrideSection {
         return 0
     }
 
+    # (W1456) Join backslash-continued physical lines into logical lines first
+    # (the backslash-newline pair is removed, per shell semantics); trimming
+    # and comment/blank skipping apply to logical lines AFTER joining. Mirror
+    # of the stride-hook.sh loop.
     $secCmdList = @()
+    $secPending = ''
     foreach ($cmd in ($secCommands -split "`n")) {
+        $cmd = $cmd.TrimEnd("`r")
+        if ($secPending) {
+            $cmd = $secPending + $cmd
+            $secPending = ''
+        } else {
+            # Comments never continue: '#' lexes to end-of-line in shell, so a
+            # trailing backslash on a standalone comment line is inert — skip
+            # it here so it cannot swallow the next command.
+            if ($cmd.TrimStart().StartsWith('#')) { continue }
+        }
+        if (Test-LineContinues -Line $cmd) {
+            $secPending = $cmd.Substring(0, $cmd.Length - 1)
+            continue
+        }
         $trimmedCmd = $cmd.TrimStart()
         if (-not $trimmedCmd) { continue }
         if ($trimmedCmd.StartsWith('#')) { continue }
         $secCmdList += $trimmedCmd
+    }
+    # Trailing backslash on the section's last line — emit the accumulated
+    # command with the marker already stripped; never hang or drop it.
+    if ($secPending) {
+        $trimmedCmd = $secPending.TrimStart()
+        if ($trimmedCmd -and -not $trimmedCmd.StartsWith('#')) {
+            $secCmdList += $trimmedCmd
+        }
     }
 
     if ($secCmdList.Count -eq 0) {
@@ -517,6 +658,9 @@ function Invoke-StrideSection {
     # so the host does not render it under a false hook-error label.
     $secCmdOutputs = @()
     $secStartTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    # (W1455) Millisecond wall clock for duration_ms reporting; the seconds
+    # clock above stays for any whole-second bookkeeping.
+    $secStartMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $secCmdIndex = 0
     $secCmdTotal = $secCmdList.Count
 
@@ -638,12 +782,18 @@ function Invoke-StrideSection {
 
     $secEndTime = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $secDuration = $secEndTime - $secStartTime
+    # (W1455) duration_ms is the hook-execution.md contract field; never
+    # negative. duration_seconds is DEPRECATED — kept for one release for any
+    # consumer still parsing it.
+    $secDurationMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $secStartMs
+    if ($secDurationMs -lt 0) { $secDurationMs = 0 }
 
     $successResult = [ordered]@{
         hook               = $Section
         status             = 'success'
         commands_completed = $secCompletedCmds
         commands_output    = $secCmdOutputs
+        duration_ms        = $secDurationMs
         duration_seconds   = $secDuration
     }
     # Depth 6 so the commands_output array of objects serializes fully.
@@ -917,6 +1067,8 @@ if ($HookName -eq 'after_review') {
     Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
     # (W1095) Remove the upload state alongside the snapshot at lifecycle end.
     Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+    # (W1457) Clear the claim-time dirty baseline alongside the other artifacts.
+    Remove-Item -Force (Join-Path $ProjectDir '.stride-dirty-baseline') -ErrorAction SilentlyContinue
 }
 
 exit 0
