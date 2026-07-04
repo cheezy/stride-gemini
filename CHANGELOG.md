@@ -2,6 +2,30 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.34.0] - 2026-07-04
+
+### Fixed — Ported five unported hook-executor / documentation gaps from the canonical stride plugin (G289)
+
+A batch of `G289` parity fixes brings the Gemini port in line with the canonical stride plugin. Two of them change the hook wire shape / behavior (server env forwarding and millisecond durations), so this ships as a minor bump (1.33.0 → 1.34.0) rather than a patch.
+
+- **`hooks/stride-hook.sh`, `hooks/stride-hook.ps1`** — **Server hook.env forwarding (W1519).** Both hook scripts now source the server-supplied `hook.env` verbatim instead of reconstructing only a six-field `TASK_*` subset: after a claim the env cache carries `TASK_DESCRIPTION`, `TASK_NEEDS_REVIEW`, and `BOARD_*` / `COLUMN_*` / `AGENT_NAME` when the server supplies them, and on the `after_goal` path the section receives `GOAL_ID` / `GOAL_IDENTIFIER` / `GOAL_TITLE` / `GOAL_DESCRIPTION` (with a `parent_id` fallback for `GOAL_ID`). Keys are shell-identifier-filtered and safely quoted; server-omitted keys export as empty strings; `HOOK_NAME` and `TASK_BASE_REF` stay script-owned.
+- **`hooks/stride-hook.sh`, `hooks/stride-hook.ps1`** — **Hook-executor correctness fixes (W1520).** (1) The success JSON now reports a real `duration_ms` at sub-second resolution (`duration_seconds` kept as a deprecated alias). (2) `.stride.md` commands split across lines with a trailing backslash are joined into one logical command before execution. (3) A claim-time dirty baseline (`.stride-dirty-baseline`) now excludes working-tree edits that predate the claim from the changed-files snapshot — a path is dropped only when it is in the baseline AND hash-identical now (task-introduced changes still surface); `.stride.md` / `.stride_auth.md` are also hard-excluded from uploads.
+- **`skills/stride-workflow/SKILL.md`** — **Step-numbering gap closed (W1521).** The empty Step 5 slot left by v1.8.0 is gone; the lifecycle steps now run contiguously 0..8 (Code Review is Step 5, Execute Hooks Step 6, Complete Step 7, Post-Completion Step 8), with every in-file cross-reference, marker heading, flowchart, and quick-reference updated. The six `workflow_steps` completion names are unchanged.
+- **`README.md`** — **Required-completion-fields corrected (W1522).** The stale "5 required completion fields" claim now names the current set — `completion_summary`, `actual_complexity`, `actual_files_changed`, `after_doing_result`, `before_review_result`, `explorer_result`, `reviewer_result`, plus the required `workflow_steps` array — matching `skills/stride-completing-tasks/SKILL.md`.
+- **`agents/hook-diagnostician.md`** — **after_goal awareness + timeout accuracy (W1523).** The diagnostician now recognizes `after_goal` failures (frontmatter + body), and its Hook Timeout Handling section reflects the actual single 300,000 ms `run_shell_command` ceiling that all five hooks share under Gemini's `hooks.json`, instead of the canonical 60k/120k per-hook thresholds this port never enforced.
+
+### Backward compatibility
+
+The env-forwarding and `duration_ms` changes are additive: existing `.stride.md` hooks keep working, `duration_seconds` is still emitted, and the changed-files transport envelope, `before_review` self-heal, and JSON-only-stdout contract are unchanged. The remaining changes are documentation/skill-text only.
+
+### Release
+
+**No marketplace pin update is required.** `stride-gemini` is **not** distributed on `stride-marketplace`; its release is a git tag + GitHub release on the `stride-gemini` repository only.
+
+### Source
+
+G289 — W1519, W1520, W1521, W1522, W1523, W1524.
+
 ## [1.33.0] - 2026-07-01
 
 ### Added — `API Notes & Limitations` section in the workflow orchestrator skill (G286 / W1419)
