@@ -24,6 +24,12 @@ $ProjectDir = if ($env:GEMINI_PROJECT_DIR) { $env:GEMINI_PROJECT_DIR } elseif ($
 $StrideMd = Join-Path $ProjectDir '.stride.md'
 $EnvCache = Join-Path $ProjectDir '.stride-env-cache'
 
+# (W1519) Keys the server supplied with an empty value. SetEnvironmentVariable
+# with '' DELETES the Process env var, so Invoke-StrideSection re-adds these to
+# each bash child's env block to honor the defined-but-empty contract (a
+# server-omitted GOAL_* must be visible as empty, never trigger set -u aborts).
+$StrideEmptyEnvKeys = @()
+
 # Exit early if no phase argument or no .stride.md
 if (-not $Phase) { exit 0 }
 if (-not (Test-Path $StrideMd)) { exit 0 }
@@ -532,6 +538,12 @@ function Invoke-StrideSection {
             $secPsi.RedirectStandardError = $true
             $secPsi.UseShellExecute = $false
             $secPsi.WorkingDirectory = (Get-Location).Path
+            # (W1519) Re-add empty-valued keys the Process env block cannot
+            # hold, so user commands see them defined-but-empty per the Step 7
+            # env matrix contract (prevents ${VAR?} / set -u aborts).
+            foreach ($emptyKey in $script:StrideEmptyEnvKeys) {
+                $secPsi.Environment[$emptyKey] = ''
+            }
             $proc = [System.Diagnostics.Process]::Start($secPsi)
             # Drain both pipes concurrently: a synchronous ReadToEnd on
             # stdout would deadlock if the child fills the stderr pipe
@@ -689,6 +701,173 @@ function Test-AfterGoalInResponse {
     return $false
 }
 
+# --- Server-supplied hook env forwarding (W1519, mirrors stride W1453) ---
+# The Step 7 env matrix (skills/stride-workflow/SKILL.md) declares the server's
+# hook env block the single source of truth for the variables the executor
+# exports. The functions below extract the `env` object from the hook entry of
+# an intercepted response (singular `.hook` on claim responses, `.hooks[]` on
+# /complete and /mark_reviewed), export every key into the Process environment
+# (inherited by the bash -c children that run the sections), and append it to
+# the env cache so follow-up agent commands (e.g. the after_goal PATCH) can
+# still read the values. Keys the server omits export as empty strings. Mirrors
+# the bash extract_response_payload / extract_hook_env / apply_env_lines /
+# export_after_goal_env helpers — both scripts must agree on behavior.
+
+# Peel the API payload out of the Gemini/Claude hook input. Same three shapes
+# as Test-AfterGoalInResponse. Returns the parsed payload object, or $null.
+function Get-ResponsePayload {
+    param([string]$InputJson)
+
+    if (-not $InputJson) { return $null }
+
+    try {
+        $parsed = $InputJson | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+
+    if ($parsed.PSObject.Properties.Name -notcontains 'tool_response') { return $null }
+
+    $resp = $parsed.tool_response
+    if (-not $resp) { return $null }
+
+    $payload = $null
+
+    # Shape 1: {"stdout":"<json>"} wrapper (Bash-tool host)
+    if ($resp -is [PSCustomObject] -and $resp.PSObject.Properties.Name -contains 'stdout') {
+        try { $payload = $resp.stdout | ConvertFrom-Json } catch { $payload = $null }
+    }
+
+    # Shape 2: tool_response is itself a JSON-encoded string
+    if ($null -eq $payload -and $resp -is [string]) {
+        try { $payload = $resp | ConvertFrom-Json } catch { $payload = $null }
+    }
+
+    # Shape 3: raw API JSON object directly
+    if ($null -eq $payload -and $resp -is [PSCustomObject]) {
+        $payload = $resp
+    }
+
+    return $payload
+}
+
+# Collect the env object of the named hook entry as an ordered map. Keys must
+# be valid shell identifiers — anything else is dropped, because the values
+# reach a bash -c child via the environment and the cache loader is
+# line-based. HOOK_NAME is excluded (the executor routes on its own value; a
+# cached HOOK_NAME line would misroute later invocations). TASK_BASE_REF is
+# excluded (client-only diff anchor owned by the claim branch).
+function Get-HookEnvFromPayload {
+    param($Payload, [string]$HookEntryName)
+
+    $envMap = [ordered]@{}
+    if ($null -eq $Payload) { return $envMap }
+
+    $payloadProps = $Payload.PSObject.Properties.Name
+    $entries = @()
+    if (($payloadProps -contains 'hooks') -and $Payload.hooks) {
+        $entries += @($Payload.hooks)
+    }
+    if (($payloadProps -contains 'hook') -and $Payload.hook -is [PSCustomObject]) {
+        $entries += $Payload.hook
+    }
+
+    foreach ($entry in $entries) {
+        if (-not ($entry -is [PSCustomObject])) { continue }
+        if ($entry.PSObject.Properties.Name -notcontains 'name') { continue }
+        if ($entry.name -ne $HookEntryName) { continue }
+        if ($entry.PSObject.Properties.Name -notcontains 'env') { continue }
+        $envObj = $entry.env
+        if (-not ($envObj -is [PSCustomObject])) { continue }
+        foreach ($prop in $envObj.PSObject.Properties) {
+            $key = $prop.Name
+            if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
+            if ($key -eq 'HOOK_NAME' -or $key -eq 'TASK_BASE_REF') { continue }
+            $envMap[$key] = [string]$prop.Value
+        }
+        break
+    }
+
+    return $envMap
+}
+
+# Export a map into the Process environment (inherited by the bash -c children
+# that run sections) and append it to the env cache, best-effort, so the
+# values survive for follow-up agent commands. The cache loader is line-based,
+# so embedded newlines are collapsed to spaces in the cached copy — the
+# process env keeps the exact value. SetEnvironmentVariable involves no shell
+# parsing, so crafted values have no injection surface. Never echoes values to
+# stdout/stderr.
+function Set-HookEnv {
+    param($EnvMap)
+
+    if ($null -eq $EnvMap -or $EnvMap.Count -eq 0) { return }
+
+    $cacheLines = @()
+    foreach ($key in @($EnvMap.Keys)) {
+        $value = [string]$EnvMap[$key]
+        [System.Environment]::SetEnvironmentVariable($key, $value, 'Process')
+        if ($value -eq '') {
+            # SetEnvironmentVariable('', 'Process') DELETED the variable —
+            # remember the key so sections still see it defined-but-empty.
+            if ($script:StrideEmptyEnvKeys -notcontains $key) {
+                $script:StrideEmptyEnvKeys += $key
+            }
+        } else {
+            $script:StrideEmptyEnvKeys = @($script:StrideEmptyEnvKeys | Where-Object { $_ -ne $key })
+        }
+        $cacheLines += "$key=" + ($value -replace "`r?`n", ' ')
+    }
+    try {
+        Add-Content -Path $EnvCache -Value $cacheLines -Encoding UTF8
+    } catch {
+        # Best-effort cache append — export already succeeded.
+    }
+}
+
+# after_goal env: export what the server supplied, default every documented
+# GOAL_* key it omitted to an empty string (defined-but-empty, never an
+# error), and fall back to the completed task's parent_id from the same
+# response payload when GOAL_ID itself is missing or empty. The fallback is
+# response-local — the executor still never queries the API for goal state.
+function Set-AfterGoalEnv {
+    param($Payload)
+
+    $envMap = Get-HookEnvFromPayload -Payload $Payload -HookEntryName 'after_goal'
+
+    foreach ($key in @('GOAL_ID', 'GOAL_IDENTIFIER', 'GOAL_TITLE', 'GOAL_DESCRIPTION')) {
+        if (-not $envMap.Contains($key)) { $envMap[$key] = '' }
+    }
+
+    # Parent-id fallback: the server built the after_goal env from the
+    # completed child task and omitted GOAL_ID (or sent it empty). The parent
+    # id in the same response's data object IS the goal id.
+    if (-not $envMap['GOAL_ID'] -and $null -ne $Payload) {
+        $parentId = $null
+        $payloadProps = $Payload.PSObject.Properties.Name
+        if (($payloadProps -contains 'data') -and $Payload.data -and
+            ($Payload.data.PSObject.Properties.Name -contains 'parent_id')) {
+            $parentId = $Payload.data.parent_id
+        } elseif ($payloadProps -contains 'parent_id') {
+            $parentId = $Payload.parent_id
+        }
+        if ($null -ne $parentId -and "$parentId") { $envMap['GOAL_ID'] = "$parentId" }
+    }
+
+    Set-HookEnv -EnvMap $envMap
+}
+
+# (W1519) Forward the server-supplied hook env for the routed hook. Applied
+# AFTER the cache load so server-supplied keys override stale cached values;
+# keys the server does not supply keep their cached values. The pre phase has
+# no tool_response yet, so this is post-only.
+$afterGoalRouted = $false
+$responsePayload = $null
+if ($Phase -eq 'post') {
+    $responsePayload = Get-ResponsePayload -InputJson $RawInput
+    Set-HookEnv -EnvMap (Get-HookEnvFromPayload -Payload $responsePayload -HookEntryName $HookName)
+}
+
 # (W1094 parity, ported in W1095) Verify-and-retry the changed_files upload
 # before the primary before_review section runs — fresh AfterTool budget;
 # TASK_ID is in scope from the env cache. Self-gates on
@@ -711,7 +890,16 @@ if ($primaryRc -ne 0) {
 # to forward via PATCH /api/tasks/:goal_id/after_goal.
 if ($Phase -eq 'post' -and ($Command -match '/api/tasks/[^/]+/(complete|mark_reviewed)')) {
     if (Test-AfterGoalInResponse -InputJson $RawInput) {
+        $afterGoalRouted = $true
+        # (W1519) Export GOAL_* (server-supplied, with the parent-id fallback
+        # for GOAL_ID) before the section runs. The section observes
+        # HOOK_NAME=after_goal per the documented contract; the prior value is
+        # restored afterwards.
+        Set-AfterGoalEnv -Payload $responsePayload
+        $savedHookNameEnv = [System.Environment]::GetEnvironmentVariable('HOOK_NAME', 'Process')
+        [System.Environment]::SetEnvironmentVariable('HOOK_NAME', 'after_goal', 'Process')
         $null = Invoke-StrideSection -Section 'after_goal'
+        [System.Environment]::SetEnvironmentVariable('HOOK_NAME', $savedHookNameEnv, 'Process')
     }
 }
 
@@ -720,7 +908,12 @@ if ($Phase -eq 'post' -and ($Command -match '/api/tasks/[^/]+/(complete|mark_rev
 # 'after_review'. Mirrors stride-hook.sh, which removes both the env cache and
 # the changed-files snapshot here.
 if ($HookName -eq 'after_review') {
-    Remove-Item -Force $EnvCache -ErrorAction SilentlyContinue
+    # (W1519) Keep the env cache when after_goal rode this response — the agent
+    # still needs GOAL_ID from it for the follow-up
+    # PATCH /api/tasks/:goal_id/after_goal. The next claim rewrites the cache.
+    if (-not $afterGoalRouted) {
+        Remove-Item -Force $EnvCache -ErrorAction SilentlyContinue
+    }
     Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
     # (W1095) Remove the upload state alongside the snapshot at lifecycle end.
     Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue

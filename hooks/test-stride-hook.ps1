@@ -1334,6 +1334,128 @@ echo "claimed"
 }
 
 # ============================================================
+# Test Group 11: server hook.env forwarding (W1519)
+# ============================================================
+# Mirrors test-stride-hook.sh Test Group 15. The claim response's singular
+# `.hook.env` and the /complete|/mark_reviewed `.hooks[].env` (for after_goal)
+# are the single source of truth for the exported variables. Assert the full
+# env matrix reaches the running section (not just the six-field TASK_*
+# subset), that HOOK_NAME/TASK_BASE_REF stay script-owned, that GOAL_* export
+# for after_goal (with the parent_id fallback), and that server-omitted keys
+# become empty strings rather than errors.
+Write-Host ""
+Write-Host "=== Test Group 11: server hook.env forwarding (W1519) ==="
+
+$efProj = Join-Path $TmpDir 'env-forward'
+New-Item -ItemType Directory -Path $efProj -Force | Out-Null
+Set-Content -Path (Join-Path $efProj '.stride.md') -Value @'
+## before_doing
+```bash
+echo "desc=$TASK_DESCRIPTION needs=$TASK_NEEDS_REVIEW board=$BOARD_NAME agent=$AGENT_NAME"
+```
+
+## after_review
+```bash
+echo "after_review_ran"
+```
+
+## after_goal
+```bash
+echo "after_goal_ran id=$GOAL_ID ident=$GOAL_IDENTIFIER title=$GOAL_TITLE desc=[$GOAL_DESCRIPTION]"
+```
+'@ -Encoding UTF8
+
+# 11a: a before_doing claim response carrying a singular `.hook.env` forwards
+# TASK_DESCRIPTION/TASK_NEEDS_REVIEW/BOARD_NAME/AGENT_NAME into the section AND
+# persists them to the env cache — while HOOK_NAME and TASK_BASE_REF from the
+# server env are NOT applied (script-owned).
+$efInnerA = @{
+    data = @{ id = 42; identifier = 'W99'; title = 'Env Task'; status = 'in_progress'; complexity = 'small'; priority = 'high' }
+    hook = @{ name = 'before_doing'; env = @{
+        TASK_DESCRIPTION  = 'A detailed task description'
+        TASK_NEEDS_REVIEW = 'false'
+        BOARD_NAME        = 'Stride Development'
+        COLUMN_NAME       = 'Doing'
+        AGENT_NAME        = 'Claude Opus'
+        HOOK_NAME         = 'before_doing'
+        TASK_BASE_REF     = 'SHOULD_NOT_APPEAR'
+    } }
+} | ConvertTo-Json -Depth 6 -Compress
+$efInputA = @{
+    tool_input    = @{ command = 'curl -X POST https://stridelikeaboss.com/api/tasks/claim' }
+    tool_response = @{ stdout = $efInnerA }
+} | ConvertTo-Json -Depth 6 -Compress
+$r = Invoke-HookScript -InputJson $efInputA -Phase 'post' -ProjectDir $efProj
+Assert-Exit "11a: claim env forwarding exits 0" 0 $r.ExitCode
+Assert-Contains "11a: TASK_DESCRIPTION reaches the section" "desc=A detailed task description" $r.Stdout
+Assert-Contains "11a: TASK_NEEDS_REVIEW reaches the section" "needs=false" $r.Stdout
+Assert-Contains "11a: BOARD_NAME reaches the section" "board=Stride Development" $r.Stdout
+Assert-Contains "11a: AGENT_NAME reaches the section" "agent=Claude Opus" $r.Stdout
+$efCacheA = Get-Content -Raw -Path (Join-Path $efProj '.stride-env-cache') -ErrorAction SilentlyContinue
+Assert-Contains "11a: TASK_DESCRIPTION persisted to the env cache" "TASK_DESCRIPTION=" $efCacheA
+Assert-Contains "11a: TASK_NEEDS_REVIEW persisted to the env cache" "TASK_NEEDS_REVIEW=" $efCacheA
+Assert-Contains "11a: BOARD_NAME persisted to the env cache" "BOARD_NAME=" $efCacheA
+Assert-NotContains "11a: server TASK_BASE_REF excluded from forwarding" "SHOULD_NOT_APPEAR" $efCacheA
+Remove-Item -Force (Join-Path $efProj '.stride-env-cache') -ErrorAction SilentlyContinue
+
+# 11b: after_goal routing exports the server-supplied GOAL_* into the
+# after_goal section (non-empty $GOAL_IDENTIFIER / $GOAL_TITLE / $GOAL_DESCRIPTION).
+$efInnerB = @{
+    data  = @{ id = 99 }
+    hooks = @(
+        @{ name = 'after_review' },
+        @{ name = 'after_goal'; env = @{ GOAL_ID = '7'; GOAL_IDENTIFIER = 'G7'; GOAL_TITLE = 'Goal Seven'; GOAL_DESCRIPTION = 'The seventh goal' } }
+    )
+} | ConvertTo-Json -Depth 6 -Compress
+$efInputB = @{
+    tool_input    = @{ command = 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed' }
+    tool_response = @{ stdout = $efInnerB }
+} | ConvertTo-Json -Depth 6 -Compress
+$r = Invoke-HookScript -InputJson $efInputB -Phase 'post' -ProjectDir $efProj
+Assert-Exit "11b: after_goal env forwarding exits 0" 0 $r.ExitCode
+Assert-Contains "11b: GOAL_IDENTIFIER reaches the after_goal section" "ident=G7" $r.Stdout
+Assert-Contains "11b: GOAL_TITLE reaches the after_goal section" "title=Goal Seven" $r.Stdout
+Assert-Contains "11b: GOAL_DESCRIPTION reaches the after_goal section" "desc=[The seventh goal]" $r.Stdout
+Remove-Item -Force (Join-Path $efProj '.stride-env-cache') -ErrorAction SilentlyContinue
+
+# 11c: after_goal entry omits GOAL_ID but the response data carries parent_id —
+# GOAL_ID falls back to that parent id (response-local).
+$efInnerC = @{
+    data  = @{ id = 99; parent_id = 4695 }
+    hooks = @(
+        @{ name = 'after_review' },
+        @{ name = 'after_goal'; env = @{ GOAL_IDENTIFIER = 'G7'; GOAL_TITLE = 'Goal Seven' } }
+    )
+} | ConvertTo-Json -Depth 6 -Compress
+$efInputC = @{
+    tool_input    = @{ command = 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed' }
+    tool_response = @{ stdout = $efInnerC }
+} | ConvertTo-Json -Depth 6 -Compress
+$r = Invoke-HookScript -InputJson $efInputC -Phase 'post' -ProjectDir $efProj
+Assert-Exit "11c: parent_id fallback exits 0" 0 $r.ExitCode
+Assert-Contains "11c: GOAL_ID falls back to data.parent_id" "id=4695" $r.Stdout
+Remove-Item -Force (Join-Path $efProj '.stride-env-cache') -ErrorAction SilentlyContinue
+
+# 11d: a server-omitted GOAL_* key exports as an empty string, never an error —
+# the after_goal section runs and sees an empty $GOAL_DESCRIPTION.
+$efInnerD = @{
+    data  = @{ id = 99 }
+    hooks = @(
+        @{ name = 'after_review' },
+        @{ name = 'after_goal'; env = @{ GOAL_ID = '7'; GOAL_IDENTIFIER = 'G7'; GOAL_TITLE = 'Goal Seven' } }
+    )
+} | ConvertTo-Json -Depth 6 -Compress
+$efInputD = @{
+    tool_input    = @{ command = 'curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed' }
+    tool_response = @{ stdout = $efInnerD }
+} | ConvertTo-Json -Depth 6 -Compress
+$r = Invoke-HookScript -InputJson $efInputD -Phase 'post' -ProjectDir $efProj
+Assert-Exit "11d: omitted GOAL_DESCRIPTION does not error" 0 $r.ExitCode
+Assert-Contains "11d: omitted GOAL_DESCRIPTION exports as empty string" "desc=[]" $r.Stdout
+Assert-Contains "11d: supplied GOAL_IDENTIFIER still present alongside the empty key" "ident=G7" $r.Stdout
+Remove-Item -Force (Join-Path $efProj '.stride-env-cache') -ErrorAction SilentlyContinue
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

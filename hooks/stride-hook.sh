@@ -612,10 +612,144 @@ response_has_after_goal() {
         > /dev/null 2>&1
 }
 
+# --- Server-supplied hook env forwarding (W1519, mirrors stride W1453) ---
+# The Step 7 env matrix (skills/stride-workflow/SKILL.md) declares the
+# server's hook env block the single source of truth for the variables the
+# executor exports. The helpers below extract the `env` object from the hook
+# entry of an intercepted response (singular `.hook` on claim responses,
+# `.hooks[]` on /complete and /mark_reviewed), escape each value, export it
+# into the running shell (set -a), and append it to the env cache so
+# follow-up agent commands (e.g. the after_goal PATCH) can still read the
+# values. Keys the server omits export as empty strings.
+
+# Single-quote a value for a file sourced by the shell. Embedded single
+# quotes become '\'' — nothing inside single quotes is ever interpreted, so
+# a crafted task title cannot inject commands into the executor.
+sq_escape() {
+  # _q is the 4-char sequence '\'' (close quote, escaped quote, reopen quote).
+  local _q="'\\''"
+  local _v="${1//\'/$_q}"
+  printf "'%s'" "$_v"
+}
+
+# Peel the API payload out of the Gemini/Claude hook input: .tool_response may
+# wrap the API JSON as {"stdout":"<json>"} (Bash tool) or carry it directly
+# (other harnesses). Prints the payload JSON, or nothing when unparseable/no jq.
+extract_response_payload() {
+  local _hook_input="$1"
+  local _response _payload
+
+  [ "$HAS_JQ" = "true" ] || return 0
+  [ -n "$_hook_input" ] || return 0
+
+  _response=$(echo "$_hook_input" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
+  [ -n "$_response" ] || return 0
+
+  if echo "$_response" | jq -e 'type == "object" and has("stdout")' > /dev/null 2>&1; then
+    _payload=$(echo "$_response" | jq -r '.stdout // ""' 2>/dev/null)
+  else
+    _payload="$_response"
+  fi
+
+  printf '%s' "$_payload"
+}
+
+# Print escaped KEY='value' assignment lines for the env object of the named
+# hook entry in the payload. Keys must be valid shell identifiers — anything
+# else is dropped, because an unquoted key left of `=` in a sourced file is
+# the real injection vector. HOOK_NAME is excluded: the executor routes on
+# its own script-global and a cached HOOK_NAME line would misroute every
+# later invocation. TASK_BASE_REF is excluded: it is a client-only diff
+# anchor owned by the claim branch (W1086). Values go through jq's @sh so
+# embedded quotes and newlines cannot escape the single-quoting.
+extract_hook_env() {
+  local _payload="$1" _name="$2"
+  [ "$HAS_JQ" = "true" ] || return 0
+  [ -n "$_payload" ] || return 0
+  printf '%s' "$_payload" | jq -r --arg name "$_name" '
+    (
+      (.hooks // []) + (if (has("hook") and (.hook | type == "object")) then [.hook] else [] end)
+      | map(select(type == "object" and .name == $name))
+      | (first // {})
+      | (.env // {})
+    )
+    | if type == "object" then . else {} end
+    | to_entries[]
+    | select(.key | test("^[A-Za-z_][A-Za-z0-9_]*$"))
+    | select(.key != "HOOK_NAME" and .key != "TASK_BASE_REF")
+    | .key + "=" + (.value | tostring | @sh)
+  ' 2>/dev/null || true
+}
+
+# Export assignment lines into the running shell and append them to the env
+# cache (best-effort) so the values survive for follow-up agent commands.
+# Every line is KEY='escaped-value' (see extract_hook_env / sq_escape), so
+# the eval is confined to plain assignments. Appending — not rewriting — is
+# deliberate: sourcing is last-wins, and a line-based rewrite would corrupt
+# values with embedded newlines. The next claim truncates the cache anyway,
+# bounding growth. Never echoes values to stdout/stderr (they may contain
+# task descriptions or other sensitive content).
+apply_env_lines() {
+  local _lines="$1"
+  [ -n "$_lines" ] || return 0
+  set -a
+  eval "$_lines" 2>/dev/null || true
+  set +a
+  printf '%s\n' "$_lines" >> "$ENV_CACHE" 2>/dev/null || true
+}
+
+# after_goal env: export what the server supplied, default every documented
+# GOAL_* key it omitted to an empty string (defined-but-empty, never an
+# error), and fall back to the completed task's parent_id from the same
+# response payload when GOAL_ID itself is missing or empty. The fallback is
+# response-local — the executor still never queries the API for goal state.
+export_after_goal_env() {
+  local _payload="$1"
+  local _lines _supplied _key _parent
+  _lines=$(extract_hook_env "$_payload" "after_goal")
+
+  # Which keys did the server actually supply? Asked of jq directly (one key
+  # name per line) rather than grepped out of the assignment text — a value
+  # with an embedded newline could otherwise masquerade as a KEY= line and
+  # suppress an omitted key's empty-string default.
+  _supplied=""
+  if [ "$HAS_JQ" = "true" ] && [ -n "$_payload" ]; then
+    _supplied=$(printf '%s' "$_payload" | jq -r '
+      (
+        (.hooks // []) + (if (has("hook") and (.hook | type == "object")) then [.hook] else [] end)
+        | map(select(type == "object" and .name == "after_goal"))
+        | (first // {})
+        | (.env // {})
+      )
+      | if type == "object" then . else {} end
+      | keys[]
+    ' 2>/dev/null || true)
+  fi
+
+  for _key in GOAL_ID GOAL_IDENTIFIER GOAL_TITLE GOAL_DESCRIPTION; do
+    if ! printf '%s\n' "$_supplied" | grep -qx "$_key"; then
+      _lines="${_lines}
+${_key}=''"
+    fi
+  done
+
+  apply_env_lines "$_lines"
+
+  # Parent-id fallback: the server built the after_goal env from the completed
+  # child task and omitted GOAL_ID (or sent it empty). The parent id in the
+  # same response's data object IS the goal id.
+  if [ -z "${GOAL_ID:-}" ] && [ "$HAS_JQ" = "true" ] && [ -n "$_payload" ]; then
+    _parent=$(printf '%s' "$_payload" | jq -r '.data.parent_id // .parent_id // empty' 2>/dev/null || true)
+    if [ -n "$_parent" ] && [ "$_parent" != "null" ]; then
+      apply_env_lines "GOAL_ID=$(sq_escape "$_parent")"
+    fi
+  fi
+}
+
 # Exit early if no phase argument or no .stride.md. Placed AFTER the
-# capture_changed_files, finalize_after_doing, run_stride_section, and
-# response_has_after_goal definitions so tests can source this script to
-# use the functions in isolation.
+# capture_changed_files, finalize_after_doing, run_stride_section,
+# response_has_after_goal, and hook-env forwarding definitions so tests can
+# source this script to use the functions in isolation.
 if [ -z "$PHASE" ]; then
   return 0 2>/dev/null || exit 0
 fi
@@ -795,6 +929,20 @@ if [ -f "$ENV_CACHE" ]; then
   set +a
 fi
 
+# (W1519) Forward the server-supplied hook env for the routed hook. The
+# response's hook entry (singular `.hook` on claim, `.hooks[]` on complete/
+# mark_reviewed) carries the authoritative env block. Applied AFTER the cache
+# load so server-supplied keys (e.g. TASK_DESCRIPTION, TASK_NEEDS_REVIEW,
+# BOARD_*/COLUMN_*/AGENT_NAME on a before_doing claim response) override stale
+# cached values; keys the server does not supply keep their cached values.
+# The pre phase has no tool_response yet, so this is post-only.
+RESPONSE_PAYLOAD=""
+AFTER_GOAL_ROUTED=false
+if [ "$PHASE" = "post" ]; then
+  RESPONSE_PAYLOAD=$(extract_response_payload "$INPUT")
+  apply_env_lines "$(extract_hook_env "$RESPONSE_PAYLOAD" "$HOOK_NAME")"
+fi
+
 # (W1094) Verify-and-retry the changed_files upload before the primary
 # before_review section runs — fresh AfterTool budget; TASK_ID and
 # TASK_BASE_REF are in scope from the env cache. Self-gates on
@@ -824,7 +972,16 @@ if [ "$PHASE" = "post" ]; then
   case "$COMMAND" in
     */api/tasks/*/complete*|*/api/tasks/*/mark_reviewed*)
       if response_has_after_goal "$INPUT"; then
+        AFTER_GOAL_ROUTED=true
+        # (W1519) Export GOAL_* (server-supplied, with the parent-id fallback
+        # for GOAL_ID) before the section runs. The section observes
+        # HOOK_NAME=after_goal per the documented contract; the routed value
+        # is restored afterwards because the cleanup gate below keys on it.
+        export_after_goal_env "$RESPONSE_PAYLOAD"
+        _routed_hook_name="$HOOK_NAME"
+        export HOOK_NAME="after_goal"
         run_stride_section "after_goal" || true
+        HOOK_NAME="$_routed_hook_name"
       fi
       ;;
   esac
@@ -833,7 +990,13 @@ fi
 # Clean up env cache and changed-files snapshot after the final hook in the
 # lifecycle so the next task starts from a clean slate.
 if [ "$HOOK_NAME" = "after_review" ]; then
-  rm -f "$ENV_CACHE" "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
+  # (W1519) Keep the env cache when after_goal rode this response — the agent
+  # still needs GOAL_ID from it for the follow-up
+  # PATCH /api/tasks/:goal_id/after_goal. The next claim rewrites the cache.
+  if [ "$AFTER_GOAL_ROUTED" != "true" ]; then
+    rm -f "$ENV_CACHE" 2>/dev/null || true
+  fi
+  rm -f "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
   rm -f "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
 fi
 

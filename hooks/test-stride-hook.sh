@@ -2349,6 +2349,134 @@ STRIDE
 fi
 
 # ============================================================
+# Test Group 15: server hook.env forwarding (W1519)
+# ============================================================
+# The claim response's singular `.hook.env` and the /complete|/mark_reviewed
+# `.hooks[].env` (for after_goal) are the single source of truth for the
+# variables the executor exports. Assert the full env matrix reaches the env
+# cache and the running section — not just the six-field TASK_* subset — that
+# HOOK_NAME/TASK_BASE_REF stay script-owned, that GOAL_* export for after_goal
+# (with the parent_id fallback), and that server-omitted keys become empty
+# strings rather than errors.
+echo ""
+echo "=== Test Group 15: server hook.env forwarding (W1519) ==="
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "  SKIP: jq missing — Group 15 requires jq for response parsing"
+else
+  ENVFWD_PROJ="$TMPDIR_TEST/env-forward"
+  mkdir -p "$ENVFWD_PROJ"
+  cat > "$ENVFWD_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "desc=$TASK_DESCRIPTION needs=$TASK_NEEDS_REVIEW board=$BOARD_NAME agent=$AGENT_NAME"
+```
+
+## after_review
+```bash
+echo "after_review_ran"
+```
+
+## after_goal
+```bash
+echo "after_goal_ran id=$GOAL_ID ident=$GOAL_IDENTIFIER title=$GOAL_TITLE desc=[$GOAL_DESCRIPTION]"
+```
+STRIDE
+
+  # 15a: a before_doing claim response carrying a singular `.hook.env`
+  # forwards TASK_DESCRIPTION/TASK_NEEDS_REVIEW/BOARD_NAME/AGENT_NAME into the
+  # section AND persists them to the env cache — while HOOK_NAME and
+  # TASK_BASE_REF from the server env are NOT applied (script-owned).
+  EF_INNER_A=$(jq -nc '{
+    data: {id: 42, identifier: "W99", title: "Env Task", status: "in_progress", complexity: "small", priority: "high"},
+    hook: {name: "before_doing", env: {
+      TASK_DESCRIPTION: "A detailed task description",
+      TASK_NEEDS_REVIEW: "false",
+      BOARD_NAME: "Stride Development",
+      COLUMN_NAME: "Doing",
+      AGENT_NAME: "Claude Opus",
+      HOOK_NAME: "before_doing",
+      TASK_BASE_REF: "SHOULD_NOT_APPEAR"
+    }}
+  }')
+  EF_INPUT_A=$(jq -nc --arg cmd "curl -X POST https://stridelikeaboss.com/api/tasks/claim" \
+    --arg inner "$EF_INNER_A" '{tool_input: {command: $cmd}, tool_response: {stdout: $inner}}')
+  EF_OUT_A=$(echo "$EF_INPUT_A" | GEMINI_PROJECT_DIR="$ENVFWD_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  EF_RC_A=$?
+  assert_exit "15a: claim env forwarding exits 0" 0 "$EF_RC_A"
+  assert_contains "15a: TASK_DESCRIPTION reaches the section" "desc=A detailed task description" "$EF_OUT_A"
+  assert_contains "15a: TASK_NEEDS_REVIEW reaches the section" "needs=false" "$EF_OUT_A"
+  assert_contains "15a: BOARD_NAME reaches the section" "board=Stride Development" "$EF_OUT_A"
+  assert_contains "15a: AGENT_NAME reaches the section" "agent=Claude Opus" "$EF_OUT_A"
+  EF_CACHE_A=$(cat "$ENVFWD_PROJ/.stride-env-cache" 2>/dev/null)
+  assert_contains "15a: TASK_DESCRIPTION persisted to the env cache" "TASK_DESCRIPTION=" "$EF_CACHE_A"
+  assert_contains "15a: TASK_NEEDS_REVIEW persisted to the env cache" "TASK_NEEDS_REVIEW=" "$EF_CACHE_A"
+  assert_contains "15a: BOARD_NAME persisted to the env cache" "BOARD_NAME=" "$EF_CACHE_A"
+  if echo "$EF_CACHE_A" | grep -q 'SHOULD_NOT_APPEAR'; then
+    echo -e "  ${RED}FAIL${RESET}: 15a: server TASK_BASE_REF leaked into the cache (must stay script-owned)"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 15a: server TASK_BASE_REF excluded from forwarding"
+    PASS=$((PASS + 1))
+  fi
+  rm -f "$ENVFWD_PROJ/.stride-env-cache"
+
+  # 15b: after_goal routing exports the server-supplied GOAL_* into the
+  # after_goal section (non-empty $GOAL_IDENTIFIER / $GOAL_TITLE).
+  EF_INNER_B=$(jq -nc '{
+    data: {id: 99},
+    hooks: [
+      {name: "after_review"},
+      {name: "after_goal", env: {GOAL_ID: "7", GOAL_IDENTIFIER: "G7", GOAL_TITLE: "Goal Seven", GOAL_DESCRIPTION: "The seventh goal"}}
+    ]
+  }')
+  EF_INPUT_B=$(jq -nc --arg cmd "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed" \
+    --arg inner "$EF_INNER_B" '{tool_input: {command: $cmd}, tool_response: {stdout: $inner}}')
+  EF_OUT_B=$(echo "$EF_INPUT_B" | GEMINI_PROJECT_DIR="$ENVFWD_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  EF_RC_B=$?
+  assert_exit "15b: after_goal env forwarding exits 0" 0 "$EF_RC_B"
+  assert_contains "15b: GOAL_IDENTIFIER reaches the after_goal section" "ident=G7" "$EF_OUT_B"
+  assert_contains "15b: GOAL_TITLE reaches the after_goal section" "title=Goal Seven" "$EF_OUT_B"
+  assert_contains "15b: GOAL_DESCRIPTION reaches the after_goal section" "desc=[The seventh goal]" "$EF_OUT_B"
+  rm -f "$ENVFWD_PROJ/.stride-env-cache"
+
+  # 15c: after_goal entry omits GOAL_ID but the response data carries
+  # parent_id — GOAL_ID falls back to that parent id (response-local).
+  EF_INNER_C=$(jq -nc '{
+    data: {id: 99, parent_id: 4695},
+    hooks: [
+      {name: "after_review"},
+      {name: "after_goal", env: {GOAL_IDENTIFIER: "G7", GOAL_TITLE: "Goal Seven"}}
+    ]
+  }')
+  EF_INPUT_C=$(jq -nc --arg cmd "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed" \
+    --arg inner "$EF_INNER_C" '{tool_input: {command: $cmd}, tool_response: {stdout: $inner}}')
+  EF_OUT_C=$(echo "$EF_INPUT_C" | GEMINI_PROJECT_DIR="$ENVFWD_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  EF_RC_C=$?
+  assert_exit "15c: parent_id fallback exits 0" 0 "$EF_RC_C"
+  assert_contains "15c: GOAL_ID falls back to data.parent_id" "id=4695" "$EF_OUT_C"
+  rm -f "$ENVFWD_PROJ/.stride-env-cache"
+
+  # 15d: a server-omitted GOAL_* key exports as an empty string, never an
+  # error — the after_goal section runs and sees an empty $GOAL_DESCRIPTION.
+  EF_INNER_D=$(jq -nc '{
+    data: {id: 99},
+    hooks: [
+      {name: "after_review"},
+      {name: "after_goal", env: {GOAL_ID: "7", GOAL_IDENTIFIER: "G7", GOAL_TITLE: "Goal Seven"}}
+    ]
+  }')
+  EF_INPUT_D=$(jq -nc --arg cmd "curl -X PATCH https://stridelikeaboss.com/api/tasks/99/mark_reviewed" \
+    --arg inner "$EF_INNER_D" '{tool_input: {command: $cmd}, tool_response: {stdout: $inner}}')
+  EF_OUT_D=$(echo "$EF_INPUT_D" | GEMINI_PROJECT_DIR="$ENVFWD_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  EF_RC_D=$?
+  assert_exit "15d: omitted GOAL_DESCRIPTION does not error" 0 "$EF_RC_D"
+  assert_contains "15d: omitted GOAL_DESCRIPTION exports as empty string" "desc=[]" "$EF_OUT_D"
+  assert_contains "15d: supplied GOAL_IDENTIFIER still present alongside the empty key" "ident=G7" "$EF_OUT_D"
+  rm -f "$ENVFWD_PROJ/.stride-env-cache"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
