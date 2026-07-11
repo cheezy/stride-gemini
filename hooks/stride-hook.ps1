@@ -455,6 +455,22 @@ function Write-DiffUploadState {
 # extraction kept as a back-compat fallback. Silently no-ops if any prerequisite
 # is missing (snapshot file, URL, token, TASK_ID) so behavior degrades to the
 # legacy on-disk-only snapshot.
+# (D127) Resolve the authoritative task id for the CURRENT completion from the
+# /complete or /mark_reviewed URL in the command, independent of the env cache.
+# Mirror of stride-hook.sh's task_id_from_command. Those URLs always carry
+# /api/tasks/<id>/<action>, so the changed_files upload targets the task the
+# agent is actually completing even when a hidden claim left a STALE TASK_ID in
+# the env cache — the confirmed empty-changed_files root cause (G321/D126: the
+# diff was PUT to the previous task). Returns '' for the claim path (whose URL
+# has no id); callers fall back to the env-cache TASK_ID then.
+function Get-TaskIdFromCommand {
+    param([string]$CommandText)
+    if ($CommandText -match '/api/tasks/([0-9]+)/(?:complete|mark_reviewed)') {
+        return $Matches[1]
+    }
+    return ''
+}
+
 function Invoke-FinalizeAfterDoing {
     if ($HookName -ne 'after_doing') { return }
     $snapshotPath = Join-Path $ProjectDir '.stride-changed-files.json'
@@ -463,7 +479,11 @@ function Invoke-FinalizeAfterDoing {
     $apiBase = Resolve-StrideApiUrl
     $token = Resolve-StrideApiToken
 
-    $taskId = [System.Environment]::GetEnvironmentVariable('TASK_ID', 'Process')
+    # (D127) Target the task id from the /complete URL, not the env cache, so a
+    # stale TASK_ID from a hidden claim response cannot route the diff to the
+    # wrong task. Fall back to the env-cache TASK_ID only if the URL carries no id.
+    $taskId = Get-TaskIdFromCommand -CommandText $Command
+    if (-not $taskId) { $taskId = [System.Environment]::GetEnvironmentVariable('TASK_ID', 'Process') }
     if (-not $apiBase -or -not $token -or -not $taskId) { return }
 
     $httpCode = Invoke-ChangedFilesUpload -TaskId $taskId -ApiBase $apiBase -Token $token
@@ -489,7 +509,10 @@ function Invoke-SelfHealChangedFilesUpload {
     if ($HookName -ne 'before_review') { return }
     $snapshotPath = Join-Path $ProjectDir '.stride-changed-files.json'
     if (-not (Test-Path $snapshotPath)) { return }
-    $taskId = [System.Environment]::GetEnvironmentVariable('TASK_ID', 'Process')
+    # (D127) Prefer the task id from the /complete URL over the env-cache TASK_ID
+    # so the self-heal re-PUTs to the CORRECT task even after a stale claim.
+    $taskId = Get-TaskIdFromCommand -CommandText $Command
+    if (-not $taskId) { $taskId = [System.Environment]::GetEnvironmentVariable('TASK_ID', 'Process') }
     if (-not $taskId) { return }
 
     # Healthy 2xx recorded for THIS task → do not re-upload (snapshot

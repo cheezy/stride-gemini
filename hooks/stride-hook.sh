@@ -326,6 +326,29 @@ record_diff_upload_state() {
   } > "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
 }
 
+# (D127) Resolve the authoritative task id for the CURRENT completion from the
+# /complete or /mark_reviewed URL in the command, independent of the env cache.
+# Those URLs always carry /api/tasks/<id>/<action>, so the changed_files upload
+# targets the task the agent is actually completing even when a hidden claim
+# response left a STALE TASK_ID in the env cache — the confirmed empty-
+# changed_files root cause (G321/D126: the diff was PUT to the previous task).
+# Returns empty when the command carries no such URL (e.g. the claim path, whose
+# URL has no id); callers fall back to the env-cache TASK_ID in that case.
+task_id_from_command() {
+  local _rest
+  case "$1" in
+    */api/tasks/*/complete*|*/api/tasks/*/mark_reviewed*)
+      _rest="${1#*/api/tasks/}"
+      _rest="${_rest%%/*}"
+      case "$_rest" in
+        "" | *[!0-9]*) printf '' ;;
+        *) printf '%s' "$_rest" ;;
+      esac
+      ;;
+    *) printf '' ;;
+  esac
+}
+
 # Writes the changed-files snapshot to $PROJECT_DIR/.stride-changed-files.json,
 # then fire-and-forget PUTs it to the Stride server. Invoked from every
 # after_doing exit path (no-commands branch, all-comments branch, and the
@@ -338,27 +361,33 @@ record_diff_upload_state() {
 # variables ($STRIDE_API_URL / $STRIDE_API_TOKEN), with the $COMMAND literal
 # extraction kept as a back-compat fallback.
 finalize_after_doing() {
-  local snapshot
+  local snapshot _tid
   if [ -n "${TASK_BASE_REF:-}" ]; then
     snapshot=$(capture_changed_files "${TASK_BASE_REF:-}" 2>/dev/null || printf '[]')
     printf '%s\n' "$snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
 
+    # (D127) Target the task id from the /complete URL, not the env cache, so a
+    # stale TASK_ID from a hidden claim response cannot route the diff to the
+    # wrong task. Fall back to the env-cache TASK_ID only if the URL carries no id.
+    _tid=$(task_id_from_command "${COMMAND:-}")
+    [ -n "$_tid" ] || _tid="${TASK_ID:-}"
+
     # No-op silently if any prerequisite is missing — preserves the on-disk
     # snapshot for legacy --argjson cf consumers.
-    if [ "${HAS_JQ:-false}" = "true" ] && command -v curl > /dev/null 2>&1 && [ -n "${TASK_ID:-}" ]; then
+    if [ "${HAS_JQ:-false}" = "true" ] && command -v curl > /dev/null 2>&1 && [ -n "$_tid" ]; then
       local _api_base _token
       _api_base=$(resolve_stride_api_url)
       _token=$(resolve_stride_api_token)
       if [ -n "$_api_base" ] && [ -n "$_token" ]; then
         # Upload via the shared D61 transport-envelope helper.
         local _http_code
-        _http_code=$(upload_changed_files_snapshot "$TASK_ID" "$_api_base" "$_token")
+        _http_code=$(upload_changed_files_snapshot "$_tid" "$_api_base" "$_token")
         # (W1094) Record the outcome after EVERY PUT attempt so the
         # before_review self-heal can verify it on a fresh timeout budget.
         # A skipped PUT (missing preconditions) deliberately writes nothing:
         # missing state means "no healthy upload on record" and the retry
         # re-checks the same preconditions itself.
-        record_diff_upload_state "$TASK_ID" "$_http_code"
+        record_diff_upload_state "$_tid" "$_http_code"
       fi
     fi
   fi
@@ -377,7 +406,14 @@ self_heal_changed_files_upload() {
   [ "${HOOK_NAME:-}" = "before_review" ] || return 0
   [ "${HAS_JQ:-false}" = "true" ] || return 0
   command -v curl > /dev/null 2>&1 || return 0
-  [ -n "${TASK_ID:-}" ] || return 0
+
+  # (D127) Prefer the task id from the /complete URL over the env-cache TASK_ID
+  # so the self-heal re-PUTs to the CORRECT task even when a hidden claim left a
+  # stale TASK_ID behind. Fall back to the env cache only if the URL has no id.
+  local _tid
+  _tid=$(task_id_from_command "${COMMAND:-}")
+  [ -n "$_tid" ] || _tid="${TASK_ID:-}"
+  [ -n "$_tid" ] || return 0
 
   # Healthy 2xx recorded for THIS task → do not re-upload (snapshot
   # semantics anchor at after_doing time; avoid pointless API load).
@@ -388,7 +424,7 @@ self_heal_changed_files_upload() {
     _state_task=$(grep '^task_id=' "$_state_file" 2>/dev/null | head -n 1 | cut -d= -f2- || true)
     _state_code=$(grep '^http_code=' "$_state_file" 2>/dev/null | head -n 1 | cut -d= -f2- || true)
   fi
-  if [ "$_state_task" = "${TASK_ID:-}" ]; then
+  if [ "$_state_task" = "$_tid" ]; then
     case "$_state_code" in
       2*) return 0 ;;
     esac
@@ -409,8 +445,8 @@ self_heal_changed_files_upload() {
   local _snapshot _http_code
   _snapshot=$( (cd "$PROJECT_DIR" && capture_changed_files "${TASK_BASE_REF:-}") 2>/dev/null || printf '[]')
   printf '%s\n' "$_snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
-  _http_code=$(upload_changed_files_snapshot "$TASK_ID" "$_api_base" "$_token")
-  record_diff_upload_state "$TASK_ID" "$_http_code"
+  _http_code=$(upload_changed_files_snapshot "$_tid" "$_api_base" "$_token")
+  record_diff_upload_state "$_tid" "$_http_code"
   return 0
 }
 

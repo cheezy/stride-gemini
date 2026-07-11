@@ -1031,7 +1031,10 @@ $noTokJson = "{`"tool_input`":{`"command`":`"$noTokCmd`"}}"
 $r = Invoke-HookScript -InputJson $noTokJson -Phase 'pre' -ProjectDir $noTokProj
 Assert-Exit "8d: hook exits 0 with no Bearer token" 0 $r.ExitCode
 
-# 8e: No TASK_ID in env cache → finalize no-ops
+# 8e (D127): No TASK_ID in env cache → finalize STILL PUTs, targeting the id
+# parsed from the /complete URL (99). Before D127 the missing cache id suppressed
+# the upload; now the URL is the authoritative source of the task id, so the PUT
+# must fire and land on /api/tasks/99/changed_files.
 $noIdProj = Join-Path $TmpDir 'no-id-project'
 New-Item -ItemType Directory -Path $noIdProj -Force | Out-Null
 Set-Content -Path (Join-Path $noIdProj '.stride.md') -Value @'
@@ -1044,10 +1047,145 @@ Set-Content -Path (Join-Path $noIdProj '.stride-changed-files.json') `
     -Value '[{"path":"foo.txt","diff":"body"}]' -Encoding UTF8
 Set-Content -Path (Join-Path $noIdProj '.stride-env-cache') `
     -Value "TASK_BASE_REF=abc" -Encoding UTF8
-$noIdCmd = 'curl -X PATCH http://stride.example.com/api/tasks/99/complete -H "Authorization: Bearer tok"'
-$noIdJson = "{`"tool_input`":{`"command`":`"$noIdCmd`"}}"
-$r = Invoke-HookScript -InputJson $noIdJson -Phase 'pre' -ProjectDir $noIdProj
-Assert-Exit "8e: hook exits 0 with no TASK_ID" 0 $r.ExitCode
+
+$noIdPort = 18883
+$noIdFixture = Join-Path $TmpDir 'no-id-fixture.json'
+if (Test-Path $noIdFixture) { Remove-Item -Force $noIdFixture }
+
+$noIdListenerJob = Start-Job -ArgumentList $noIdPort, $noIdFixture -ScriptBlock {
+    param($Port, $Fixture)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start()
+        $ctx = $l.GetContext()
+        $req = $ctx.Request
+        @{ Method = $req.HttpMethod; Path = $req.Url.AbsolutePath } |
+            ConvertTo-Json -Compress | Set-Content -Path $Fixture -Encoding UTF8
+        $resp = $ctx.Response
+        $resp.StatusCode = 200
+        $resp.OutputStream.Close()
+    } catch {
+        # Listener tear-down errors are ignored.
+    } finally {
+        if ($l.IsListening) { $l.Stop() }
+    }
+}
+
+try {
+    $null = Wait-ForListener -Port $noIdPort
+    $noIdCmd = "curl -X PATCH http://localhost:$noIdPort/api/tasks/99/complete -H `"Authorization: Bearer tok`""
+    $noIdJson = @{ tool_input = @{ command = $noIdCmd } } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $noIdJson -Phase 'pre' -ProjectDir $noIdProj
+    Assert-Exit "8e: hook exits 0 with no env TASK_ID" 0 $r.ExitCode
+
+    Wait-Job $noIdListenerJob -Timeout 8 | Out-Null
+    Remove-Job $noIdListenerJob -Force -ErrorAction SilentlyContinue
+
+    if (Test-Path $noIdFixture) {
+        $record = Get-Content -Raw -Path $noIdFixture | ConvertFrom-Json
+        Assert-Contains "8e (D127): missing env TASK_ID → PUT still made, targeting the URL id (99)" `
+            "/api/tasks/99/changed_files" $record.Path
+    } else {
+        Write-Host "  FAIL: 8e (D127): PUT did not arrive despite the URL carrying id 99" -ForegroundColor Red
+        $script:FAIL++
+    }
+} finally {
+    if ($noIdListenerJob -and $noIdListenerJob.State -eq 'Running') {
+        Stop-Job $noIdListenerJob -ErrorAction SilentlyContinue
+        Remove-Job $noIdListenerJob -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# 8f (D127): stale env TASK_ID + differing /complete URL id → the PUT targets the
+# URL id, NOT the stale cache id. TASK_ID=111 (stale, a prior task) is seeded in
+# the env cache while the command completes /api/tasks/99/complete; the diff must
+# land on 99 — the fix for the empty-changed_files root cause (G321/D126).
+$staleProj = Join-Path $TmpDir 'stale-id-project'
+New-Item -ItemType Directory -Path $staleProj -Force | Out-Null
+Set-Content -Path (Join-Path $staleProj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+Set-Content -Path (Join-Path $staleProj '.stride-changed-files.json') `
+    -Value '[{"path":"foo.txt","diff":"body"}]' -Encoding UTF8
+Set-Content -Path (Join-Path $staleProj '.stride-env-cache') `
+    -Value "TASK_ID=111`nTASK_BASE_REF=abc" -Encoding UTF8
+
+$stalePort = 18885
+$staleFixture = Join-Path $TmpDir 'stale-id-fixture.json'
+if (Test-Path $staleFixture) { Remove-Item -Force $staleFixture }
+
+$staleListenerJob = Start-Job -ArgumentList $stalePort, $staleFixture -ScriptBlock {
+    param($Port, $Fixture)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start()
+        $ctx = $l.GetContext()
+        $req = $ctx.Request
+        @{ Method = $req.HttpMethod; Path = $req.Url.AbsolutePath } |
+            ConvertTo-Json -Compress | Set-Content -Path $Fixture -Encoding UTF8
+        $resp = $ctx.Response
+        $resp.StatusCode = 200
+        $resp.OutputStream.Close()
+    } catch {
+        # Listener tear-down errors are ignored.
+    } finally {
+        if ($l.IsListening) { $l.Stop() }
+    }
+}
+
+try {
+    $null = Wait-ForListener -Port $stalePort
+    $staleCmd = "curl -X PATCH http://localhost:$stalePort/api/tasks/99/complete -H `"Authorization: Bearer tok`""
+    $staleJson = @{ tool_input = @{ command = $staleCmd } } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $staleJson -Phase 'pre' -ProjectDir $staleProj
+    Assert-Exit "8f: hook exits 0 with a stale env TASK_ID" 0 $r.ExitCode
+
+    Wait-Job $staleListenerJob -Timeout 8 | Out-Null
+    Remove-Job $staleListenerJob -Force -ErrorAction SilentlyContinue
+
+    if (Test-Path $staleFixture) {
+        $record = Get-Content -Raw -Path $staleFixture | ConvertFrom-Json
+        Assert-Contains "8f (D127): PUT targets the /complete URL id (99), not the stale env TASK_ID (111)" `
+            "/api/tasks/99/changed_files" $record.Path
+        Assert-NotContains "8f (D127): PUT does NOT target the stale env TASK_ID (111)" `
+            "/api/tasks/111/changed_files" $record.Path
+    } else {
+        Write-Host "  FAIL: 8f (D127): PUT did not arrive at listener" -ForegroundColor Red
+        $script:FAIL++
+    }
+} finally {
+    if ($staleListenerJob -and $staleListenerJob.State -eq 'Running') {
+        Stop-Job $staleListenerJob -ErrorAction SilentlyContinue
+        Remove-Job $staleListenerJob -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# 8g (D127): Get-TaskIdFromCommand unit test — parity with bash 9g. The helper is
+# defined after stride-hook.ps1's early-exit guards, so the whole script cannot be
+# dot-sourced to reach it (it would exit at the no-Phase/no-input guard first).
+# Extract the actual function block from the source and invoke it directly so this
+# tests the shipped definition, not a copy — covering the /complete and
+# /mark_reviewed id extraction and the empty-return branches (claim, next, and a
+# non-numeric segment) that the integration tests (8e/8f) do not reach.
+$hookSource = Get-Content -Raw -Path $HookScript
+if ($hookSource -match '(?ms)^function Get-TaskIdFromCommand \{.*?^\}') {
+    Invoke-Expression $Matches[0]
+    $u1 = Get-TaskIdFromCommand -CommandText 'curl -X PATCH https://x/api/tasks/7777/complete -H h'
+    $u2 = Get-TaskIdFromCommand -CommandText 'curl -X PATCH https://x/api/tasks/42/mark_reviewed'
+    $u3 = Get-TaskIdFromCommand -CommandText 'curl -X POST https://x/api/tasks/claim'
+    $u4 = Get-TaskIdFromCommand -CommandText 'curl -s https://x/api/tasks/next'
+    $u5 = Get-TaskIdFromCommand -CommandText 'curl https://x/api/tasks/abc/complete'
+    Assert-Eq "8g (D127): Get-TaskIdFromCommand reads /complete + /mark_reviewed ids, empty for claim/next/non-numeric" `
+        "7777|42|||" "$u1|$u2|$u3|$u4|$u5"
+} else {
+    Write-Host "  FAIL: 8g (D127): could not extract Get-TaskIdFromCommand from stride-hook.ps1" -ForegroundColor Red
+    $script:FAIL++
+}
 
 # ============================================================
 # Test Group 9: W1093 early capture + W1094 before_review self-heal
