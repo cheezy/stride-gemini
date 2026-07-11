@@ -2,6 +2,27 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [1.34.1] - 2026-07-10
+
+### Fixed — Ported the changed_files upload targeting + fail-loud fixes from the canonical stride plugin (G323)
+
+Two `G323` parity fixes make the Gemini port's `changed_files` diff upload target the right task and stop swallowing terminal upload failures. Both are bug fixes to existing hook behavior with no wire-shape or `.stride.md` contract change, so this ships as a patch bump (1.34.0 → 1.34.1).
+
+- **`hooks/stride-hook.sh`, `hooks/stride-hook.ps1`** — **Target the changed_files upload by the `/complete` URL id (D127).** New `task_id_from_command` (bash) / `Get-TaskIdFromCommand` (PowerShell) helpers derive the authoritative task id from the `/complete` or `/mark_reviewed` URL in the intercepted command, and both the `after_doing` finalize and the `before_review` self-heal now use that id as the PUT target, falling back to the env-cache `TASK_ID` only when the URL carries no id (the claim path). This fixes the confirmed empty-`changed_files` root cause (G321/D126) where a hidden claim response left a stale `TASK_ID` in the env cache and routed the diff to the previous task. The parse is gated to the completion path, adds no network call, and preserves the re-PUT's idempotency.
+- **`hooks/stride-hook.sh`, `hooks/stride-hook.ps1`** — **Fail loud on a terminal changed_files upload failure (W1658).** When the `before_review` self-heal PUT — the last retry — returns a non-2xx, the hook now prints a distinct `CHANGED_FILES UPLOAD UNRESOLVED for task <id> (HTTP <code>)` warning to stderr and appends `unresolved=yes` to `.stride-diff-upload-state`, so a definitively-lost diff is never silently swallowed. The hook exit code is unchanged (the marker append is best-effort), and because the state writer overwrites the whole file, a later successful 2xx PUT self-clears the mark. Only the task id and HTTP code appear in the message and marker — never the bearer token.
+
+### Backward compatibility
+
+Both changes are behavioral bug fixes with no wire-shape change: the changed-files transport envelope, the `before_review` self-heal cadence, and the JSON-only-stdout contract are unchanged, and existing `.stride.md` hooks keep working. The URL→id resolution simply corrects the upload target, and the fail-loud path only adds stderr output plus a best-effort state marker.
+
+### Release
+
+**No marketplace pin update is required.** `stride-gemini` is **not** distributed on `stride-marketplace`; its release is a git tag + GitHub release on the `stride-gemini` repository only, handled by the maintainer.
+
+### Source
+
+G323 — W1665 (D127 targeting), W1666 (W1658 fail-loud), W1667 (this version bump).
+
 ## [1.34.0] - 2026-07-04
 
 ### Fixed — Ported five unported hook-executor / documentation gaps from the canonical stride plugin (G289)
