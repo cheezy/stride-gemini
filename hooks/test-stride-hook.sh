@@ -2230,6 +2230,62 @@ http_code=500"
   run_self_heal "task_id=42
 http_code=200"
   assert_eq "12d: healthy 2xx for this task → no re-upload" "" "$SELF_HEAL_SEQ"
+
+  # 12e/12f (W1658): terminal self-heal failure fails LOUD. When the before_review
+  # retry PUT returns non-2xx, the hook prints a distinct UNRESOLVED warning on
+  # stderr and appends `unresolved=yes` to the state file — without changing the
+  # hook exit code. A subsequent 2xx PUT overwrites the state file, self-clearing
+  # the mark. Reuses run_self_heal's repo shape but keeps the dir alive across two
+  # runs and captures stderr (run_self_heal swallows it).
+  FL_DIR=$(mktemp -d); FL_STUB500=$(mktemp -d); FL_STUB200=$(mktemp -d)
+  FL_ORDER="$FL_DIR.order"; : > "$FL_ORDER"
+  make_order_stub "$FL_STUB500" "$FL_DIR.curl" "$FL_ORDER" 500
+  make_order_stub "$FL_STUB200" "$FL_DIR.curl2" "$FL_ORDER" 200
+  FL_CMD_JSON='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer tok\""}}'
+  (
+    cd "$FL_DIR" || exit 1
+    git init -q; git config user.email t@t.local; git config user.name T
+    printf '.stride.md\n.stride-env-cache\n.stride-changed-files.json\n.stride-diff-upload-state\n' > .gitignore
+    echo v1 > f.txt; git add .gitignore f.txt > /dev/null; git commit -q -m v1
+    FL_BASE=$(git rev-parse HEAD)
+    echo v2 > f.txt; git add f.txt > /dev/null; git commit -q -m v2
+    printf '## before_review\n```bash\n```\n' > .stride.md
+    printf "TASK_ID='42'\nTASK_BASE_REF='%s'\n" "$FL_BASE" > .stride-env-cache
+    printf '[]\n' > .stride-changed-files.json
+  )
+  # Terminal-failure run (500 stub); capture stderr, keep stdout muted.
+  FL_STDERR=$(
+    cd "$FL_DIR" || exit 1
+    echo "$FL_CMD_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$FL_STUB500:$PATH" bash "$HOOK_SCRIPT" post 2>&1 1>/dev/null
+  )
+  FL_RC=$?
+  FL_STATE=$(cat "$FL_DIR/.stride-diff-upload-state" 2>/dev/null)
+  if printf '%s' "$FL_STDERR" | grep -qF 'CHANGED_FILES UPLOAD UNRESOLVED'; then
+    echo -e "  ${GREEN}PASS${RESET}: 12e (W1658): terminal self-heal failure prints a loud UNRESOLVED warning"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${RESET}: 12e (W1658): no loud UNRESOLVED warning on stderr: $FL_STDERR"
+    FAIL=$((FAIL + 1))
+  fi
+  assert_contains "12e (W1658): state file marked unresolved on terminal failure" "unresolved=yes" "$FL_STATE"
+  assert_exit "12e (W1658): terminal failure does not change the hook exit code" 0 "$FL_RC"
+
+  # 12f: a later 2xx PUT overwrites the state file and clears the unresolved mark.
+  (
+    cd "$FL_DIR" || exit 1
+    echo "$FL_CMD_JSON" | CLAUDE_PROJECT_DIR="$PWD" PATH="$FL_STUB200:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  FL_STATE2=$(cat "$FL_DIR/.stride-diff-upload-state" 2>/dev/null)
+  assert_contains "12f (W1658): later 2xx PUT records a healthy code" "http_code=200" "$FL_STATE2"
+  if printf '%s' "$FL_STATE2" | grep -qF 'unresolved=yes'; then
+    echo -e "  ${RED}FAIL${RESET}: 12f (W1658): unresolved mark survived a later 2xx PUT: $FL_STATE2"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 12f (W1658): later 2xx PUT self-clears the unresolved mark"
+    PASS=$((PASS + 1))
+  fi
+  rm -rf "$FL_DIR" "$FL_STUB500" "$FL_STUB200"
+  rm -f "$FL_ORDER" "$FL_DIR.curl" "$FL_DIR.curl2"
 fi
 
 # ============================================================

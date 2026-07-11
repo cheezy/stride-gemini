@@ -447,6 +447,19 @@ self_heal_changed_files_upload() {
   printf '%s\n' "$_snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
   _http_code=$(upload_changed_files_snapshot "$_tid" "$_api_base" "$_token")
   record_diff_upload_state "$_tid" "$_http_code"
+  # (W1658) before_review is the LAST retry. If it still did not land, the diff
+  # is definitively lost for this task — surface it LOUDLY (distinct from the
+  # per-attempt warning in upload_changed_files_snapshot) and mark the state file
+  # unresolved so the failure is actionable and never silently swallowed. A later
+  # successful PUT overwrites the state file, clearing the mark.
+  case "$_http_code" in
+    2*) : ;;
+    *)
+      printf 'stride-hook: CHANGED_FILES UPLOAD UNRESOLVED for task %s (HTTP %s) after the before_review retry — the review will show NO file diffs. Re-run the changed_files PUT to recover.\n' \
+        "$_tid" "$_http_code" >&2
+      printf 'unresolved=yes\n' >> "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
+      ;;
+  esac
   return 0
 }
 

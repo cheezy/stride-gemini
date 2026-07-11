@@ -539,6 +539,19 @@ function Invoke-SelfHealChangedFilesUpload {
 
     $httpCode = Invoke-ChangedFilesUpload -TaskId $taskId -ApiBase $apiBase -Token $token
     Write-DiffUploadState -TaskId $taskId -HttpCode $httpCode
+    # (W1658) before_review is the LAST retry. A non-2xx here means the diff is
+    # definitively lost for this task — surface it loudly (distinct from the
+    # per-attempt warning) and mark the state file unresolved so the failure is
+    # actionable and never silently swallowed. A later successful PUT overwrites
+    # the state file, clearing the mark.
+    if ($httpCode -notmatch '^2') {
+        [Console]::Error.WriteLine("stride-hook: CHANGED_FILES UPLOAD UNRESOLVED for task $taskId (HTTP $httpCode) after the before_review retry — the review will show NO file diffs. Re-run the changed_files PUT to recover.")
+        try {
+            Add-Content -Path (Join-Path $ProjectDir '.stride-diff-upload-state') -Value 'unresolved=yes' -Encoding UTF8
+        } catch {
+            # Best-effort: a failed marker write must never block the hook.
+        }
+    }
 }
 
 # (W1456) Shell-semantics line-continuation check for the bash-section parser

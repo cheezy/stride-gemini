@@ -1263,6 +1263,48 @@ $p = New-SelfHealProject -Name 'self-heal-healthy' -State "task_id=99`nhttp_code
 $r = Invoke-HookScript -InputJson $selfHealJson -Phase 'post' -ProjectDir $p
 Assert-NotContains "9e: healthy 2xx → no re-upload" "changed_files upload failed (HTTP" $r.Stderr
 
+# 9f (W1658): terminal self-heal failure fails LOUD. With no state file the
+# self-heal retries, the PUT to the unreachable endpoint (127.0.0.1:1) returns a
+# non-2xx (HTTP 000), and the hook prints a distinct UNRESOLVED warning on stderr
+# AND appends unresolved=yes to the state file — without changing the exit code.
+$p = New-SelfHealProject -Name 'self-heal-terminal' -State ''
+$r = Invoke-HookScript -InputJson $selfHealJson -Phase 'post' -ProjectDir $p
+Assert-Exit "9f (W1658): terminal failure does not change the hook exit code" 0 $r.ExitCode
+Assert-Contains "9f (W1658): terminal self-heal failure prints a loud UNRESOLVED warning" "CHANGED_FILES UPLOAD UNRESOLVED" $r.Stderr
+$w1658StateFile = Join-Path $p '.stride-diff-upload-state'
+$w1658State = if (Test-Path $w1658StateFile) { Get-Content -Raw -Path $w1658StateFile } else { '' }
+Assert-Contains "9f (W1658): state file marked unresolved on terminal failure" "unresolved=yes" $w1658State
+
+# 9g (W1658): a later 2xx PUT overwrites the state file and self-clears the mark.
+# Seed the project with a terminal-failure state (unresolved=yes) and point the
+# self-heal at a 200 listener; the successful re-PUT must overwrite the state to
+# a healthy code with no unresolved marker.
+$clearProj = New-SelfHealProject -Name 'self-heal-clear' -State "task_id=99`nhttp_code=500`nunresolved=yes"
+$clearPort = 18887
+$clearJob = Start-Job -ArgumentList $clearPort -ScriptBlock {
+    param($Port)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start(); $ctx = $l.GetContext()
+        $resp = $ctx.Response; $resp.StatusCode = 200; $resp.OutputStream.Close()
+    } catch { } finally { if ($l.IsListening) { $l.Stop() } }
+}
+try {
+    $null = Wait-ForListener -Port $clearPort
+    $clearCmd = "curl -X PATCH http://localhost:$clearPort/api/tasks/99/complete -H `"Authorization: Bearer tok`""
+    $clearJson = @{ tool_input = @{ command = $clearCmd } } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $clearJson -Phase 'post' -ProjectDir $clearProj
+    Wait-Job $clearJob -Timeout 8 | Out-Null
+    Remove-Job $clearJob -Force -ErrorAction SilentlyContinue
+    $clearStateFile = Join-Path $clearProj '.stride-diff-upload-state'
+    $clearState = if (Test-Path $clearStateFile) { Get-Content -Raw -Path $clearStateFile } else { '' }
+    Assert-Contains "9g (W1658): later 2xx PUT records a healthy code" "http_code=200" $clearState
+    Assert-NotContains "9g (W1658): later 2xx PUT self-clears the unresolved mark" "unresolved=yes" $clearState
+} finally {
+    Remove-Job $clearJob -Force -ErrorAction SilentlyContinue
+}
+
 # ============================================================
 # Test Group 10: claim-time TASK_BASE_REF refresh + persisted-output
 # fallback (W1087, mirrors test-stride-hook.sh Test Group 14 test-for-test)
