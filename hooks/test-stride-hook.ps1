@@ -1810,6 +1810,157 @@ echo "ran"
 }
 
 # ============================================================
+# Test Group 13: D142 — post-pull TASK_BASE_REF + committed-range override
+# (mirrors test-stride-hook.sh Test Group 17)
+# ============================================================
+Write-Host ""
+Write-Host "=== Test Group 13: D142 post-pull TASK_BASE_REF + committed-range override ==="
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "  SKIP: git not available — Group 13 requires it" -ForegroundColor Yellow
+} else {
+    # 13a: the claim-time refresh records the POST-pull branch point. A bare
+    # origin and a second clone simulate another computer whose completed task
+    # arrives via the ## before_doing pull (the D132/W1678 incident).
+    $d142Root = Join-Path $TmpDir 'g13-d142'
+    New-Item -ItemType Directory -Path $d142Root -Force | Out-Null
+    & git init -q --bare (Join-Path $d142Root 'origin.git') 2>$null | Out-Null
+    & git -C (Join-Path $d142Root 'origin.git') symbolic-ref HEAD refs/heads/main 2>$null | Out-Null
+    $cloneA = Join-Path $d142Root 'cloneA'
+    & git clone -q (Join-Path $d142Root 'origin.git') $cloneA 2>$null | Out-Null
+    & git -C $cloneA config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $cloneA config user.name 'Test' 2>$null | Out-Null
+    & git -C $cloneA config commit.gpgsign false 2>$null | Out-Null
+    & git -C $cloneA checkout -q -b main 2>$null | Out-Null
+    Set-Content -Path (Join-Path $cloneA '.gitignore') `
+        -Value ".stride.md`n.stride-env-cache`n.stride-changed-files.json`n.stride-diff-upload-state`n.stride-dirty-baseline" -Encoding UTF8
+    Set-Content -Path (Join-Path $cloneA 'base.txt') -Value 'base' -Encoding UTF8
+    & git -C $cloneA add .gitignore base.txt 2>$null | Out-Null
+    & git -C $cloneA commit -q -m 'base' 2>$null | Out-Null
+    & git -C $cloneA push -q origin main 2>$null | Out-Null
+    $cloneB = Join-Path $d142Root 'cloneB'
+    & git clone -q (Join-Path $d142Root 'origin.git') $cloneB 2>$null | Out-Null
+    & git -C $cloneB config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $cloneB config user.name 'Test' 2>$null | Out-Null
+    & git -C $cloneB config commit.gpgsign false 2>$null | Out-Null
+    Set-Content -Path (Join-Path $cloneB 'w1678.txt') -Value 'other' -Encoding UTF8
+    & git -C $cloneB add w1678.txt 2>$null | Out-Null
+    & git -C $cloneB commit -q -m 'other clone task' 2>$null | Out-Null
+    & git -C $cloneB push -q origin main 2>$null | Out-Null
+
+    $prePull = (& git -C $cloneA rev-parse HEAD | Out-String).Trim()
+    Set-Content -Path (Join-Path $cloneA '.stride.md') -Value @'
+## before_doing
+```bash
+git pull -q origin main
+```
+'@ -Encoding UTF8
+    Set-Content -Path (Join-Path $cloneA '.stride-env-cache') `
+        -Value "TASK_ID=OLD1`nTASK_BASE_REF=1111111111111111111111111111111111111111" -Encoding UTF8
+    $d142Claim = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{ stdout = '{"data":{"id":142,"identifier":"D142","title":"Cross clone","status":"in_progress","complexity":"medium","priority":"high"}}'; stderr = ''; interrupted = $false }
+    } | ConvertTo-Json -Compress
+    $r = Invoke-HookScript -InputJson $d142Claim -Phase 'post' -ProjectDir $cloneA
+    Assert-Exit "13a: cross-clone claim exits 0" 0 $r.ExitCode
+    $postPull = (& git -C $cloneA rev-parse HEAD | Out-String).Trim()
+    if ($prePull -eq $postPull) {
+        Write-Host "  FAIL: 13a fixture vacuous — the before_doing pull did not move HEAD" -ForegroundColor Red
+        $script:FAIL++
+    } else {
+        Write-Host "  PASS: 13a fixture: the before_doing pull moved HEAD (discriminating power)" -ForegroundColor Green
+        $script:PASS++
+    }
+    $d142Cache = Get-Content -Raw -Path (Join-Path $cloneA '.stride-env-cache') -ErrorAction SilentlyContinue
+    Assert-Contains "13a: claim records the POST-pull branch point as TASK_BASE_REF" "TASK_BASE_REF=$postPull" $d142Cache
+    Assert-NotContains "13a: the stale prior-session TASK_BASE_REF was replaced" "1111111111111111111111111111111111111111" $d142Cache
+
+    # 13b: committed-range override — a baseline entry whose path the task's
+    # commits contain is task work and must survive the upload filter (D137).
+    $crProj = Join-Path $TmpDir 'g13-committed'
+    New-Item -ItemType Directory -Path $crProj -Force | Out-Null
+    & git -C $crProj init -q 2>$null | Out-Null
+    & git -C $crProj config user.email 'test@test.local' 2>$null | Out-Null
+    & git -C $crProj config user.name 'Test' 2>$null | Out-Null
+    & git -C $crProj config commit.gpgsign false 2>$null | Out-Null
+    Set-Content -Path (Join-Path $crProj 'tracked.txt') -Value 'v1' -Encoding UTF8
+    & git -C $crProj add tracked.txt 2>$null | Out-Null
+    & git -C $crProj commit -q -m 'v1' 2>$null | Out-Null
+    $crBase = (& git -C $crProj rev-parse HEAD | Out-String).Trim()
+    # Pre-claim dirt, then the auto-commit commits it as the task's work.
+    Add-Content -Path (Join-Path $crProj 'tracked.txt') -Value 'task edit present at claim' -Encoding UTF8
+    $crHash = (& git -C $crProj hash-object -- 'tracked.txt' | Out-String).Trim()
+    Set-Content -Path (Join-Path $crProj '.stride-dirty-baseline') -Value "$crHash tracked.txt" -Encoding UTF8
+    & git -C $crProj add tracked.txt 2>$null | Out-Null
+    & git -C $crProj commit -q -m 'task auto-commit' 2>$null | Out-Null
+    Set-Content -Path (Join-Path $crProj '.stride-changed-files.json') `
+        -Value '[{"path":"tracked.txt","diff":"task work"}]' -Encoding UTF8
+    Set-Content -Path (Join-Path $crProj '.stride-env-cache') `
+        -Value "TASK_ID=99`nTASK_BASE_REF=$crBase" -Encoding UTF8
+    Set-Content -Path (Join-Path $crProj '.stride.md') -Value @'
+## after_doing
+```bash
+echo "ran"
+```
+'@ -Encoding UTF8
+
+    $crPort = 18893
+    $crFixture = Join-Path $TmpDir 'd142-put-fixture.json'
+    if (Test-Path $crFixture) { Remove-Item -Force $crFixture }
+    $crListenerJob = Start-Job -ArgumentList $crPort, $crFixture -ScriptBlock {
+        param($Port, $Fixture)
+        $l = [System.Net.HttpListener]::new()
+        $l.Prefixes.Add("http://localhost:$Port/")
+        try {
+            $l.Start()
+            $ctx = $l.GetContext()
+            $req = $ctx.Request
+            $reader = [System.IO.StreamReader]::new($req.InputStream)
+            $body = $reader.ReadToEnd()
+            @{ Body = $body } | ConvertTo-Json -Compress | Set-Content -Path $Fixture -Encoding UTF8
+            $resp = $ctx.Response
+            $resp.StatusCode = 200
+            $resp.OutputStream.Close()
+        } catch {
+            # Listener tear-down errors are ignored.
+        } finally {
+            if ($l.IsListening) { $l.Stop() }
+        }
+    }
+    try {
+        $null = Wait-ForListener -Port $crPort
+        $crCmd = "curl -X PATCH http://localhost:$crPort/api/tasks/99/complete -H `"Authorization: Bearer test_token_cr`""
+        $crJson = @{ tool_input = @{ command = $crCmd } } | ConvertTo-Json -Compress
+        $r = Invoke-HookScript -InputJson $crJson -Phase 'pre' -ProjectDir $crProj
+        Assert-Exit "13b: hook exits 0 after the committed-range PUT" 0 $r.ExitCode
+
+        Wait-Job $crListenerJob -Timeout 8 | Out-Null
+        Remove-Job $crListenerJob -Force -ErrorAction SilentlyContinue
+
+        if (Test-Path $crFixture) {
+            $record = Get-Content -Raw -Path $crFixture | ConvertFrom-Json
+            $parsedBody = $record.Body | ConvertFrom-Json
+            $decoded = [System.Convert]::FromBase64String($parsedBody.changed_files.data)
+            $decodedText = [System.Text.Encoding]::UTF8.GetString($decoded)
+            $entries = @($decodedText | ConvertFrom-Json)
+            $paths = @($entries | ForEach-Object { $_.path })
+            if ($paths -contains 'tracked.txt') {
+                Write-Host "  PASS: 13b: committed task work survives the baseline filter" -ForegroundColor Green
+                $script:PASS++
+            } else {
+                Write-Host "  FAIL: 13b: committed task work was dropped, got: $($paths -join ', ')" -ForegroundColor Red
+                $script:FAIL++
+            }
+        } else {
+            Write-Host "  FAIL: 13b: no PUT recorded by the listener" -ForegroundColor Red
+            $script:FAIL++
+        }
+    } finally {
+        Remove-Job $crListenerJob -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

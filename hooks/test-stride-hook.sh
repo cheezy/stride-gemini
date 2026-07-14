@@ -2743,6 +2743,366 @@ STRIDE
 fi
 
 # ============================================================
+# Test Group 17: D142 — post-pull TASK_BASE_REF + complete snapshot
+# ============================================================
+# Two production defects, both silent review corruption:
+#   D132: TASK_BASE_REF was captured BEFORE the ## before_doing section ran,
+#         so the section's `git pull` moved HEAD past it and the after_doing
+#         diff spanned another clone's already-completed task.
+#   D137: the claim-time dirty-baseline filter (W1457) excluded files whose
+#         content had not changed since claim — even after the after_doing
+#         auto-commit committed them as the task's own work.
+echo ""
+echo "=== Test Group 17: D142 post-pull TASK_BASE_REF + complete snapshot ==="
+
+if ! command -v jq > /dev/null 2>&1 || ! command -v git > /dev/null 2>&1; then
+  echo "  SKIP: jq or git missing — Group 17 requires both (reuses Group 9 helpers)"
+else
+  # Shared fixture: a bare origin and two clones. Clone A is the task machine;
+  # clone B plays the OTHER computer whose completed task arrives via the
+  # ## before_doing pull on clone A.
+  D142_ROOT=$(mktemp -d)
+  git init -q --bare "$D142_ROOT/origin.git"
+  git -C "$D142_ROOT/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$D142_ROOT/origin.git" "$D142_ROOT/cloneA" 2> /dev/null
+  (
+    cd "$D142_ROOT/cloneA" || exit 1
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    git checkout -q -b main 2> /dev/null || git checkout -q main
+    cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+.stride-diff-upload-state
+.stride-dirty-baseline
+curl-call.txt
+*.ref
+GITIGNORE
+    echo "base" > base.txt
+    git add .gitignore base.txt > /dev/null
+    git commit -q -m "base"
+    git push -q origin main 2> /dev/null
+  )
+  git clone -q "$D142_ROOT/origin.git" "$D142_ROOT/cloneB" 2> /dev/null
+  (
+    cd "$D142_ROOT/cloneB" || exit 1
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    echo "w1678" > w1678.txt
+    git add w1678.txt > /dev/null
+    git commit -q -m "other clone's task"
+    git push -q origin main 2> /dev/null
+  )
+
+  # 17a: the claim-time refresh must record the POST-pull branch point, even
+  # when the cache already holds a stale base from a previous task/session.
+  (
+    cd "$D142_ROOT/cloneA" || exit 1
+    cat > .stride.md << 'STRIDE'
+## before_doing
+```bash
+git pull -q origin main
+```
+
+## after_doing
+```bash
+git add -A
+git commit -q -m "task commit"
+```
+STRIDE
+    printf "TASK_ID='OLD1'\nTASK_BASE_REF='1111111111111111111111111111111111111111'\n" > .stride-env-cache
+    git rev-parse HEAD > prepull.ref
+    D142_CLAIM='{"tool_input":{"command":"curl -X POST https://stride.example.com/api/tasks/claim"},"tool_response":{"stdout":"{\"data\":{\"id\":142,\"identifier\":\"D142\",\"title\":\"Cross clone\",\"status\":\"in_progress\",\"complexity\":\"medium\",\"priority\":\"high\"}}","stderr":"","interrupted":false}}'
+    echo "$D142_CLAIM" | CLAUDE_PROJECT_DIR="$PWD" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  )
+  D142_PREPULL=$(cat "$D142_ROOT/cloneA/prepull.ref")
+  D142_HEAD=$(git -C "$D142_ROOT/cloneA" rev-parse HEAD)
+  D142_CACHE=$(cat "$D142_ROOT/cloneA/.stride-env-cache" 2>/dev/null)
+  if [ "$D142_PREPULL" = "$D142_HEAD" ]; then
+    echo -e "  ${RED}FAIL${RESET}: 17a fixture vacuous — the before_doing pull did not move HEAD"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 17a fixture: the before_doing pull moved HEAD (discriminating power)"
+    PASS=$((PASS + 1))
+  fi
+  assert_contains "17a: claim records the POST-pull branch point as TASK_BASE_REF" \
+    "TASK_BASE_REF='$D142_HEAD'" "$D142_CACHE"
+  if echo "$D142_CACHE" | grep -q "1111111111111111111111111111111111111111"; then
+    echo -e "  ${RED}FAIL${RESET}: 17a: the stale prior-session TASK_BASE_REF survived the claim"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 17a: the stale prior-session TASK_BASE_REF was replaced"
+    PASS=$((PASS + 1))
+  fi
+
+  # 17b: completing the task on clone A captures ONLY the task's own files —
+  # never the commit pulled from clone B (the D132/W1678 cross-task scenario).
+  D142_STUB=$(mktemp -d)
+  D142_FIXTURE="$D142_ROOT/cloneA/curl-call.txt"
+  make_curl_stub "$D142_STUB" "$D142_FIXTURE" 0
+  (
+    cd "$D142_ROOT/cloneA" || exit 1
+    echo "task work" > task.txt
+    D142_COMPLETE='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/142/complete -H \"Authorization: Bearer tok\""}}'
+    echo "$D142_COMPLETE" | CLAUDE_PROJECT_DIR="$PWD" PATH="$D142_STUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  D142_PATHS=$(jq -r '.[].path' "$D142_ROOT/cloneA/.stride-changed-files.json" 2>/dev/null)
+  assert_contains "17b: snapshot contains the task's own file" "task.txt" "$D142_PATHS"
+  if echo "$D142_PATHS" | grep -qx "w1678.txt"; then
+    echo -e "  ${RED}FAIL${RESET}: 17b: the other clone's pulled file leaked into the snapshot"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 17b: the other clone's pulled file is NOT in the snapshot"
+    PASS=$((PASS + 1))
+  fi
+
+  # 17c: resolve_snapshot_base — the staleness guard.
+  D142_BP=$(git -C "$D142_ROOT/cloneA" merge-base HEAD origin/main)
+  D142_ERR_FILE=$(mktemp)
+  D142_RES=$(
+    cd "$D142_ROOT/cloneA" || exit 99
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null
+    PROJECT_DIR="$PWD"
+    resolve_snapshot_base "$D142_PREPULL" 2> "$D142_ERR_FILE"
+  )
+  assert_eq "17c: a base older than the branch point recomputes to the branch point" \
+    "$D142_BP" "$D142_RES"
+  assert_contains "17c: the recompute says so in its output" \
+    "recomputed" "$(cat "$D142_ERR_FILE" 2>/dev/null)"
+  D142_RES_OK=$(
+    cd "$D142_ROOT/cloneA" || exit 99
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null
+    PROJECT_DIR="$PWD"
+    resolve_snapshot_base "$D142_BP" 2> "$D142_ERR_FILE.trusted"
+  )
+  assert_eq "17c: a base equal to the branch point is trusted unchanged" \
+    "$D142_BP" "$D142_RES_OK"
+  assert_eq "17c: a trusted base emits no recompute notice" \
+    "" "$(cat "$D142_ERR_FILE.trusted" 2>/dev/null)"
+  D142_RES_BAD=$(
+    cd "$D142_ROOT/cloneA" || exit 99
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null
+    PROJECT_DIR="$PWD"
+    resolve_snapshot_base "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" 2>/dev/null
+  )
+  assert_eq "17c: an unresolvable base recomputes to the branch point" \
+    "$D142_BP" "$D142_RES_BAD"
+  rm -f "$D142_ERR_FILE" "$D142_ERR_FILE.trusted"
+
+  # 17c2: a repo with NO origin has no branch point — pass the base through.
+  D142_LOCAL=$(mktemp -d)
+  (
+    cd "$D142_LOCAL" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    echo "x" > x.txt
+    git add x.txt > /dev/null
+    git commit -q -m x
+  )
+  D142_RES_LOCAL=$(
+    cd "$D142_LOCAL" || exit 99
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null
+    PROJECT_DIR="$PWD"
+    resolve_snapshot_base "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" 2>/dev/null
+  )
+  assert_eq "17c2: no origin — the base passes through unchanged" \
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$D142_RES_LOCAL"
+  rm -rf "$D142_LOCAL"
+  rm -rf "$D142_ROOT" "$D142_STUB"
+
+  # 17d: D137 dropped-files repro — files already dirty/untracked at claim time
+  # that the after_doing auto-commit then COMMITS are the task's own work and
+  # must survive the dirty-baseline filter.
+  D137_DIR=$(mktemp -d)
+  (
+    cd "$D137_DIR" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    cat > .gitignore << 'GITIGNORE'
+base.ref
+snap.json
+.stride-dirty-baseline
+.stride-env-cache
+.stride-changed-files.json
+GITIGNORE
+    printf 'v1\n' > lib_a.txt
+    printf 'v1\n' > lib_b.txt
+    git add . > /dev/null
+    git commit -q -m "base"
+    git rev-parse HEAD > base.ref
+    printf 'v2\n' > lib_a.txt
+    printf 'v2\n' > lib_b.txt
+    printf 'defmodule Migration do end\n' > migration.exs
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null
+    PROJECT_DIR="$PWD"
+    HAS_JQ=true
+    record_dirty_baseline "$(cat base.ref)"
+    git add -A > /dev/null
+    git commit -q -m "task"
+    capture_changed_files "$(cat base.ref)" > snap.json 2>/dev/null
+  )
+  D137_PATHS=$(jq -r '.[].path' "$D137_DIR/snap.json" 2>/dev/null)
+  assert_contains "17d: committed tracked edit survives the baseline filter (a)" "lib_a.txt" "$D137_PATHS"
+  assert_contains "17d: committed tracked edit survives the baseline filter (b)" "lib_b.txt" "$D137_PATHS"
+  assert_contains "17d: committed formerly-untracked migration is included" "migration.exs" "$D137_PATHS"
+
+  # 17e: snapshot/commit parity.
+  D137_COMMIT_FILES=$(git -C "$D137_DIR" diff --name-only "$(cat "$D137_DIR/base.ref")" HEAD | sort)
+  D137_SNAP_FILES=$(printf '%s\n' "$D137_PATHS" | sort)
+  assert_eq "17e: snapshot file list equals the commit file list" \
+    "$D137_COMMIT_FILES" "$D137_SNAP_FILES"
+  rm -rf "$D137_DIR"
+
+  # 17f: finalize_before_doing works WITHOUT jq — a stale inherited base is
+  # rewritten to HEAD and identity lines survive.
+  D142_NOJQ=$(mktemp -d)
+  (
+    cd "$D142_NOJQ" || exit 1
+    git init -q
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    echo "v1" > a.txt
+    git add a.txt > /dev/null
+    git commit -q -m "v1"
+    printf "TASK_ID='7'\nTASK_BASE_REF='deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'\n" > .stride-env-cache
+    # shellcheck disable=SC1090
+    source "$HOOK_SCRIPT" 2>/dev/null
+    PROJECT_DIR="$PWD"
+    ENV_CACHE="$PWD/.stride-env-cache"
+    HAS_JQ=false
+    HOOK_NAME=before_doing
+    finalize_before_doing
+  )
+  D142_NOJQ_HEAD=$(git -C "$D142_NOJQ" rev-parse HEAD)
+  D142_NOJQ_CACHE=$(cat "$D142_NOJQ/.stride-env-cache" 2>/dev/null)
+  assert_contains "17f: no-jq finalize rewrites the stale base to HEAD" \
+    "TASK_BASE_REF='$D142_NOJQ_HEAD'" "$D142_NOJQ_CACHE"
+  assert_contains "17f: finalize stamps the trust marker" "TASK_BASE_REF_TRUSTED='1'" "$D142_NOJQ_CACHE"
+  assert_contains "17f: identity lines survive the rewrite" "TASK_ID='7'" "$D142_NOJQ_CACHE"
+  if echo "$D142_NOJQ_CACHE" | grep -q "deadbeef"; then
+    echo -e "  ${RED}FAIL${RESET}: 17f: the stale base survived the no-jq rewrite"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${RESET}: 17f: the stale base did not survive the no-jq rewrite"
+    PASS=$((PASS + 1))
+  fi
+  rm -rf "$D142_NOJQ"
+
+  # 17g: an ## after_doing section that PUSHES the default branch must not
+  # trick the refresh capture into recomputing the (correct) base — resolved
+  # once at the early capture, memoized, and persisted as base= for the self-heal.
+  D142_PUSH=$(mktemp -d)
+  git init -q --bare "$D142_PUSH/origin.git"
+  git -C "$D142_PUSH/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$D142_PUSH/origin.git" "$D142_PUSH/work" 2> /dev/null
+  D142_PUSH_STUB=$(mktemp -d)
+  D142_PUSH_FIXTURE="$D142_PUSH/work/curl-call.txt"
+  make_curl_stub "$D142_PUSH_STUB" "$D142_PUSH_FIXTURE" 0
+  (
+    cd "$D142_PUSH/work" || exit 1
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    git checkout -q -b main 2> /dev/null || git checkout -q main
+    cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+.stride-diff-upload-state
+.stride-dirty-baseline
+curl-call.txt
+*.ref
+GITIGNORE
+    echo "v1" > tracked.txt
+    git add .gitignore tracked.txt > /dev/null
+    git commit -q -m "v1"
+    git push -q origin main 2> /dev/null
+    git rev-parse HEAD > base.ref
+    echo "v2" > tracked.txt
+    git add tracked.txt > /dev/null
+    git commit -q -m "task work"
+    cat > .stride.md << 'STRIDE'
+## after_doing
+```bash
+git push -q origin main
+```
+STRIDE
+    printf "TASK_ID='55'\nTASK_BASE_REF='%s'\n" "$(cat base.ref)" > .stride-env-cache
+    D142_PUSH_COMPLETE='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/55/complete -H \"Authorization: Bearer tok\""}}'
+    echo "$D142_PUSH_COMPLETE" | CLAUDE_PROJECT_DIR="$PWD" PATH="$D142_PUSH_STUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  D142_PUSH_BASE=$(cat "$D142_PUSH/work/base.ref")
+  D142_PUSH_PATHS=$(jq -r '.[].path' "$D142_PUSH/work/.stride-changed-files.json" 2>/dev/null)
+  assert_contains "17g: push-in-after_doing keeps the task's file in the snapshot" \
+    "tracked.txt" "$D142_PUSH_PATHS"
+  assert_contains "17g: the resolved base is persisted for the self-heal" \
+    "base=$D142_PUSH_BASE" "$(cat "$D142_PUSH/work/.stride-diff-upload-state" 2>/dev/null)"
+  rm -rf "$D142_PUSH" "$D142_PUSH_STUB"
+
+  # 17h: a workflow that pushes its own task commits BEFORE completing
+  # (origin/main == HEAD at capture time) must not have its correct,
+  # claim-written base recomputed — the TASK_BASE_REF_TRUSTED marker exempts it.
+  D142_PRE=$(mktemp -d)
+  git init -q --bare "$D142_PRE/origin.git"
+  git -C "$D142_PRE/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$D142_PRE/origin.git" "$D142_PRE/work" 2> /dev/null
+  D142_PRE_STUB=$(mktemp -d)
+  D142_PRE_FIXTURE="$D142_PRE/work/curl-call.txt"
+  make_curl_stub "$D142_PRE_STUB" "$D142_PRE_FIXTURE" 0
+  (
+    cd "$D142_PRE/work" || exit 1
+    git config user.email "test@test.local"
+    git config user.name "Test"
+    git config commit.gpgsign false
+    git checkout -q -b main 2> /dev/null || git checkout -q main
+    cat > .gitignore << 'GITIGNORE'
+.stride.md
+.stride-env-cache
+.stride-changed-files.json
+.stride-diff-upload-state
+.stride-dirty-baseline
+curl-call.txt
+*.ref
+GITIGNORE
+    echo "v1" > tracked.txt
+    git add .gitignore tracked.txt > /dev/null
+    git commit -q -m "v1"
+    git push -q origin main 2> /dev/null
+    git rev-parse HEAD > base.ref
+    echo "v2" > tracked.txt
+    git add tracked.txt > /dev/null
+    git commit -q -m "task work"
+    git push -q origin main 2> /dev/null
+    cat > .stride.md << 'STRIDE'
+## after_doing
+```bash
+echo "gate ran"
+```
+STRIDE
+    printf "TASK_ID='56'\nTASK_BASE_REF='%s'\nTASK_BASE_REF_TRUSTED='1'\n" "$(cat base.ref)" > .stride-env-cache
+    D142_PRE_COMPLETE='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/56/complete -H \"Authorization: Bearer tok\""}}'
+    echo "$D142_PRE_COMPLETE" | CLAUDE_PROJECT_DIR="$PWD" PATH="$D142_PRE_STUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  )
+  D142_PRE_PATHS=$(jq -r '.[].path' "$D142_PRE/work/.stride-changed-files.json" 2>/dev/null)
+  assert_contains "17h: pre-pushed task work stays in the snapshot (trusted base not re-judged)" \
+    "tracked.txt" "$D142_PRE_PATHS"
+  rm -rf "$D142_PRE" "$D142_PRE_STUB"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

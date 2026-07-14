@@ -127,6 +127,15 @@ capture_changed_files() {
   # (older claim, non-git dir) falls back to the unfiltered behavior.
   local _baseline_file="${PROJECT_DIR:-.}/.stride-dirty-baseline"
 
+  # (D142) Paths that differ between base and HEAD are COMMITTED task work —
+  # the task's auto-commit contains them, so the baseline filter below must
+  # never drop them. D137 silently lost 4 tracked edits and an untracked
+  # migration exactly this way: they were dirty at claim time, the auto-commit
+  # committed that same content, and the unchanged-since-claim blob hash then
+  # excluded them from the snapshot.
+  local committed_range
+  committed_range=$(git diff --name-only "$base" HEAD 2>/dev/null || printf '')
+
   local file
   while IFS= read -r file; do
     [ -z "$file" ] && continue
@@ -148,6 +157,17 @@ capture_changed_files() {
           break
         fi
       done < "$_baseline_file"
+      # (D142) Committed-range override: a path the task's commits contain is
+      # task work by definition — never baseline-excluded.
+      if [ "$_bl_excluded" -eq 1 ] && [ -n "$committed_range" ]; then
+        local _cr
+        while IFS= read -r _cr; do
+          if [ "$_cr" = "$file" ]; then
+            _bl_excluded=0
+            break
+          fi
+        done <<< "$committed_range"
+      fi
       [ "$_bl_excluded" -eq 1 ] && continue
     fi
 
@@ -316,13 +336,19 @@ upload_changed_files_snapshot() {
 }
 
 # Helper: record the outcome of a changed_files PUT attempt (W1094) so the
-# before_review self-heal can verify it on a fresh timeout budget. Task id
-# and HTTP code ONLY — never the URL or bearer token (the file lives
-# untracked in the project root alongside the other .stride artifacts).
+# before_review self-heal can verify it on a fresh timeout budget. Task id,
+# HTTP code, and (D142) the trust-guard-resolved snapshot base ONLY — never the
+# URL or bearer token (the file lives untracked in the project root alongside
+# the other .stride artifacts). The base lets the self-heal reuse the
+# after_doing-time judgment instead of re-resolving against origin refs the
+# section's own `git push` may have moved.
 record_diff_upload_state() {
   {
     printf 'task_id=%s\n' "$1"
     printf 'http_code=%s\n' "$2"
+    if [ -n "${3:-}" ]; then
+      printf 'base=%s\n' "$3"
+    fi
   } > "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
 }
 
@@ -360,10 +386,84 @@ task_id_from_command() {
 # upload works whether the agent's completion curl used literal values or shell
 # variables ($STRIDE_API_URL / $STRIDE_API_TOKEN), with the $COMMAND literal
 # extraction kept as a back-compat fallback.
+# (D142) Trust guard for the snapshot base ref. TASK_BASE_REF is supposed to
+# be the task branch point — the commit HEAD pointed at right after the
+# ## before_doing section finished (post-pull). A value inherited from a
+# previous task or session can predate commits that arrived via the
+# before_doing pull; diffing from it would span ANOTHER clone's completed
+# task (the D132/W1678 incident). Rules, in order:
+#   1. empty or unresolvable base            → recompute from the branch point
+#   2. base is not an ancestor of HEAD       → recompute (e.g. rebased away)
+#   3. base is a STRICT ancestor of the task branch point → recompute — the
+#      range base..HEAD would include commits pulled from origin. A plain
+#      is-ancestor-of-HEAD check cannot catch this: the D132 stale base WAS
+#      an ancestor of HEAD.
+# "Task branch point" = merge-base of HEAD and the origin default branch.
+# Without an origin branch there is no branch point to judge against (and no
+# cross-clone pull is possible), so the base passes through unchanged and
+# capture_changed_files keeps its own HEAD~1 fallback. Recomputes are
+# announced on stderr — never silently. Prints the base to use on stdout.
+resolve_snapshot_base() {
+  local _base="${1:-}" _bp="" _remote_head="" _c _reason="" _base_sha=""
+  if ! command -v git > /dev/null 2>&1 \
+    || ! git rev-parse --verify --quiet HEAD > /dev/null 2>&1; then
+    printf '%s' "$_base"
+    return 0
+  fi
+  _remote_head=$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
+  _remote_head="${_remote_head#refs/remotes/}"
+  if [ -z "$_remote_head" ]; then
+    for _c in origin/main origin/master; do
+      if git rev-parse --verify --quiet "$_c" > /dev/null 2>&1; then
+        _remote_head="$_c"
+        break
+      fi
+    done
+  fi
+  [ -n "$_remote_head" ] && _bp=$(git merge-base HEAD "$_remote_head" 2>/dev/null || true)
+  if [ -z "$_bp" ]; then
+    printf '%s' "$_base"
+    return 0
+  fi
+
+  if [ -z "$_base" ] || ! _base_sha=$(git rev-parse --verify --quiet "$_base^{commit}" 2>/dev/null); then
+    _reason="empty or unresolvable"
+  elif ! git merge-base --is-ancestor "$_base_sha" HEAD 2>/dev/null; then
+    _reason="not an ancestor of HEAD"
+  elif [ "${TASK_BASE_REF_TRUSTED:-}" != "1" ] \
+    && [ "$_base_sha" != "$_bp" ] \
+    && git merge-base --is-ancestor "$_base_sha" "$_bp" 2>/dev/null; then
+    # Rule 3 judges only INHERITED bases (no trust marker): a base the
+    # current claim's post-before_doing capture wrote IS the branch point by
+    # construction, and origin/main may legitimately have advanced past it
+    # when the workflow pushes its own task commits before completing.
+    _reason="older than the task branch point, so the diff would span commits pulled from origin"
+  fi
+  if [ -z "$_reason" ]; then
+    printf '%s' "$_base"
+    return 0
+  fi
+  printf 'stride-hook: TASK_BASE_REF %s is not trustworthy (%s); recomputed the snapshot base from the task branch point: %s\n' \
+    "${_base:-<empty>}" "$_reason" "$_bp" >&2
+  printf '%s' "$_bp"
+}
+
 finalize_after_doing() {
   local snapshot _tid
   if [ -n "${TASK_BASE_REF:-}" ]; then
-    snapshot=$(capture_changed_files "${TASK_BASE_REF:-}" 2>/dev/null || printf '[]')
+    # (D142) Run the base through the trust guard ONCE per process and memoize
+    # the judgment. The refresh call runs AFTER the section's commands — an
+    # ## after_doing that pushes the default branch moves origin/main to HEAD,
+    # which would make a CORRECT base look like a strict ancestor of the branch
+    # point and recompute it to HEAD (empty snapshot overwriting the good early
+    # upload). The early pre-command resolution sees the pre-push origin refs,
+    # so it is the authoritative judgment for the whole task window; its
+    # recompute notice stays on stderr so it reaches the hook output.
+    if [ "${SNAP_BASE_RESOLVED_DONE:-false}" != "true" ]; then
+      SNAP_BASE_RESOLVED=$( (cd "$PROJECT_DIR" 2>/dev/null && resolve_snapshot_base "${TASK_BASE_REF:-}") || printf '%s' "${TASK_BASE_REF:-}")
+      SNAP_BASE_RESOLVED_DONE=true
+    fi
+    snapshot=$(capture_changed_files "${SNAP_BASE_RESOLVED:-}" 2>/dev/null || printf '[]')
     printf '%s\n' "$snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
 
     # (D127) Target the task id from the /complete URL, not the env cache, so a
@@ -386,8 +486,9 @@ finalize_after_doing() {
         # before_review self-heal can verify it on a fresh timeout budget.
         # A skipped PUT (missing preconditions) deliberately writes nothing:
         # missing state means "no healthy upload on record" and the retry
-        # re-checks the same preconditions itself.
-        record_diff_upload_state "$_tid" "$_http_code"
+        # re-checks the same preconditions itself. (D142) The resolved base
+        # rides along so the self-heal reuses this task window's judgment.
+        record_diff_upload_state "$_tid" "$_http_code" "${SNAP_BASE_RESOLVED:-}"
       fi
     fi
   fi
@@ -419,10 +520,11 @@ self_heal_changed_files_upload() {
   # semantics anchor at after_doing time; avoid pointless API load).
   # Missing file, different task id, or non-2xx/empty code → retry.
   local _state_file="$PROJECT_DIR/.stride-diff-upload-state"
-  local _state_task="" _state_code=""
+  local _state_task="" _state_code="" _state_base=""
   if [ -f "$_state_file" ]; then
     _state_task=$(grep '^task_id=' "$_state_file" 2>/dev/null | head -n 1 | cut -d= -f2- || true)
     _state_code=$(grep '^http_code=' "$_state_file" 2>/dev/null | head -n 1 | cut -d= -f2- || true)
+    _state_base=$(grep '^base=' "$_state_file" 2>/dev/null | head -n 1 | cut -d= -f2- || true)
   fi
   if [ "$_state_task" = "$_tid" ]; then
     case "$_state_code" in
@@ -442,11 +544,22 @@ self_heal_changed_files_upload() {
   # Re-capture against the claim-time base ref. The subshell cd anchors git
   # to the project repo without disturbing the main script's cwd (the
   # before_review section's own `cd "$PROJECT_DIR"` has not run yet).
-  local _snapshot _http_code
-  _snapshot=$( (cd "$PROJECT_DIR" && capture_changed_files "${TASK_BASE_REF:-}") 2>/dev/null || printf '[]')
+  # (D142) Prefer the base finalize_after_doing resolved and persisted for THIS
+  # task — re-resolving here would re-judge against origin refs the after_doing
+  # section's own `git push` may have moved (a correct base would look stale and
+  # recompute to HEAD, emptying the snapshot). Only when no persisted judgment
+  # exists (process killed before any PUT) run the trust guard fresh — the retry
+  # must never resurrect a stale base the primary capture would have refused.
+  local _snapshot _http_code _snap_base
+  if [ "$_state_task" = "$_tid" ] && [ -n "$_state_base" ]; then
+    _snap_base="$_state_base"
+  else
+    _snap_base=$( (cd "$PROJECT_DIR" 2>/dev/null && resolve_snapshot_base "${TASK_BASE_REF:-}") || printf '%s' "${TASK_BASE_REF:-}")
+  fi
+  _snapshot=$( (cd "$PROJECT_DIR" && capture_changed_files "$_snap_base") 2>/dev/null || printf '[]')
   printf '%s\n' "$_snapshot" > "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
   _http_code=$(upload_changed_files_snapshot "$_tid" "$_api_base" "$_token")
-  record_diff_upload_state "$_tid" "$_http_code"
+  record_diff_upload_state "$_tid" "$_http_code" "$_snap_base"
   # (W1658) before_review is the LAST retry. If it still did not land, the diff
   # is definitively lost for this task — surface it LOUDLY (distinct from the
   # per-attempt warning in upload_changed_files_snapshot) and mark the state file
@@ -507,6 +620,43 @@ record_dirty_baseline() {
     fi
     printf '%s %s\n' "$_h" "$_p" >> "$_bl_file" 2>/dev/null || true
   done <<< "$_paths"
+  return 0
+}
+
+# (D142) Rewrite TASK_BASE_REF — and re-record the dirty baseline — AFTER the
+# ## before_doing section has run. The section's `git pull` moves HEAD, so a
+# base captured before it anchors the after_doing diff at the PRE-pull commit
+# and the snapshot spans another clone's pulled work (the D132/W1678 incident).
+# Called from the main flow right after run_stride_section returns for the
+# before_doing route, regardless of the section's exit code (the claim already
+# succeeded — AfterTool cannot veto it, and a partially-run section still leaves
+# HEAD more accurate than the pre-pull value) and with no jq dependency (the
+# identity refresh is jq-gated; this must not be). Skips silently when HEAD is
+# unresolvable (not a git repo) — the pre-section strip already removed any
+# inherited TASK_BASE_REF in that case.
+finalize_before_doing() {
+  [ "${HOOK_NAME:-}" = "before_doing" ] || return 0
+  local _base_ref _preserved
+  _base_ref=$( (cd "$PROJECT_DIR" && git rev-parse HEAD) 2>/dev/null || true)
+  [ -n "$_base_ref" ] || return 0
+  # TASK_BASE_REF_TRUSTED marks a base written by THIS post-before_doing
+  # capture: it is the task branch point by construction, so the trust guard's
+  # branch-point rule (rule 3) does not second-guess it — a workflow that
+  # pushes its own task commits before completing would otherwise make a
+  # correct base look like it predates the branch point. Inherited caches
+  # (older plugin, previous session) lack the marker and get the full guard.
+  _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' "$ENV_CACHE" 2>/dev/null || true)
+  {
+    [ -n "$_preserved" ] && printf '%s\n' "$_preserved"
+    echo "TASK_BASE_REF=$(sq_escape "$_base_ref")"
+    echo "TASK_BASE_REF_TRUSTED='1'"
+  } > "$ENV_CACHE" 2>/dev/null || true
+  export TASK_BASE_REF="$_base_ref"
+  export TASK_BASE_REF_TRUSTED="1"
+  # (W1457→D142) The dirty baseline moves with the base capture: post-pull
+  # paths hashed against the post-pull tree, so the exclusion set and the diff
+  # anchor can never disagree.
+  record_dirty_baseline "$_base_ref"
   return 0
 }
 
@@ -1060,10 +1210,19 @@ esac
 # response and cache it. All subsequent hooks load the cache so .stride.md
 # commands can reference $TASK_IDENTIFIER, $TASK_TITLE, etc.
 
-if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
-  RESPONSE=$(echo "$INPUT" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
+if [ "$HOOK_NAME" = "before_doing" ]; then
+  # (D142) This block refreshes IDENTITY only. TASK_BASE_REF is deliberately
+  # NOT written here: the ## before_doing section has not run yet, and its
+  # `git pull` moves HEAD — a base captured now would anchor the diff at the
+  # PRE-pull commit and span another clone's pulled work (D132/W1678).
+  # finalize_before_doing writes the base (and the dirty baseline) after the
+  # section finishes.
+  RESPONSE=""
   TASK_JSON=""
   INNER=""
+
+  if [ "$HAS_JQ" = "true" ]; then
+  RESPONSE=$(echo "$INPUT" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
 
   if [ -n "$RESPONSE" ]; then
     # tool_response may come in several shapes depending on the host:
@@ -1117,15 +1276,13 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
     fi
   fi
 
-  if [ -n "$TASK_JSON" ]; then
-    # Capture the current git HEAD as TASK_BASE_REF so capture_changed_files
-    # has an anchor pointing at when the task was claimed (consumed by
-    # finalize_after_doing at the end of every after_doing exit path).
-    # cd into the project dir first so HEAD comes from the project's repo
-    # regardless of the hook process's current working directory.
-    _base_ref=$(cd "$PROJECT_DIR" && git rev-parse HEAD 2>/dev/null || printf '')
+  fi
 
-    # Values are single-quoted to handle spaces in titles/descriptions
+  if [ -n "$TASK_JSON" ]; then
+    # Identity lines ONLY — no TASK_BASE_REF / TASK_BASE_REF_TRUSTED
+    # (finalize_before_doing writes those post-section); overwriting the whole
+    # cache here also strips any inherited base/trust marker.
+    # Values are single-quoted to handle spaces in titles/descriptions.
     {
       echo "TASK_ID='$(echo "$TASK_JSON" | jq -r '.id // empty')'"
       echo "TASK_IDENTIFIER='$(echo "$TASK_JSON" | jq -r '.identifier // empty')'"
@@ -1133,44 +1290,28 @@ if [ "$HOOK_NAME" = "before_doing" ] && [ "$HAS_JQ" = "true" ]; then
       echo "TASK_STATUS='$(echo "$TASK_JSON" | jq -r '.status // empty')'"
       echo "TASK_COMPLEXITY='$(echo "$TASK_JSON" | jq -r '.complexity // empty')'"
       echo "TASK_PRIORITY='$(echo "$TASK_JSON" | jq -r '.priority // empty')'"
-      echo "TASK_BASE_REF='$_base_ref'"
     } > "$ENV_CACHE" 2>/dev/null || true
-
-    # Clear any stale changed-files snapshot left over from a prior task so
-    # the new task's after_doing capture starts from a clean slate.
-    rm -f "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
-    # (W1094) Clear the previous task's upload state — a stale 2xx would
-    # suppress the before_review self-heal retry for the new task.
-    rm -f "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
-    # (W1457) Snapshot the paths already dirty at claim time so the
-    # after_doing changed-files capture excludes edits that predate this claim.
-    record_dirty_baseline "$_base_ref"
-  else
-    # (W1086) No parseable response and no usable persisted file. A claim
-    # always opens a new task window, so unconditionally refresh TASK_BASE_REF
-    # to current HEAD and clear the stale per-file snapshot — otherwise a
-    # base ref recorded under a previous claim survives and the after_doing
-    # diff spans every commit since that older claim. Existing TASK_ identity
-    # lines are preserved so a later completion can still recover TASK_ID.
-    # Skip silently when HEAD is unresolvable (not a git repo).
-    _base_ref=$(cd "$PROJECT_DIR" && git rev-parse HEAD 2>/dev/null || printf '')
-    if [ -n "$_base_ref" ]; then
-      if [ -f "$ENV_CACHE" ]; then
-        _preserved=$(grep -v '^TASK_BASE_REF=' "$ENV_CACHE" 2>/dev/null || true)
-        {
-          [ -n "$_preserved" ] && printf '%s\n' "$_preserved"
-          echo "TASK_BASE_REF='$_base_ref'"
-        } > "$ENV_CACHE" 2>/dev/null || true
-      else
-        echo "TASK_BASE_REF='$_base_ref'" > "$ENV_CACHE" 2>/dev/null || true
-      fi
-      rm -f "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
-      rm -f "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
-      # (W1457) Same claim-time dirty snapshot as the parsed-response path —
-      # the claim window opened even though the response was unparseable.
-      record_dirty_baseline "$_base_ref"
+  elif [ -f "$ENV_CACHE" ]; then
+    # (W1086/D142) No parseable response and no usable persisted file: keep the
+    # existing TASK_ identity lines (a later completion can still recover
+    # TASK_ID) but STRIP the inherited TASK_BASE_REF (and its trust marker) NOW
+    # — even if this process dies before finalize_before_doing rewrites it, a
+    # base from a previous task or session must never survive a claim.
+    _preserved=$(grep -v -e '^TASK_BASE_REF=' -e '^TASK_BASE_REF_TRUSTED=' "$ENV_CACHE" 2>/dev/null || true)
+    if [ -n "$_preserved" ]; then
+      printf '%s\n' "$_preserved" > "$ENV_CACHE" 2>/dev/null || true
+    else
+      rm -f "$ENV_CACHE" 2>/dev/null || true
     fi
   fi
+
+  # A claim always opens a new task window: clear the previous task's snapshot,
+  # upload state (W1094 — a stale 2xx would suppress the before_review self-heal
+  # retry), and dirty baseline unconditionally. The dirty baseline is re-recorded
+  # by finalize_before_doing against the post-pull tree.
+  rm -f "$PROJECT_DIR/.stride-changed-files.json" 2>/dev/null || true
+  rm -f "$PROJECT_DIR/.stride-diff-upload-state" 2>/dev/null || true
+  rm -f "$PROJECT_DIR/.stride-dirty-baseline" 2>/dev/null || true
 fi
 
 # Load cached env vars if available (all hooks benefit from this)
@@ -1206,6 +1347,13 @@ self_heal_changed_files_upload || true
 # to preserve the existing PreToolUse blocking semantic for after_doing.
 run_stride_section "$HOOK_NAME"
 PRIMARY_RC=$?
+
+# (D142) Capture TASK_BASE_REF only now — AFTER ## before_doing ran its
+# `git pull` / branch checkout — so the base is the post-pull branch point.
+# Runs even when the section failed: the claim already succeeded (AfterTool
+# cannot veto it) and a partially-run section still leaves HEAD more accurate
+# than the pre-pull value. No-op for every other hook route.
+finalize_before_doing
 
 if [ "$PRIMARY_RC" -ne 0 ]; then
   exit "$PRIMARY_RC"

@@ -231,19 +231,15 @@ if ($HookName -eq 'before_doing') {
                 }
             }
 
-            # (W1087) Compute the claim-time base ref once. A claim always opens a
-            # new task window, so TASK_BASE_REF must be refreshed on every claim.
-            # An empty result (not a git repo / git absent) is tolerated and must
-            # never throw — existing non-git env-cache tests rely on this.
-            $baseRef = ''
-            try {
-                $rev = & git -C $ProjectDir rev-parse HEAD 2>$null
-                if ($LASTEXITCODE -eq 0 -and $rev) { $baseRef = ($rev | Out-String).Trim() }
-            } catch {
-                $baseRef = ''
-            }
-
+            # (D142) This block refreshes IDENTITY only. TASK_BASE_REF is
+            # deliberately NOT written here: the ## before_doing section has not
+            # run yet, and its `git pull` moves HEAD — a base captured now would
+            # anchor the diff at the PRE-pull commit and span another clone's
+            # pulled work (D132/W1678). Invoke-FinalizeBeforeDoing writes the
+            # base (and the dirty baseline) after the section finishes.
             if ($taskJson) {
+                # Identity lines ONLY — overwriting the whole cache here also
+                # strips any inherited TASK_BASE_REF / TASK_BASE_REF_TRUSTED.
                 $cacheLines = @(
                     "TASK_ID=$($taskJson.id)"
                     "TASK_IDENTIFIER=$($taskJson.identifier)"
@@ -251,40 +247,29 @@ if ($HookName -eq 'before_doing') {
                     "TASK_STATUS=$($taskJson.status)"
                     "TASK_COMPLEXITY=$($taskJson.complexity)"
                     "TASK_PRIORITY=$($taskJson.priority)"
-                    "TASK_BASE_REF=$baseRef"
                 )
                 $cacheLines | Set-Content -Path $EnvCache -Encoding UTF8
-                # (W1095, mirrors the bash claim-refresh) Clear the previous
-                # task's snapshot and upload state — a stale 2xx would
-                # suppress the before_review self-heal retry for the new
-                # task, and a stale snapshot must never be re-uploaded under
-                # the new task's id.
-                Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
-                Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
-                # (W1457) Snapshot the paths already dirty at claim time so the
-                # after_doing changed-files upload excludes edits that predate
-                # this claim.
-                Write-DirtyBaseline -BaseRef $baseRef
-            } elseif ($baseRef) {
-                # (W1086/W1087) No parseable response and no usable persisted
-                # file. A claim still opens a new task window, so unconditionally
-                # refresh TASK_BASE_REF to current HEAD and clear the stale
-                # per-file snapshot — otherwise a base ref recorded under a
-                # previous claim survives. Existing TASK_ identity lines are
-                # preserved so a later completion can still recover TASK_ID.
-                $preserved = @()
-                if (Test-Path $EnvCache) {
-                    $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object { $_ -notmatch '^TASK_BASE_REF=' })
+            } elseif (Test-Path $EnvCache) {
+                # (W1086/D142) No parseable response and no usable persisted
+                # file: keep the existing TASK_ identity lines (a later
+                # completion can still recover TASK_ID) but STRIP the inherited
+                # TASK_BASE_REF (and its trust marker) NOW — even if this process
+                # dies before Invoke-FinalizeBeforeDoing rewrites it, a base from
+                # a previous task or session must never survive a claim.
+                $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object { $_ -notmatch '^TASK_BASE_REF=' -and $_ -notmatch '^TASK_BASE_REF_TRUSTED=' })
+                if ($preserved.Count -gt 0) {
+                    $preserved | Set-Content -Path $EnvCache -Encoding UTF8
+                } else {
+                    Remove-Item -Force $EnvCache -ErrorAction SilentlyContinue
                 }
-                $newLines = $preserved + "TASK_BASE_REF=$baseRef"
-                $newLines | Set-Content -Path $EnvCache -Encoding UTF8
-                Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
-                Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
-                # (W1457) Same claim-time dirty snapshot as the parsed-response
-                # path — the claim window opened even though the response was
-                # unparseable.
-                Write-DirtyBaseline -BaseRef $baseRef
             }
+
+            # A claim always opens a new task window: clear the previous task's
+            # snapshot, upload state (W1095 — a stale 2xx would suppress the
+            # before_review self-heal retry), and dirty baseline unconditionally.
+            Remove-Item -Force (Join-Path $ProjectDir '.stride-changed-files.json') -ErrorAction SilentlyContinue
+            Remove-Item -Force (Join-Path $ProjectDir '.stride-diff-upload-state') -ErrorAction SilentlyContinue
+            Remove-Item -Force (Join-Path $ProjectDir '.stride-dirty-baseline') -ErrorAction SilentlyContinue
         }
     } catch {
         # Caching failure is non-fatal
@@ -372,6 +357,21 @@ function Invoke-ChangedFilesUpload {
             # are pre-existing unrelated edits, not task work. Hash mismatch,
             # deletion, or unhashable -> keep (include when in doubt).
             $dirtyBaseline = Read-DirtyBaseline
+            # (D142) Paths that differ between TASK_BASE_REF and HEAD are
+            # COMMITTED task work — the task's auto-commit contains them, so the
+            # baseline filter below must never drop them (D137 silently lost 4
+            # tracked edits and an untracked migration whose content matched
+            # their claim-time hashes after the auto-commit).
+            $committedRange = @()
+            $cfBase = [System.Environment]::GetEnvironmentVariable('TASK_BASE_REF', 'Process')
+            if ($cfBase) {
+                try {
+                    $committedRange = @(& git -C $ProjectDir diff --name-only $cfBase HEAD 2>$null)
+                    if ($LASTEXITCODE -ne 0) { $committedRange = @() }
+                } catch {
+                    $committedRange = @()
+                }
+            }
             $filtered = @($entries | Where-Object {
                 if ($_.path -eq '.stride-diff-upload-state' -or
                     $_.path -eq '.stride-changed-files.json' -or
@@ -379,6 +379,9 @@ function Invoke-ChangedFilesUpload {
                     $_.path -eq '.stride.md' -or
                     $_.path -eq '.stride_auth.md') { return $false }
                 if ($dirtyBaseline -and $dirtyBaseline.ContainsKey($_.path)) {
+                    # (D142) Committed-range override: a path the task's commits
+                    # contain is task work by definition — never baseline-excluded.
+                    if ($committedRange -contains $_.path) { return $true }
                     $blHash = $dirtyBaseline[$_.path]
                     if ($blHash -eq 'unhashable') { return $true }
                     $full = Join-Path $ProjectDir $_.path
@@ -493,6 +496,47 @@ function Invoke-FinalizeAfterDoing {
     # means "no healthy upload on record" and the retry re-checks the same
     # preconditions itself.
     Write-DiffUploadState -TaskId $taskId -HttpCode $httpCode
+}
+
+# (D142) Rewrite TASK_BASE_REF — and re-record the dirty baseline — AFTER the
+# ## before_doing section has run. Mirror of stride-hook.sh's
+# finalize_before_doing: the section's `git pull` moves HEAD, so a base captured
+# before it anchors the after_doing diff at the PRE-pull commit and the snapshot
+# spans another clone's pulled work (the D132/W1678 incident). Called from the
+# main flow right after Invoke-StrideSection returns for the before_doing route,
+# regardless of the section's exit code (the claim already succeeded — AfterTool
+# cannot veto it). Skips silently when HEAD is unresolvable (not a git repo) —
+# the pre-section strip already removed any inherited TASK_BASE_REF in that case.
+function Invoke-FinalizeBeforeDoing {
+    if ($HookName -ne 'before_doing') { return }
+    $baseRef = ''
+    try {
+        $rev = & git -C $ProjectDir rev-parse HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $rev) { $baseRef = ($rev | Out-String).Trim() }
+    } catch {
+        $baseRef = ''
+    }
+    if (-not $baseRef) { return }
+    try {
+        # TASK_BASE_REF_TRUSTED marks a base written by THIS post-before_doing
+        # capture (the task branch point by construction) — the bash twin's
+        # resolve_snapshot_base skips its branch-point rule for marked bases so a
+        # workflow that pushes its own task commits before completing stays safe.
+        $preserved = @()
+        if (Test-Path $EnvCache) {
+            $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object { $_ -notmatch '^TASK_BASE_REF=' -and $_ -notmatch '^TASK_BASE_REF_TRUSTED=' })
+        }
+        $newLines = $preserved + "TASK_BASE_REF=$baseRef" + "TASK_BASE_REF_TRUSTED=1"
+        $newLines | Set-Content -Path $EnvCache -Encoding UTF8
+        [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF', $baseRef, 'Process')
+        [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_TRUSTED', '1', 'Process')
+        # (W1457→D142) The dirty baseline moves with the base capture: post-pull
+        # paths hashed against the post-pull tree, so the exclusion set and the
+        # diff anchor can never disagree.
+        Write-DirtyBaseline -BaseRef $baseRef
+    } catch {
+        # Best-effort — a failed rewrite must never block the hook.
+    }
 }
 
 # (W1094) Self-heal for the changed_files upload — mirror of
@@ -1062,6 +1106,13 @@ try { Invoke-SelfHealChangedFilesUpload } catch { }
 
 # --- Execute the primary hook ---
 $primaryRc = Invoke-StrideSection -Section $HookName
+
+# (D142) Capture TASK_BASE_REF only now — AFTER ## before_doing ran its
+# `git pull` / branch checkout — so the base is the post-pull branch point.
+# Runs even when the section failed: the claim already succeeded (AfterTool
+# cannot veto it) and a partially-run section still leaves HEAD more accurate
+# than the pre-pull value. No-op for every other hook route.
+try { Invoke-FinalizeBeforeDoing } catch { }
 
 if ($primaryRc -ne 0) {
     exit $primaryRc
