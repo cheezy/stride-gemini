@@ -105,6 +105,7 @@ Use BEFORE calling:
 **Correct format:**
 ```json
 {
+  "agent_name": "Gemini CLI",
   "goals": [
     {
       "title": "User Authentication System",
@@ -132,6 +133,20 @@ Use BEFORE calling:
 ```
 
 Set `created_by_agent` on **the goal** to the plugin's own agent name — **the exact same value you send as `agent_name` on claim and complete** (here, `"Gemini CLI"`; use the plain agent name, never the `ai_agent:<model>` token form). The server **propagates the goal's `created_by_agent` to every nested child task**, so you do not repeat it on each task — set it once on the goal and the whole tree is attributed to the creating agent in the `/agents` activity feed. Like everywhere else, `created_by_agent` is accepted **only on create**; it is forbidden on `PATCH` and cannot be backfilled.
+
+`agent_name` rides at the **top level of the request, beside the `goals` root key** — outside the array, not on any goal or task. Set it to **the exact same plain agent name you send as `agent_name` on claim and complete** (here, `"Gemini CLI"`; never the `ai_agent:<model>` token form). Send it on **every** batch and single-goal create.
+
+**`created_by_agent` and top-level `agent_name` work together — send both.** The explicit field still wins; the top-level param is the always-sent fallback for when it is forgotten. The server resolves attribution in this order:
+
+1. The explicit `created_by_agent` field on the goal — **highest precedence**
+2. The token's own agent model, as `ai_agent:<model>`, when the token is an agent token
+3. The **top-level `agent_name`** param on the request
+4. The agent name the token last sent
+5. Unset — the `/agents` feed renders the row with an uninformative `?` avatar
+
+`agent_name` is **display metadata only — never an authorization signal**; the Bearer token alone decides what you may do.
+
+**Single goal via `POST /api/tasks`:** that endpoint takes a request envelope — the goal (with its nested `tasks`) goes under the `task` root key, and `agent_name` sits beside it at the top level. See the Request Envelope section in `stride-creating-tasks`. Only `POST /api/tasks/batch` uses the `"goals"` root key.
 
 **WRONG - Will fail with 422 error:**
 ```json
@@ -410,6 +425,7 @@ GOAL CREATION DECISION:
 
 BATCH GOALS: POST /api/tasks/batch
 {
+  "agent_name": "Gemini CLI",  ← top-level, beside "goals"; same name as claim/complete
   "goals": [  ← MUST be "goals" not "tasks"
     {
       "title": "Goal 1",
@@ -456,6 +472,8 @@ Use these exact values — any other value will be rejected.
 | `priority` | enum | `"low"`, `"medium"`, `"high"`, `"critical"` | Yes |
 | `complexity` | enum | `"small"`, `"medium"`, `"large"` | No |
 | `needs_review` | boolean | `true`, `false` | No (default: false) |
+| `created_by_agent` | string | The plugin's agent name (same as `agent_name` on claim/complete) | No — set on the goal; propagates to nested tasks (create-only; forbidden on `PATCH`) |
+| `agent_name` | string | The plugin's agent name (same as `agent_name` on claim/complete) | Yes — **top-level**, beside the `goals` root key (not a goal or task field) |
 
 ### Batch Endpoint Root Key
 

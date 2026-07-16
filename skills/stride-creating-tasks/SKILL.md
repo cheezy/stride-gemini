@@ -151,7 +151,27 @@ Use BEFORE calling `POST /api/tasks` to create any Stride task or defect.
 **For new tasks** (being created in same request with a goal):
 Use array indices since identifiers don't exist yet - see stride-creating-goals skill.
 
-## Quick Reference: Complete Task Example
+## Request Envelope: `agent_name` beside the `task` root key
+
+`POST /api/tasks` takes a **request envelope**, not a bare task object. The task fields go under the `task` root key, and `agent_name` rides at the **top level, beside it**:
+
+```json
+{
+  "agent_name": "Gemini CLI",
+  "task": {
+    "title": "Add dark mode toggle to settings page",
+    "type": "work"
+  }
+}
+```
+
+Set `agent_name` to **the plugin's own agent name — the exact same value you send as `agent_name` on claim and complete** (here, `"Gemini CLI"`). Use the plain agent name, never the `ai_agent:<model>` token form. Send it on **every** create request: it is the always-sent fallback that lets the server attribute the task even when `created_by_agent` is omitted, and the server also remembers it as the token's last-known agent name for later requests. `agent_name` is **display metadata only — never an authorization signal**; the Bearer token alone decides what you may do.
+
+The task object below is what goes inside that `task` key.
+
+## Quick Reference: Complete Task Object (goes inside the `task` key)
+
+**This block is the value of the `task` key, not the request body.** Wrap it in the envelope above — `{"agent_name": "...", "task": { …this object… }}` — before sending it.
 
 ```json
 {
@@ -232,6 +252,16 @@ Use array indices since identifiers don't exist yet - see stride-creating-goals 
 `technical_details` is an optional free-form object — see the Embedded Object Formats section below.
 
 `created_by_agent` records **which agent created the task** so the `/agents` activity feed attributes the `created` row to that agent instead of an uninformative `?` avatar. Set it to **the plugin's own agent name — the exact same value you send as `agent_name` on claim and complete** (here, `"Gemini CLI"`). Use the plain agent name, never the `ai_agent:<model>` token form, so one agent stays one roster identity. `created_by_agent` is accepted **only on create** (`POST /api/tasks` and `POST /api/tasks/batch`); it is **forbidden on `PATCH`**, so it cannot be backfilled later — stamp it at creation time.
+
+**`created_by_agent` and top-level `agent_name` work together — send both.** The explicit field still wins; the top-level param is the always-sent fallback for when it is forgotten. The server resolves attribution in this order:
+
+1. The explicit `created_by_agent` field on the task — **highest precedence**
+2. The token's own agent model, as `ai_agent:<model>`, when the token is an agent token
+3. The **top-level `agent_name`** param on the request
+4. The agent name the token last sent
+5. Unset — the `/agents` feed renders the row with an uninformative `?` avatar
+
+Because `created_by_agent` cannot be backfilled, step 3 is the safety net that keeps attribution correct on requests that omit it — which is why `agent_name` belongs on **every** create request, not just the ones missing `created_by_agent`.
 
 ## Consuming Provided Context
 
@@ -328,7 +358,7 @@ Result: Another agent claims overlapping task, causing merge conflicts.
 5. **Specify tests** - How will this be verified?
 6. **Document pitfalls** - What should be avoided?
 7. **Create task** - Use checklist above
-8. **Call API** - `POST /api/tasks` with complete JSON
+8. **Call API** - `POST /api/tasks` with the complete JSON under the `task` root key, plus a top-level `agent_name` beside it
 
 ## Real-World Impact
 
@@ -355,6 +385,7 @@ Use these exact values — any other value will be rejected.
 | `complexity` | enum | `"small"`, `"medium"`, `"large"` | No |
 | `needs_review` | boolean | `true`, `false` | No (default: false) |
 | `created_by_agent` | string | The plugin's agent name (same as `agent_name` on claim/complete) | No (create-only; forbidden on `PATCH`) |
+| `agent_name` | string | The plugin's agent name (same as `agent_name` on claim/complete) | Yes — **top-level**, beside the `task` root key (not a task field) |
 | `acceptance_criteria` | string | Newline-separated text | No |
 | `patterns_to_follow` | string | Newline-separated text | No |
 | `dependencies` | array | Task identifiers `["W45", "W46"]` | No |

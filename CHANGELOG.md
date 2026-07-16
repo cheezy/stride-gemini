@@ -2,6 +2,30 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
+## [Unreleased]
+
+### Added — every documented create payload carries a top-level `agent_name` (W1690)
+
+Mirrors the canonical `stride` plugin's W1684 change (released as `stride` v1.37.0) into the Gemini CLI extension. `stride-creating-tasks`, `stride-creating-goals`, and `agents/task-decomposer.md` now document a top-level `agent_name` on every create request — beside the `task` root key for `POST /api/tasks` and beside the `goals` root key for `POST /api/tasks/batch` — set to the exact same plain agent name the extension already sends as `agent_name` on claim and complete (`"Gemini CLI"`, never the `ai_agent:<model>` token form).
+
+Per-task `created_by_agent` is forgotten in practice and cannot be backfilled (`PATCH` rejects it), so tasks lost their attribution permanently and the `/agents` feed rendered them with a `?` avatar. The root-level param is the always-sent fallback that kanban D137 teaches the server to read. Both creation skills gain the full five-step server resolution order (explicit `created_by_agent` → token `ai_agent:<model>` → top-level `agent_name` → token's last agent name → unset), an `agent_name` row in their field tables, and an explicit note that `agent_name` is display metadata only — never an authorization signal.
+
+### Fixed — `stride-creating-tasks` documented the single-create body without its `task` root key
+
+The skill's complete example was a bare task object, but `POST /api/tasks` requires a `{"task": {...}}` envelope and returns `422 Missing 'task' key` without it. Surfaced while placing `agent_name` "beside the task root key" — the key it had to sit beside was never documented. A new Request Envelope section shows the wrapper with `agent_name` as its top-level sibling, and the Quick Reference heading now names the block as the value of the `task` key rather than the request body; the single-goal format in `agents/task-decomposer.md` is corrected the same way. The extension inherited this defect from the canonical plugin, where W1684 fixed it.
+
+### Testing
+
+Documentation-only; no test suite is exercised. Verified by the task's grep sweeps: both creation skills document the top-level `agent_name`, every literal create and batch payload in the repo carries it, and every non-illustrative `json` fence in the two creation skills and the decomposer parses as valid JSON.
+
+### Backward compatibility
+
+Fully backward compatible, and safe to ship ahead of the server. Documentation/skill-text only — no hook logic, `.stride.md` wire shape, env-var, or `.stride_auth.md` change. Unknown top-level keys are ignored by older servers, so sending `agent_name` before kanban D137 reaches production is a no-op. `created_by_agent` guidance is unchanged and still highest precedence — the new param is a fallback, never a replacement.
+
+### Source
+
+W1690 — mirrors the canonical `stride` plugin's W1684 (`stride` v1.37.0), the `stride-codex` port W1686 (`stride-codex` v1.25.0), and the `stride-copilot` port W1688 (`stride-copilot` v2.26.0). Kanban D137 ships the server half. No release is cut here: W1691 owns the `gemini-extension.json` version bump, tag, and the marketplace update.
+
 ## [1.35.0] - 2026-07-14
 
 ### Fixed — Ported all three D142 base-ref / snapshot fixes from the canonical stride plugin (D144)

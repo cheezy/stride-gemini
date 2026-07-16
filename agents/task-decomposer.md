@@ -166,46 +166,56 @@ A decomposed task MAY also carry an optional free-form `technical_details` objec
 Produce the final output matching the Stride API batch creation schema.
 
 **Single goal format (POST /api/tasks):**
+
+The goal goes under the `task` root key; `agent_name` rides at the top level beside it, set to the plugin's own agent name — the exact same plain value sent as `agent_name` on claim and complete (never the `ai_agent:<model>` token form).
+
 ```json
 {
-  "title": "Goal Title",
-  "type": "goal",
-  "complexity": "large",
-  "priority": "high",
-  "description": "Goal description with WHY and WHAT",
-  "needs_review": false,
-  "tasks": [
-    {
-      "title": "Create database schema and migration",
-      "type": "work",
-      "complexity": "small",
-      "priority": "high",
-      "needs_review": false,
-      "description": "...",
-      "why": "...",
-      "what": "...",
-      "where_context": "...",
-      "key_files": [{"file_path": "...", "note": "...", "position": 0}],
-      "dependencies": [],
-      "verification_steps": [{"step_type": "command", "step_text": "mix test ...", "position": 0}],
-      "testing_strategy": {"unit_tests": ["..."], "integration_tests": ["..."]},
-      "security_considerations": ["..."],
-      "acceptance_criteria": "...",
-      "patterns_to_follow": "...",
-      "pitfalls": ["..."]
-    },
-    {
-      "title": "Implement context module functions",
-      "type": "work",
-      "dependencies": [0]
-    }
-  ]
+  "agent_name": "Gemini CLI",
+  "task": {
+    "title": "Goal Title",
+    "type": "goal",
+    "complexity": "large",
+    "priority": "high",
+    "description": "Goal description with WHY and WHAT",
+    "needs_review": false,
+    "tasks": [
+      {
+        "title": "Create database schema and migration",
+        "type": "work",
+        "complexity": "small",
+        "priority": "high",
+        "needs_review": false,
+        "description": "...",
+        "why": "...",
+        "what": "...",
+        "where_context": "...",
+        "key_files": [{"file_path": "...", "note": "...", "position": 0}],
+        "dependencies": [],
+        "verification_steps": [{"step_type": "command", "step_text": "mix test ...", "position": 0}],
+        "testing_strategy": {"unit_tests": ["..."], "integration_tests": ["..."]},
+        "security_considerations": ["..."],
+        "acceptance_criteria": "...",
+        "patterns_to_follow": "...",
+        "pitfalls": ["..."]
+      },
+      {
+        "title": "Implement context module functions",
+        "type": "work",
+        "dependencies": [0]
+      }
+    ]
+  }
 }
 ```
 
 **Batch format (POST /api/tasks/batch):**
+
+`agent_name` sits at the top level beside the `goals` root key — outside the array, not on any goal or task.
+
 ```json
 {
+  "agent_name": "Gemini CLI",
   "goals": [
     {
       "title": "Goal 1",
@@ -216,7 +226,7 @@ Produce the final output matching the Stride API batch creation schema.
 }
 ```
 
-**CRITICAL:** Batch endpoint root key is `"goals"`, NOT `"tasks"`.
+**CRITICAL:** Batch endpoint root key is `"goals"`, NOT `"tasks"`. Both create shapes also carry a top-level `agent_name` — display metadata only, never an authorization signal.
 
 ## Task Sizing Heuristics
 
@@ -299,6 +309,7 @@ Migration → Context → LiveView → Template
 
 ```json
 {
+  "agent_name": "Gemini CLI",
   "goals": [
     {
       "title": "Add task commenting system with mentions and notifications",
@@ -306,6 +317,7 @@ Migration → Context → LiveView → Template
       "complexity": "large",
       "priority": "high",
       "needs_review": false,
+      "created_by_agent": "Gemini CLI",
       "description": "Implement a commenting system for tasks that supports @mentions of team members and sends email notifications. This improves team collaboration by enabling asynchronous discussion directly on tasks.",
       "tasks": [
         {
