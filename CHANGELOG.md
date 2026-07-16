@@ -2,7 +2,7 @@
 
 All notable changes to the Stride extension for Gemini CLI will be documented in this file.
 
-## [Unreleased]
+## [1.36.0] - 2026-07-16
 
 ### Added — every documented create payload carries a top-level `agent_name` (W1690)
 
@@ -24,7 +24,7 @@ Fully backward compatible, and safe to ship ahead of the server. Documentation/s
 
 ### Source
 
-W1690 — mirrors the canonical `stride` plugin's W1684 (`stride` v1.37.0), the `stride-codex` port W1686 (`stride-codex` v1.25.0), and the `stride-copilot` port W1688 (`stride-copilot` v2.26.0). Kanban D137 ships the server half. No release is cut here: W1691 owns the `gemini-extension.json` version bump, tag, and the marketplace update.
+W1690 — mirrors the canonical `stride` plugin's W1684 (`stride` v1.37.0), the `stride-codex` port W1686 (`stride-codex` v1.25.0), and the `stride-copilot` port W1688 (`stride-copilot` v2.26.0). Kanban D137 ships the server half. Released by W1691 as `stride-gemini` v1.36.0, with the URL-pinned `stride-gemini-marketplace` updated to match.
 
 ## [1.35.0] - 2026-07-14
 
