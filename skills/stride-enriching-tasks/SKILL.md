@@ -193,34 +193,45 @@ Combine all discovered fields into the final task specification.
 
 After enrichment is complete, submit via `POST /api/tasks`:
 
+`POST /api/tasks` takes a **request envelope**: the enriched task fields go under the `task` root key, and `agent_name` rides at the **top level, beside it** — set to `"Gemini CLI"`, the exact same plain agent name sent as `agent_name` on claim and complete. A bare task object is rejected with `422 Missing 'task' key`.
+
 ```bash
 curl -s -X POST \
   -H "Authorization: Bearer $STRIDE_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{...enriched task JSON...}' \
+  -d '{
+    "agent_name": "Gemini CLI",
+    "task": {...enriched task JSON...}
+  }' \
   $STRIDE_API_URL/api/tasks
 ```
+
+See the **Request Envelope** section in `stride-creating-tasks` for the full contract, including the five-step attribution order and why `agent_name` is display metadata only, never an authorization signal.
 
 ### Enriching an Existing Minimal Task
 
 If a task already exists in Stride with minimal fields, use `PATCH /api/tasks/:id` to add the enriched fields:
+
+`PATCH /api/tasks/:id` needs the **same `task` root key** — a bare field object is rejected with `422 Missing 'task' key`. It takes **no `agent_name`**: attribution is create-only, and `created_by_agent` is forbidden on `PATCH`, so an existing task's attribution cannot be changed here.
 
 ```bash
 curl -s -X PATCH \
   -H "Authorization: Bearer $STRIDE_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "key_files": [...],
-    "testing_strategy": {...},
-    "security_considerations": [...],
-    "patterns_to_follow": "...",
-    "verification_steps": [...],
-    "pitfalls": [...],
-    "acceptance_criteria": "...",
-    "where_context": "...",
-    "complexity": "medium",
-    "why": "...",
-    "what": "..."
+    "task": {
+      "key_files": [...],
+      "testing_strategy": {...},
+      "security_considerations": [...],
+      "patterns_to_follow": "...",
+      "verification_steps": [...],
+      "pitfalls": [...],
+      "acceptance_criteria": "...",
+      "where_context": "...",
+      "complexity": "medium",
+      "why": "...",
+      "what": "..."
+    }
   }' \
   $STRIDE_API_URL/api/tasks/:id
 ```
