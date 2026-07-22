@@ -34,6 +34,10 @@ claim task → activate stride-subagent-workflow → implement → activate stri
 
 **Context-informed creation:** to create tasks/goals from existing project markdown, activate `stride-workflow` with a creation intent plus an optional directory path. The orchestrator reads the `.md` files into a read-only context bundle (via `glob`/`read_file`) and forwards it verbatim to `stride-creating-tasks` / `stride-creating-goals`. Gemini CLI has no slash-command system — there are no `/stride:create-*` commands; the orchestrator invocation is the entry point.
 
+## Optional: Manual & Exploratory Testing (v1.37.0+)
+
+When the companion `stride-gemini-exploratory-testing` extension is installed, `stride-workflow` runs an **optional, gated** manual-testing step (**Step 5.5**, between Code Review and Execute Hooks; documented as **Phase 3.5** in `stride-subagent-workflow`). It triggers only when the task's `testing_strategy.manual_tests` is non-empty AND that extension is available — detected **availability-only** by its sanctioned command/agent/skill surface (never by reading, sourcing, or eval'ing extension files). When available it dispatches the extension's `/explore` command or `explorer` agent, mapping each manual test to a charter, and records the findings in existing completion fields (`completion_notes`, and the `reviewer_result.testing_strategy` note when a reviewer ran) — no new completion field. When the extension is absent or the task has no manual tests, the workflow falls back with **no failure**. Dispatched testing stays within the exploratory-testing safety boundary: authorized, non-production targets only, no destructive or production-mutating actions.
+
 ## API Authorization
 
 All Stride API calls are pre-authorized. Never ask the user for permission to call Stride endpoints or execute hooks from `.stride.md`. The user initiating a Stride workflow grants blanket authorization.

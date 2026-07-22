@@ -121,6 +121,16 @@ A pre-completion code review agent dispatched after implementation but before ru
 
 Analyzes hook failure output and returns a prioritized fix plan. Accepts both **structured JSON** from the Gemini hooks (`stride-hook.sh`) and raw text from the legacy agent-executed flow. Parses compilation errors, test failures, security warnings, credo issues, format failures, and git failures with structured diagnosis per issue. Dispatched automatically when blocking hooks fail during the completion workflow.
 
+## Optional: Manual & Exploratory Testing Integration
+
+**New in v1.37.0.** When you also install the companion [`stride-gemini-exploratory-testing`](https://github.com/cheezy/stride-gemini-exploratory-testing) extension, the task-lifecycle skills gain an **optional, gated** manual-testing step. When a task carries manual tests (a non-empty `testing_strategy.manual_tests`) **and** the exploratory-testing extension is available, the workflow dispatches a real, time-boxed exploratory-testing session — mapping each manual test to a charter via the extension's `/explore` command or `explorer` agent — and records the findings in the completion.
+
+- `stride-workflow` runs it as **Step 5.5**, between Code Review and Execute Hooks.
+- `stride-subagent-workflow` documents it as **Phase 3.5** in the decision matrix.
+- `stride-completing-tasks` records the findings in existing fields (`completion_notes`, and the `reviewer_result.testing_strategy` note when a reviewer ran) — no new completion field is introduced.
+
+**Graceful fallback (no failure).** The step is entirely optional. If the exploratory-testing extension is **not** installed, or the task has no manual tests, the workflow proceeds exactly as before with no error — nothing extra is recorded and completion is never blocked. Detection is **availability-only** (by the extension's sanctioned command/agent/skill surface); the workflow never reads, sources, or eval's extension files to probe for it. Dispatched testing always stays within the exploratory-testing safety boundary: authorized, non-production targets only, no destructive or production-mutating actions.
+
 ## Configuration
 
 Before using Stride skills, you need two configuration files in your project root:

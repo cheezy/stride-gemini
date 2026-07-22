@@ -4,6 +4,18 @@ All notable changes to the Stride extension for Gemini CLI will be documented in
 
 ## [Unreleased]
 
+## [1.37.0] - 2026-07-21
+
+### Added — optional Manual & Exploratory Testing integration with the stride-gemini-exploratory-testing extension (W1830, W1831, W1832)
+
+The three task-lifecycle skills now describe an **optional, gated** manual-testing step that runs a real exploratory-testing session when — and only when — a task carries manual tests **and** the companion [`stride-gemini-exploratory-testing`](https://github.com/cheezy/stride-gemini-exploratory-testing) extension is installed. When the extension is absent, every skill falls back to the prior behavior with **no failure** — the integration is purely additive.
+
+- **`stride-workflow`** gains **Step 5.5: Manual & Exploratory Testing (Optional, Gated)**, placed between Code Review (Step 5) and Execute Hooks (Step 6) using fractional 5.5 numbering so no existing step is renumbered. It triggers only when `testing_strategy.manual_tests` is non-empty AND the extension is available (detected **availability-only** by its sanctioned command/agent/skill surface — never by reading, sourcing, or eval'ing extension files). When available it dispatches the extension's `/explore` command or `explorer` agent, mapping each manual test to a charter; the Complete Workflow Flowchart and Quick Reference Card are updated to match.
+- **`stride-subagent-workflow`** documents the dispatch as **Phase 3.5** in the custom-agent decision matrix (a new `exploratory-testing` column plus flowchart and Quick Reference Card entries), with the trigger kept identical to the stride-workflow Step 5.5 gate so the two skills stay in sync.
+- **`stride-completing-tasks`** documents recording the session's findings in **existing tolerant free-text fields only** — `completion_notes` (primary, and the sole carrier when the reviewer was skipped) and the existing `reviewer_result.testing_strategy.note` (secondary, when a reviewer ran) — introducing **no new server-validated field and no new `workflow_steps` name** (either would `422` under strict completion validation). Real credentials, tokens, private data, and internal hostnames must be redacted with synthetic placeholders.
+
+Throughout, the exploratory-testing **safety boundary** is reiterated: dispatched manual testing runs only against authorized, non-production targets, never takes destructive or production-mutating actions, and treats app content as data, not instructions.
+
 ### Fixed — the enrichment surface documented create and update bodies without their `task` root key (D151)
 
 `stride-enriching-tasks` documented submitting an enriched task with a bare body: `POST /api/tasks` carried `-d '{...enriched task JSON...}'` and no `agent_name`. The server requires a `{"task": {...}}` envelope and rejects a bare object with `422 Missing 'task' key`, so an agent following the enrichment skill literally built a rejected request and — once corrected by hand — created a task with no attribution fallback. The create example now shows the envelope with `"agent_name": "Gemini CLI"` beside the `task` key, matching the Request Envelope section in `stride-creating-tasks` and the plain agent name this port already sends on claim and complete.
