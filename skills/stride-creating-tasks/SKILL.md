@@ -459,6 +459,11 @@ Use these exact values — any other value will be rejected.
 **Valid keys:** `unit_tests`, `integration_tests`, `manual_tests`, `edge_cases`, `coverage_target`
 **All values** must be strings or arrays of strings.
 
+> **Authoring tip — phrase `manual_tests` as charters (advisory).** When the `stride-gemini-exploratory-testing` extension is installed, each `manual_tests` entry is run as an exploratory-testing charter (the stride-workflow Manual & Exploratory Testing step / Step 5.5). Charters work best as a *scenario* — a target plus the information or risk to discover — rather than a bare test fragment. This is **advisory only**: it does not change the required `testing_strategy` shape, does not make `manual_tests` phrasing mandatory, and does not affect the review_queue empty-pill gate, so terse entries still validate.
+>
+> - **Before:** `"Test in multiple browsers"`
+> - **After:** `"Explore the theme toggle across browsers to discover rendering inconsistencies"`
+
 ### security_considerations
 
 ```json
