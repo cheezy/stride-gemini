@@ -648,6 +648,25 @@ Until the server flips `:strict_completion_validation` to true, missing or inval
 
 **Optional:** Include `review_report` when a task-reviewer custom agent produced a structured review. Omit it when no review was performed (e.g., small tasks with 0-1 key_files).
 
+## Recording Manual & Exploratory Testing Findings
+
+When the `stride-gemini-exploratory-testing` extension performed manual testing during the task — the stride-workflow "Manual & Exploratory Testing" (Step 5.5) / stride-subagent-workflow (Phase 3.5) dispatch — record its findings in **existing, already-tolerant free-text completion fields only.** Do **not** introduce a new server-validated field or a new `workflow_steps` name for it — either change would break strict completion validation (`:strict_completion_validation`) with a `422`.
+
+**Where the findings go:**
+
+- **`completion_notes` — the primary carrier, and the SOLE carrier when the reviewer was skipped.** Summarize the exploratory session's outcome — the Explored/Found/Unknown summary and any bugs found — in one or two sentences inside `completion_notes`. For a small task where the `task-reviewer` was skipped per the decision matrix, `completion_notes` is the only place the findings are recorded.
+- **`reviewer_result.testing_strategy.note` — a secondary carrier, only when a reviewer ran.** When the `task-reviewer` custom agent was dispatched, also reflect the manual-testing outcome inside the **existing** `testing_strategy` verdict note — e.g. append `"Manual/exploratory session: <one-line outcome>."` to the note. This reuses the tolerant free-text `note` already carried in `reviewer_result`. **Do NOT add a sibling key inside `reviewer_result`**, and do NOT introduce a new top-level key — reuse `testing_strategy.note`.
+
+**No schema change — the completion contract is unchanged.** This recording is purely additive to fields that are already free-text and already accepted by the server. Specifically:
+
+- **No new required / server-validated field** — the required-field set stays exactly as documented in the [Completion Request Field Reference](#completion-request-field-reference).
+- **No new `workflow_steps` name** — the six fixed names (`explorer`, `planner`, `implementation`, `reviewer`, `after_doing`, `before_review`) stay unchanged. Manual & exploratory testing is **not** a seventh workflow step; it is the Step 5.5 / Phase 3.5 dispatch, and its findings ride in the free-text fields above — never as a `manual_*` (or any new) `workflow_steps` entry.
+- **Payload shape unchanged** — only the *contents* of the already-tolerant `completion_notes` string and the existing `reviewer_result.testing_strategy.note` string change.
+
+**Redaction (mandatory).** Exploratory findings frequently surface live values. **Never** copy real credentials, tokens, session cookies, API keys, private or personal data, or internal hostnames into `completion_notes` or the `testing_strategy` note. Replace them with synthetic placeholders (e.g. `<redacted-token>`, `user@example.com`, `internal-host`) before recording. The completion record is persisted and rendered in the review queue.
+
+**Fallback — nothing extra recorded.** When the extension was **not** used — it is absent, or the task carried no `manual_tests` — the completion is **unchanged**: no manual-testing summary is added, `completion_notes` reflects only the implementation work, and `reviewer_result` (when a reviewer ran) carries its normal verdict note. There is no "N/A manual testing" placeholder line to add — simply record nothing extra.
+
 ## Review vs Auto-Approval Decision
 
 After the complete endpoint succeeds:
