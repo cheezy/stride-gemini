@@ -1,6 +1,6 @@
 {
   "name": "stride-gemini",
-  "version": "1.37.0",
-  "description": "Task lifecycle skills and custom agents for Stride kanban — the Gemini CLI extension. Claim, work, review, and complete Stride tasks and goals with workflow enforcement, hook execution, and five custom agents.",
+  "version": "1.38.0",
+  "description": "Task lifecycle skills and custom agents for Stride kanban — the Gemini CLI extension. Claim, work, review, and complete Stride tasks and goals with workflow enforcement, hook execution, and five custom agents. Optionally integrates the stride-gemini-exploratory-testing and stride-gemini-security-review extensions for gated manual testing and a deep security-considerations review.",
   "contextFileName": "GEMINI.md"
 }

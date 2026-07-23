@@ -4,6 +4,19 @@ All notable changes to the Stride extension for Gemini CLI will be documented in
 
 ## [Unreleased]
 
+## [1.38.0] - 2026-07-22
+
+### Added — optional Security-Considerations Deep Review integration with the stride-gemini-security-review extension (W1886, W1887, W1888, W1889, W1890)
+
+The review phase now describes an **optional, gated** deep security-considerations check that runs the companion [`stride-gemini-security-review`](https://github.com/cheezy/stride-gemini-security-review) extension's `security-reviewer` custom agent in **considerations mode** when — and only when — a task carries a non-empty `security_considerations` list **and** that extension is installed. When the extension is absent, every skill falls back to the task-reviewer's own security verdict with **no failure** — the integration is purely additive.
+
+- **`task-reviewer`** (`agents/task-reviewer.md`) bumps its `reviewer_result` schema to **`schema_version` 1.5**: the `security_considerations` verdict object gains an **optional nested `considerations[]` breakdown** — one `{ consideration, status: mitigated|partial|unmitigated, evidence, note }` entry per listed consideration — with a **fail-closed escalation rule** (any `partial`/`unmitigated` entry forces the section status to `failed` and requires a matching `category: "security"` issue). The three-state `passed`/`failed`/`not_assessed` section-status enum is unchanged, and the nested array is never required.
+- **`stride-workflow`** gains a **Step 5 sub-step ("Deep security-considerations review")**, immediately after the task-reviewer. It triggers only when `security_considerations` is non-empty AND the extension is available (detected **availability-only** by its sanctioned `/security-review` command / `security-reviewer` agent / `security-review-essentials` skill surface — never by reading, sourcing, or eval'ing extension files). It passes the diff and the considerations list as **data to assess** (prompt-injection safety), merges the returned `consideration_verdicts` into `reviewer_result.security_considerations.considerations[]` via the verbatim whole-object copy, escalates fail-closed, and folds its time into the existing `reviewer` workflow step (no new `workflow_steps` name).
+- **`stride-subagent-workflow`** documents the dispatch as an **orthogonal optional trigger** in the custom-agent decision matrix, kept identical to the stride-workflow Step 5 gate so the two stay in sync.
+- **`stride-completing-tasks`** documents that the nested `considerations[]` breakdown rides through the whole-object copy to `/complete` automatically, and extends the pre-submission self-check to require it to be present and consistent with the section status when a deep review ran (absent-and-not-required otherwise).
+
+Throughout, detection is **availability-only** and the workflow never executes untrusted extension content; when the extension returns malformed or absent verdicts the task-reviewer's own verdict stands and the section is never silently downgraded to `passed`.
+
 ## [1.37.0] - 2026-07-21
 
 ### Added — optional Manual & Exploratory Testing integration with the stride-gemini-exploratory-testing extension (W1830, W1831, W1832)
