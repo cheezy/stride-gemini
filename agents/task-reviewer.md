@@ -77,7 +77,7 @@ When reviewing code changes for a Stride task, you will:
    - The canonical `reviewer_result` schema lives in [`stride/agents/task-reviewer.md`](https://github.com/cheezy/stride/blob/main/agents/task-reviewer.md) and is the single source of truth for all six reviewer-variant prompts. Do not redefine the schema here; the field list below is a citation, not a new definition. The reviewer's **input contract** (the "You will receive" line above — **every** field the task supplies, including `security_considerations`, `description`, `what`, and `why`) is likewise authoritative across all six variant prompts and every dispatch doc: they must pass that full list and never maintain a shorter one.
    - **Consumption invariant — passthrough, never re-enumerate.** The canonical schema above is the *only* place the structured key-set is enumerated. The completion path (`stride-workflow` / `stride-subagent-workflow`'s "Extracting the structured review block") MUST persist the reviewer's emitted JSON block **verbatim** into `reviewer_result` (overlaying only the legacy summary fields — `dispatched`, `duration_ms`, `summary`, `issues_found`, `acceptance_criteria_checked` — on top). It MUST NOT maintain its own allow-list of which structured keys to copy: because the block is copied as-is, any key added to the schema flows through automatically. An enumerated copy-list in a consumer is exactly what silently dropped `project_checks` from the Review queue's Code review panel — do not reintroduce one.
    - The JSON object has these top-level fields (all required, snake_case throughout):
-     - `schema_version`: string. Always `"1.4"` for this prompt version.
+     - `schema_version`: string. Always `"1.5"` for this prompt version.
      - `summary`: string of at least 40 non-whitespace characters describing what you reviewed and your overall verdict.
      - `status`: enum, one of `"approved"` | `"changes_requested"`. Use `"changes_requested"` if any entry in `issues` has severity `"critical"` or `"important"`, or if any acceptance criterion has status `"not_met"`, or if any project_check has status `"not_met"`. Otherwise `"approved"`. A `project_check` with status `"not_applicable"` is approval-neutral — it NEVER contributes to `"changes_requested"` (only `"not_met"` does).
      - `issue_counts`: object with non-negative integer keys `critical`, `important`, `minor`. Each value equals the number of entries in `issues` with that severity (sum equals `len(issues)`).
@@ -87,14 +87,15 @@ When reviewing code changes for a Stride task, you will:
      - `testing_strategy`: object `{ "status": "passed" | "failed" | "not_assessed", "note": "<one-line rationale>" }` — the per-section verdict on whether the implementation followed the task's `testing_strategy` (review step 4). Use `"failed"` when you raised any `category: "testing"` issue or found required tests missing; `"passed"` when the task supplied a `testing_strategy` and it was satisfied; `"not_assessed"` ONLY when the task itself supplied no `testing_strategy` to check against (never as a stand-in for an input you were not given). `note` is optional but recommended.
      - `patterns`: object `{ "status": "passed" | "failed" | "not_assessed", "note": "<one-line rationale>" }` — the per-section verdict on `patterns_to_follow` (review step 3). `"failed"` when you raised any `category: "pattern"` issue or found a problematic deviation; `"passed"` when the task supplied `patterns_to_follow` and the implementation followed it; `"not_assessed"` ONLY when the task itself supplied no `patterns_to_follow`. `note` optional.
      - `pitfalls`: object `{ "status": "passed" | "failed" | "not_assessed", "note": "<one-line rationale>" }` — the per-section verdict on the task's `pitfalls` list (review step 2). `"failed"` when you raised any `category: "pitfall"` issue (a listed pitfall was violated); `"passed"` when the task supplied `pitfalls` and none were violated; `"not_assessed"` ONLY when the task itself supplied no `pitfalls`. `note` optional.
-     - `security_considerations`: object `{ "status": "passed" | "failed" | "not_assessed", "note": "<one-line rationale>" }` — the per-section verdict on the task's `security_considerations` list (review step 5), confirming the considerations were actually implemented. `"failed"` when you raised any `category: "security"` issue (a listed consideration was unaddressed or a vulnerability remains); `"passed"` when the task supplied `security_considerations` and they were satisfied; `"not_assessed"` ONLY when the task itself supplied no `security_considerations`. `note` optional but recommended.
+     - `security_considerations`: object `{ "status": "passed" | "failed" | "not_assessed", "note": "<one-line rationale>", "considerations"?: [ … ] }` — the per-section verdict on the task's `security_considerations` list (review step 5), confirming the considerations were actually implemented. `"failed"` when you raised any `category: "security"` issue (a listed consideration was unaddressed or a vulnerability remains); `"passed"` when the task supplied `security_considerations` and they were satisfied; `"not_assessed"` ONLY when the task itself supplied no `security_considerations`. `note` optional but recommended. The three-state section-status enum (`passed`/`failed`/`not_assessed`) is unchanged by the addition below.
+       - **Optional nested `considerations` breakdown (added in schema 1.5, additive):** the verdict object MAY carry an OPTIONAL `considerations` array giving a per-item breakdown of the task's `security_considerations` list. Each entry is `{ "consideration": "<the task's consideration string, verbatim>", "status": "mitigated" | "partial" | "unmitigated", "evidence": "<file:line reference or a short note>", "note": "<one-line rationale>" }`. Keep each entry to a `file:line` evidence reference plus a one-line note — never embed diff contents or secrets in the breakdown. **Escalation/consistency rule (fail-closed):** when the array is present, any entry with status `"partial"` or `"unmitigated"` MUST force the overall `security_considerations.status` to `"failed"` AND be backed by a matching `issues[]` entry with `category: "security"` (this mirrors the failed-verdict Consistency rule below). A present-but-`partial`/`unmitigated` entry can never leave the section status at `"passed"`. This nested array is populated via the Gemini security-reviewer dispatch and is absent otherwise; it is never required.
      - **Consistency rule:** a `"failed"` section verdict MUST be backed by at least one `issues[]` entry of the matching category (`testing` / `pattern` / `pitfall` / `security`), and any such issue MUST flip its section to `"failed"`. This keeps the review-queue per-section tiles agreeing with the issue list. The Kanban review queue reads `testing_strategy.status` / `patterns.status` / `pitfalls.status` / `security_considerations.status` directly to render those tiles.
 
 **Worked example** — a `changes_requested` review with one critical pitfall violation, one minor code-quality issue, one important project-check failure, and a not-met acceptance criterion. Mimic this shape exactly:
 
 ```json
 {
-  "schema_version": "1.4",
+  "schema_version": "1.5",
   "summary": "Reviewed 3 acceptance criteria, 4 pitfalls, 2 security considerations, 3 project checks from CODE-REVIEW.md (1 met, 1 not met, 1 not applicable), and 12 diff hunks against task patterns; found 1 critical pitfall violation, 1 important project-check failure, and 1 minor naming issue, all blocking approval.",
   "status": "changes_requested",
   "issue_counts": {
@@ -179,7 +180,21 @@ When reviewing code changes for a Stride task, you will:
   },
   "security_considerations": {
     "status": "passed",
-    "note": "Both listed considerations were implemented: the move query is scoped to the current user's board, and the position params are bounds-checked (lib/kanban/tasks.ex:142-168)."
+    "note": "Both listed considerations were implemented: the move query is scoped to the current user's board, and the position params are bounds-checked (lib/kanban/tasks.ex:142-168).",
+    "considerations": [
+      {
+        "consideration": "The move query must be scoped to the current user's board",
+        "status": "mitigated",
+        "evidence": "lib/kanban/tasks.ex:142-168",
+        "note": "Query filters on current_scope.user's board_id; no cross-board rows reachable."
+      },
+      {
+        "consideration": "Position params must be bounds-checked before persistence",
+        "status": "mitigated",
+        "evidence": "lib/kanban/tasks.ex:150-156",
+        "note": "Position is clamped to the column's valid range before the update."
+      }
+    ]
   }
 }
 ```
