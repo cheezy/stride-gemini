@@ -267,6 +267,17 @@ These five fields must be filled in on every nested task in the batch — the go
 
 A nested task MAY also carry an optional free-form `technical_details` object (any keys — see `stride-creating-tasks`); it is **not** one of the five review_queue-scored fields and is never required.
 
+A nested task MAY also carry an optional `behaviour_test_matrix` array (see `stride-creating-tasks` for the full contract); it is **not** one of the five review_queue-scored fields and is never required. Omitting it on a nested task is always fine and never produces an empty pill. When you do supply it, the shape is identical to a flat task's — same rules, no batch-specific variation:
+
+- Each row is an object: `category`, `behaviour`, `test_name`, `type`, `status`, `na_reason`, `position`. `category`, `behaviour`, and `status` are required; always supply `position` (integer >= 0) too — the API tolerates its absence, but it is how a row records its intended order. Emit the rows in that order as well; nothing re-sorts the array.
+- `category` is one of the **7 fixed categories**, exact strings: `"Happy path"`, `"Boundary"`, `"Error / exception"`, `"Null / empty"`, `"Concurrency"`, `"Lifecycle / wiring"`, `"Contract / serialization"`.
+- `type` is `"unit"`, `"integration"`, or `"manual"`, or a `/`-joined combination like `"unit / manual"`.
+- `status` is `"planned"`, `"passing"`, `"failing"`, or `"not_applicable"` (default `"planned"`) — rows authored at creation time are `"planned"`.
+- Each row names a **real test** in `test_name`, **or** is waived (`status: "not_applicable"` or an N/A `test_name`) and supplies a one-line `na_reason`. A row with neither is rejected.
+- A **non-empty** matrix must include at least one row for **every** one of the 7 categories; an absent or empty matrix passes, a partial one is rejected.
+
+Populate it per nested task only where you have concrete behaviours to record — a matrix is never a substitute for that task's `testing_strategy`, which remains one of the five. Row text is stored and later rendered, so never record secrets, credentials, or raw HTML in `behaviour`, `test_name`, or `na_reason`.
+
 **Minimal nested tasks fail the same way as minimal flat tasks** — causing 3+ hour exploration AND empty review_queue pills at completion.
 
 ## Consuming Provided Context

@@ -111,6 +111,7 @@ Use BEFORE calling `POST /api/tasks` to create any Stride task or defect.
 
 - [ ] `estimated_files` - Helps set expectations: `"1-2"`, `"3-5"`, or `"5+"`
 - [ ] `required_capabilities` - Array of agent skills needed
+- [ ] `behaviour_test_matrix` - **OPTIONAL** array of behaviour/test rows; omitting it is always fine and never an empty pill — see [behaviour_test_matrix](#behaviour_test_matrix)
 
 ## Field Type Validations (CRITICAL)
 
@@ -242,6 +243,64 @@ The task object below is what goes inside that `task` key.
     "Don't forget to test theme on all major pages",
     "Don't use localStorage directly - use Phoenix user preferences"
   ],
+  "behaviour_test_matrix": [
+    {
+      "category": "Happy path",
+      "behaviour": "Toggling dark mode persists the preference and applies the theme site-wide",
+      "test_name": "test/kanban_web/live/user_live/settings_test.exs — \"persists the selected theme\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 0
+    },
+    {
+      "category": "Boundary",
+      "behaviour": "An unrecognized stored theme value falls back to the light theme",
+      "test_name": "test/kanban_web/live/user_live/settings_test.exs — \"falls back to light on an unknown theme\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 1
+    },
+    {
+      "category": "Error / exception",
+      "behaviour": "A failed preference update surfaces a flash and leaves the theme unchanged",
+      "test_name": "test/kanban_web/live/user_live/settings_test.exs — \"keeps the theme when the update fails\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 2
+    },
+    {
+      "category": "Null / empty",
+      "behaviour": "A user with no theme preference set renders the light theme",
+      "test_name": "test/kanban_web/live/user_live/settings_test.exs — \"renders light when no preference is set\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 3
+    },
+    {
+      "category": "Concurrency",
+      "behaviour": "N/A — the theme is a single-user preference write with no concurrent-writer path",
+      "test_name": "N/A",
+      "status": "not_applicable",
+      "na_reason": "Only the owning user writes their own theme preference; there is no shared-state race to cover",
+      "position": 4
+    },
+    {
+      "category": "Lifecycle / wiring",
+      "behaviour": "The stored theme is applied before first paint on a full page load",
+      "test_name": "test/kanban_web/live/user_live/settings_test.exs — \"applies the stored theme on mount\"",
+      "type": "integration / manual",
+      "status": "planned",
+      "position": 5
+    },
+    {
+      "category": "Contract / serialization",
+      "behaviour": "The theme preference round-trips through the user changeset as \"light\" | \"dark\"",
+      "test_name": "test/kanban/accounts_test.exs — \"round-trips the theme preference\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 6
+    }
+  ],
   "technical_details": {
     "data_shapes": {"theme_preference": "one of \"light\" | \"dark\", stored on the user record"},
     "gotchas": ["Apply the theme before first paint to avoid a flash of the wrong theme"]
@@ -249,7 +308,7 @@ The task object below is what goes inside that `task` key.
 }
 ```
 
-`technical_details` is an optional free-form object — see the Embedded Object Formats section below.
+`behaviour_test_matrix` and `technical_details` are both optional — see the Embedded Object Formats section below. Neither is one of the five review_queue-scored fields, so omitting either never produces an empty pill. The matrix above shows all **seven** fixed categories because that is the rule once the array is non-empty: an absent or empty matrix is fine, but a partial one is rejected.
 
 `created_by_agent` records **which agent created the task** so the `/agents` activity feed attributes the `created` row to that agent instead of an uninformative `?` avatar. Set it to **the plugin's own agent name — the exact same value you send as `agent_name` on claim and complete** (here, `"Gemini CLI"`). Use the plain agent name, never the `ai_agent:<model>` token form, so one agent stays one roster identity. `created_by_agent` is accepted **only on create** (`POST /api/tasks` and `POST /api/tasks/batch`); it is **forbidden on `PATCH`**, so it cannot be backfilled later — stamp it at creation time.
 
@@ -391,6 +450,7 @@ Use these exact values — any other value will be rejected.
 | `dependencies` | array | Task identifiers `["W45", "W46"]` | No |
 | `pitfalls` | array | Strings `["Don't do X", "Avoid Y"]` | No |
 | `technical_details` | object | Free-form JSON object of any additional technical info | No |
+| `behaviour_test_matrix` | array | Row objects: `category` (one of the 7 fixed categories), `behaviour`, `test_name`, `type` (`"unit"`/`"integration"`/`"manual"` or a `/`-joined combo), `status` (`"planned"`/`"passing"`/`"failing"`/`"not_applicable"`), `na_reason`, `position` | No (but if non-empty, all 7 categories must appear) |
 
 ## Embedded Object Formats — WRONG vs RIGHT
 
@@ -463,6 +523,71 @@ Use these exact values — any other value will be rejected.
 >
 > - **Before:** `"Test in multiple browsers"`
 > - **After:** `"Explore the theme toggle across browsers to discover rendering inconsistencies"`
+
+### behaviour_test_matrix
+
+**Optional field.** Omit it entirely when you have nothing concrete to record — it is **not** one of the five review_queue-scored fields, so an absent matrix is never an empty pill. The rules below apply only once you do supply it.
+
+```json
+❌ WRONG (strings — must be row objects):
+"behaviour_test_matrix": ["Happy path: toggle persists", "Boundary: bad value falls back"]
+
+❌ WRONG (invented category — the 7 categories are fixed):
+"behaviour_test_matrix": [{"category": "Performance", "behaviour": "…", "test_name": "…", "status": "planned", "position": 0}]
+
+❌ WRONG (non-empty but missing categories — a partial matrix is rejected):
+"behaviour_test_matrix": [
+  {"category": "Happy path", "behaviour": "…", "test_name": "…", "status": "planned", "position": 0}
+]
+
+❌ WRONG (waived row with neither a real test_name nor an na_reason):
+"behaviour_test_matrix": [{"category": "Concurrency", "behaviour": "…", "test_name": "N/A", "status": "not_applicable", "position": 4}]
+
+✅ RIGHT (row shape — excerpt; a valid matrix carries all 7 categories, see the Complete Task Object above):
+"behaviour_test_matrix": [
+  {
+    "category": "Happy path",
+    "behaviour": "Toggling dark mode persists the preference and applies the theme site-wide",
+    "test_name": "test/kanban_web/live/user_live/settings_test.exs — \"persists the selected theme\"",
+    "type": "unit",
+    "status": "planned",
+    "position": 0
+  },
+  {
+    "category": "Concurrency",
+    "behaviour": "N/A — the theme is a single-user preference write with no concurrent-writer path",
+    "test_name": "N/A",
+    "status": "not_applicable",
+    "na_reason": "Only the owning user writes their own theme preference; there is no shared-state race to cover",
+    "position": 4
+  },
+  {
+    "category": "Lifecycle / wiring",
+    "behaviour": "The stored theme is applied before first paint on a full page load",
+    "test_name": "test/kanban_web/live/user_live/settings_test.exs — \"applies the stored theme on mount\"",
+    "type": "integration / manual",
+    "status": "planned",
+    "position": 5
+  }
+]
+```
+
+The excerpt above shows 3 rows to keep the shape readable. A real matrix also carries rows for `Boundary`, `Error / exception`, `Null / empty`, and `Contract / serialization` — copy the Complete Task Object example instead, which has all seven.
+
+**Required fields (per row):** `category`, `behaviour`, `status` (defaults to `"planned"` when omitted)
+**Always supply:** `position` (integer >= 0). Unlike `key_files` and `verification_steps`, the API does **not** reject a row missing `position` — but it is how a row records its intended order, so treat it as required in practice. Emit the rows in that order as well: nothing re-sorts the array for you, so a matrix whose `position` values disagree with its array order is stored and rendered in array order.
+**Conditionally required:** `test_name` — required **unless** the row is waived; a waived row must supply `na_reason` instead (one line saying why the behaviour needs no test). A row is waived when `status` is `"not_applicable"` **or** `test_name` reads as N/A (`"N/A"`, `"na"`, `"not applicable"`, `"not_applicable"`, case-insensitive). A row with neither a real `test_name` nor an `na_reason` is rejected.
+**Optional fields:** `type`, `na_reason`
+
+**The 7 fixed categories** (exact strings, canonical order — any other value is rejected):
+
+`"Happy path"`, `"Boundary"`, `"Error / exception"`, `"Null / empty"`, `"Concurrency"`, `"Lifecycle / wiring"`, `"Contract / serialization"`
+
+**`type` tokens:** `"unit"`, `"integration"`, `"manual"` — or a `/`-joined combination with optional surrounding whitespace, e.g. `"unit / manual"` or `"unit/integration/manual"`. Every token in the combination must be one of the three.
+
+**`status` enum:** `"planned"`, `"passing"`, `"failing"`, `"not_applicable"` (default `"planned"`). Rows you author at **creation** time are `"planned"` — the implementing agent advances a row as the named test is written and run.
+
+**Shape:** an array of row objects, each pairing one behaviour the change must satisfy with the real test that covers it. Name a **real test** — the test file, or `path/to/test.exs — "test name"` for a test you plan to add. Prefer a test *name* over a bare `file:line`: at creation time the test does not exist yet, so a line number is invented and goes stale the moment anything is inserted above it. Otherwise explicitly waive the row with `na_reason` — never leave a row with neither. The field is optional at the API (absent, `null`, and `[]` all pass), but a **non-empty** matrix must include at least one row for **every** one of the 7 categories; a partial matrix is rejected with `must include at least one row for every category. Missing: <names>`. A malformed top-level value is rejected with `must be an array of objects with category, behaviour, test_name, type, status, and position fields`. Row text is stored and later rendered — never put secrets, credentials, or raw HTML in `behaviour`, `test_name`, or `na_reason`.
 
 ### security_considerations
 

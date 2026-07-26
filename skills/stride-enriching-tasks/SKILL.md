@@ -93,7 +93,7 @@ This skill has two execution paths. Pick the one matching your platform.
 
 #### Gemini CLI: Invoke the Enricher Agent
 
-1. **Invoke the `task-enricher` custom agent** (`agents/task-enricher.md`) with the human-provided `title`, `type` (if known), `description`, and any `priority` or `dependencies` the human mentioned. The agent owns the four-phase enrichment procedure (intent parse, codebase exploration, complexity heuristic, 17-item validation checklist) and returns a single JSON object containing every enriched field.
+1. **Invoke the `task-enricher` custom agent** (`agents/task-enricher.md`) with the human-provided `title`, `type` (if known), `description`, and any `priority` or `dependencies` the human mentioned. The agent owns the four-phase enrichment procedure (intent parse, codebase exploration, complexity heuristic, 18-item validation checklist) and returns a single JSON object containing every enriched field.
 2. **Wait for the result.** The agent's output is a complete enriched-task JSON ready for `POST /api/tasks` (new task) or the enriched-fields subset ready for `PATCH /api/tasks/:id` (existing minimal task). The agent does NOT call the API itself.
 3. **Submit via the Stride API** using the curl pattern in [API Integration](#api-integration) below. Verify the field types match the reminders in that section before submitting.
 4. **Do NOT walk the manual phases below.** The agent already executed them. Re-running them duplicates work and risks divergence.
@@ -105,7 +105,7 @@ Environments without custom-agent invocation must walk the four phases manually.
 1. **Run Phase 1** — preserve `title`, `type`, `description` exactly as the human wrote them; default `priority` to `"medium"`; capture explicit `dependencies`.
 2. **Run Phase 2** — six ordered exploration steps, summarized below.
 3. **Run Phase 3** — paragraph-form complexity heuristic below.
-4. **Run Phase 4** — the 17-item pre-submission checklist (kept in full below).
+4. **Run Phase 4** — the 18-item pre-submission checklist (kept in full below).
 5. **Submit via [API Integration](#api-integration).**
 
 ## Manual Walkthrough Phases
@@ -130,9 +130,21 @@ grep_search "<keyword1>|<keyword2>" in lib/ — file names only
 
 List sibling modules in the same directory as `key_files`. Find the closest analog feature already in the codebase. Format as newline-separated references: `See lib/path/to/file.ex for X pattern`.
 
-**Step 3: Analyze testing → `testing_strategy`**
+**Step 3: Analyze testing → `testing_strategy`, optional `behaviour_test_matrix`**
 
 Map each `key_file` to its corresponding test file (e.g., `lib/foo.ex` → `test/foo_test.exs`). Read existing tests to learn helper modules, factories, and assertion style. Generate `unit_tests`, `integration_tests`, `manual_tests`, `edge_cases`, and `coverage_target`.
+
+**`behaviour_test_matrix` (built here):** Project the behaviours the change must satisfy onto a `behaviour_test_matrix` — an array of rows, each pairing one behaviour with the real test that covers it — by mapping the `unit_tests` / `integration_tests` / `manual_tests` / `edge_cases` you just derived onto the **7 fixed categories**. If you produced test cases above, emit the matrix: that is the normal outcome. It is **not** one of the five review_queue-scored fields, so a legitimately absent matrix is never an empty pill — but omit it only when the task has no testable behaviour at all (a pure copy, docs, or config change), never just because some categories don't apply (that is what `na_reason` is for), and never emit filler rows:
+
+- `category` — exactly one of `"Happy path"`, `"Boundary"`, `"Error / exception"`, `"Null / empty"`, `"Concurrency"`, `"Lifecycle / wiring"`, `"Contract / serialization"`. No other value is accepted.
+- `behaviour` — what the code should do, in one line (e.g. `"rejects an expired claim"`).
+- `test_name` — the **real** test covering it: the test file you just mapped, or `path/to/test.exs — "test name"` for a test you plan to add. Prefer a test name over a bare `file:line` — the test does not exist yet at enrichment time, so a line number is invented and goes stale immediately. Never invent a path either: use only test files you located by searching the repo, the same rule `key_files` follows.
+- `type` — `"unit"`, `"integration"`, or `"manual"`, or a `/`-joined combination like `"unit / manual"`.
+- `status` — one of `"planned"`, `"passing"`, `"failing"`, `"not_applicable"` (an omitted status defaults to `"planned"`). Write `"planned"` explicitly for every row you author during enrichment; the implementing agent advances it to `"passing"` / `"failing"` as the test is written and run. `"not_applicable"` is for waived rows only.
+- `na_reason` — required when the row is waived (`status: "not_applicable"`, or an N/A `test_name`). One line saying why the category needs no test here, e.g. `"No shared state — single-writer preference update, no concurrent path exists"`.
+- `position` — integer >= 0, row order. The API does not reject a row missing it, but it is how a row records its intended order, so always supply it — and emit the rows in that order too, since nothing re-sorts the array.
+
+**A row must have either a real `test_name` or an `na_reason` — never neither.** Many enriched tasks genuinely have no Concurrency or Lifecycle surface; waive those rows with a specific reason rather than inventing a test. And because the matrix is only valid once it covers **all 7** categories, it is all-or-nothing: either emit a row for every category, or omit the field entirely. A partial matrix is rejected; an absent or empty one passes. Row text is stored and later rendered, so never record secrets, credentials, or raw HTML in `behaviour`, `test_name`, or `na_reason`.
 
 **Step 4: Define verification → `verification_steps`**
 
@@ -156,7 +168,7 @@ In the same pass, analyze the touched code for security implications → `securi
 
 Convert intent to observable, testable outcomes. Format as newline-separated string. Include user-facing outcomes, technical requirements, negative criteria, and "All existing tests still pass".
 
-**For defects:** search for the error string, include a regression test in `unit_tests`, add "Bug no longer reproducible" to `acceptance_criteria`.
+**For defects:** search for the error string, include a regression test in `unit_tests`, add "Bug no longer reproducible" to `acceptance_criteria`, and — when you built a matrix — pair the bug-no-longer-reproducing behaviour with that regression test in the `"Error / exception"` row.
 
 **Optional — `technical_details`:** If exploration surfaced concrete technical context that doesn't fit the structured fields (data shapes, gotchas, key decisions, reference links), record it in an optional free-form `technical_details` object — any keys you like. Populate it only with what you actually found; leave it as `{}` when there is nothing substantive — never fabricate it. It is **not** one of the five review_queue-scored fields, so a blank value is never an empty pill. Because it is free-form, never record secrets (tokens, passwords, credentials) in it.
 
@@ -183,9 +195,10 @@ Combine all discovered fields into the final task specification.
 - [ ] **`security_considerations` is populated** — review_queue-scored; array of strings naming the security implications to address (or an explicit "None — …" reason); an empty array scores as an empty pill
 - [ ] **`pitfalls` is populated** — review_queue-scored; array of strings; an empty array scores as an empty pill
 - [ ] **`patterns_to_follow` is populated** — review_queue-scored; newline-separated string with file references (NOT an array); blank scores as an empty pill
+- [ ] `behaviour_test_matrix` — emitted with one row for **all 7** fixed categories (every row either naming a real `test_name` with a `type` and `status` `"planned"`, or waived with `status` `"not_applicable"` plus an `na_reason`) — **or** deliberately omitted because the task has no testable behaviour at all. If Step 3 produced test cases, the matrix is expected. Not review_queue-scored, so a legitimately absent matrix is never an empty pill
 - [ ] `needs_review` is set to `false`
 - [ ] No invented file paths — every entry is a path located via grep_search, glob, or read_file
-- [ ] All 17 fields above were considered for this task (none silently skipped)
+- [ ] All 18 items above were considered for this task (none silently skipped) — for the one optional item, `behaviour_test_matrix`, a deliberate omission counts as considered
 
 ## API Integration
 
@@ -246,6 +259,7 @@ curl -s -X PATCH \
 - `pitfalls`: Array of strings `["Don't...", "Avoid..."]`
 - `estimated_files`: Optional string range like `"3-5"` — emit when the count is meaningful, omit otherwise
 - `technical_details`: Optional free-form object `{"data_shapes": {...}, "gotchas": ["..."]}` — any keys; leave `{}` when nothing substantive was found; NOT a review_queue-scored field; never record secrets
+- `behaviour_test_matrix`: Optional array of row objects — one row per shape, **excerpt only**: `[{"category": "Happy path", "behaviour": "...", "test_name": "...", "type": "unit", "status": "planned", "position": 0}, …]`. A real matrix carries a row for **all 7** fixed categories or the field is omitted entirely; the one-row value above is illustrative and would be rejected as a partial matrix. NOT a review_queue-scored field; never record secrets
 
 ## Output Example: Enriched Task
 
@@ -289,9 +303,69 @@ The following shows a defect task after enrichment. `title`, `type`, and `descri
     "Don't forget to handle timezone display — use the existing application timezone handling",
     "Don't break existing comment layout or styling",
     "Don't forget to verify dark mode contrast for timestamp text"
+  ],
+  "behaviour_test_matrix": [
+    {
+      "category": "Happy path",
+      "behaviour": "Each rendered comment shows its creation timestamp",
+      "test_name": "test/kanban_web/live/task_live/view_component_test.exs — \"renders a timestamp for each comment\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 0
+    },
+    {
+      "category": "Boundary",
+      "behaviour": "A comment from a previous year renders the full date rather than a time-only label",
+      "test_name": "test/kanban_web/live/task_live/view_component_test.exs — \"renders the full date for a prior-year comment\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 1
+    },
+    {
+      "category": "Error / exception",
+      "behaviour": "The reported bug no longer reproduces — a comment never renders with a missing or blank timestamp",
+      "test_name": "test/kanban_web/live/task_live/view_component_test.exs — \"regression: comment timestamp is never blank\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 2
+    },
+    {
+      "category": "Null / empty",
+      "behaviour": "A task with no comments renders the empty state without a stray timestamp element",
+      "test_name": "test/kanban_web/live/task_live/view_component_test.exs — \"renders no timestamp when there are no comments\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 3
+    },
+    {
+      "category": "Concurrency",
+      "behaviour": "N/A — rendering a stored timestamp is a read-only display change with no shared-state writer",
+      "test_name": "N/A",
+      "status": "not_applicable",
+      "na_reason": "The fix only formats an already-persisted inserted_at for display; no write path or shared state is involved",
+      "position": 4
+    },
+    {
+      "category": "Lifecycle / wiring",
+      "behaviour": "Timestamps appear on the first render of the task detail view, not only after a live update",
+      "test_name": "test/kanban_web/live/task_live/view_component_test.exs — \"shows timestamps on initial mount\"",
+      "type": "integration",
+      "status": "planned",
+      "position": 5
+    },
+    {
+      "category": "Contract / serialization",
+      "behaviour": "The stored inserted_at is formatted in the application timezone rather than raw UTC",
+      "test_name": "test/kanban_web/live/task_live/view_component_test.exs — \"formats inserted_at in the application timezone\"",
+      "type": "unit",
+      "status": "planned",
+      "position": 6
+    }
   ]
 }
 ```
+
+Note the `"Error / exception"` row: on a defect it pairs the bug-no-longer-reproducing behaviour with the regression test, per Step 3's defect guidance. The waived `"Concurrency"` row carries a specific `na_reason` and no `type` — the honest way to handle a category this fix genuinely does not touch.
 
 ## Red Flags - STOP
 
@@ -299,7 +373,7 @@ The following shows a defect task after enrichment. `title`, `type`, and `descri
 - "I'll just fill in the required fields with placeholders"
 - "Exploring the codebase takes too long, I'll guess"
 - "The human can add details later"
-- "This is a simple task, it doesn't need all 15 fields"
+- "This is a simple task, it doesn't need every required field"
 - "I'll leave `acceptance_criteria` blank — the implementing agent will figure out 'done'"
 - "`testing_strategy` doesn't apply to this enrichment — empty object is fine"
 - "`security_considerations` is the reviewer's job — I'll ship an empty array"
