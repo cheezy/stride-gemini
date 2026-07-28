@@ -276,7 +276,7 @@ A nested task MAY also carry an optional `behaviour_test_matrix` array (see `str
 - Each row names a **real test** in `test_name`, **or** is waived (`status: "not_applicable"` or an N/A `test_name`) and supplies a one-line `na_reason`. A row with neither is rejected.
 - A **non-empty** matrix must include at least one row for **every** one of the 7 categories; an absent or empty matrix passes, a partial one is rejected.
 
-Populate it per nested task only where you have concrete behaviours to record — a matrix is never a substitute for that task's `testing_strategy`, which remains one of the five. Row text is stored and later rendered, so never record secrets, credentials, or raw HTML in `behaviour`, `test_name`, or `na_reason`.
+Populate it per nested task only where you have concrete behaviours to record — a matrix is never a substitute for that task's `testing_strategy`, which remains one of the five. Row text is stored and later rendered, so never record secrets or credentials in `behaviour`, `test_name`, or `na_reason` — nothing on the server strips them, so this rule is the only thing protecting them. Raw HTML is a separate matter with a real control behind it: every render path interpolates row text through auto-escaped HEEx and never a raw-HTML helper, and the API rejects an out-of-vocabulary `category` or `status` outright, so markup in a row renders as literal text rather than executing. Keep row text free of raw HTML anyway, as hygiene.
 
 **Minimal nested tasks fail the same way as minimal flat tasks** — causing 3+ hour exploration AND empty review_queue pills at completion.
 

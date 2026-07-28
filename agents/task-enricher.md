@@ -161,7 +161,7 @@ No similar feature exists?
 
    **Emit it by default — all seven categories or nothing.** If Step 3 produced any test cases at all, you have the raw material, so emit all seven rows. That is the normal outcome. A non-empty matrix missing any category is rejected by the API, so the only alternative is omitting `behaviour_test_matrix` entirely — reserve that for a task with genuinely no testable behaviour (a pure copy, docs, or config change). "Some categories don't apply here" is **not** a reason to omit the field: it is the reason `na_reason` exists — waive those rows and emit the rest. The field is optional in the sense that it is **not** one of the five review_queue-scored fields, so a legitimately absent matrix is never an empty pill — but do not treat optional as a licence to skip it on a task you just wrote test cases for. Never pad with filler rows either: waive honestly, or omit the whole field.
 
-   **No secrets, no markup.** Row text is stored and later rendered, so never place tokens, passwords, credentials, or raw HTML in `behaviour`, `test_name`, or `na_reason`.
+   **No secrets, no markup.** Row text is stored and later rendered, so never record secrets or credentials in `behaviour`, `test_name`, or `na_reason` — nothing on the server strips them, so this rule is the only thing protecting them. Raw HTML is a separate matter with a real control behind it: every render path interpolates row text through auto-escaped HEEx and never a raw-HTML helper, and the API rejects an out-of-vocabulary `category` or `status` outright, so markup in a row renders as literal text rather than executing. Keep row text free of raw HTML anyway, as hygiene.
 
 **For defect tasks**, additionally include:
 - A regression test that reproduces the original bug
