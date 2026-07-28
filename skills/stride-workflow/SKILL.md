@@ -169,7 +169,7 @@ printf '{"session_id":"%s","started_at":"%s","pid":%d}\n' \
   > "$PROJECT_DIR/.stride/.orchestrator_active"
 ```
 
-Without this marker the `BeforeTool(activate_skill)` hook will block your sub-skill activations in Steps 2, 3, 6, and 8.
+Without this marker the `BeforeTool(activate_skill)` hook will block your sub-skill activations in Steps 2, 3, 5, and 7.
 
 **This step runs once per session, not once per task.**
 

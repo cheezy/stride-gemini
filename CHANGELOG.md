@@ -4,6 +4,29 @@ All notable changes to the Stride extension for Gemini CLI will be documented in
 
 ## [Unreleased]
 
+## [1.40.1] - 2026-07-28
+
+### Fixed — nine stale workflow step cross-references (D175)
+
+"Extracting the structured review block" lives in **Step 5 (Code Review)** of this port's `stride-workflow` skill; Step 6 is Execute Hooks. Nine references sent a reader — or an agent — to the wrong step, and two of them sit in `GEMINI.md` and `README.md`, which are loaded into every session.
+
+- **Seven citations of the extraction section** corrected from Step 6 to Step 5: one in `README.md`, one in `GEMINI.md` (the extension's `contextFileName`), and five in `skills/stride-completing-tasks/SKILL.md`.
+- **Two related off-by-one lines** in the same completing-tasks skill: the orchestrator entry point now reads "you arrive here at **Step 6-7**" (Execute Hooks → Complete) rather than Step 7-8, and the prerequisite line now reads "Code review was performed against acceptance criteria (**Step 5**)" rather than Step 6.
+
+Each reference was checked against this port's own `## Step` headings rather than replaced in bulk. Nine were stale; references that already read Step 5 or Step 5.5 were left alone.
+
+- **A tenth, found by the exploratory sweep that verified the nine.** `skills/stride-workflow/SKILL.md` — the activation-marker warning read "will block your sub-skill activations in Steps 2, 3, 6, and 8", naming Execute Hooks and Post-Completion, neither of which activates a governed sub-skill. Corrected to "Steps 2, 3, 5, and 7", matching the canonical plugin verbatim. This is the same residue class: the port closed its Step-5 numbering gap in v1.29.0 (W1521), and every stale reference since is that same −1 shift.
+
+Two further sites of the same class are left for follow-up rather than folded in here: a `Step 7 env matrix` comment in `hooks/stride-hook.sh` (the matrix is under Step 6) and a `Step 9` citation in `docs/HOOK_RESEARCH.md`, a file whose executed-action-plan framing makes it arguably historical like this changelog.
+
+### Scope
+
+**Gemini-only — deliberately not a fleet fix.** `stride-codex` numbers Code Review as Step 6 to preserve an intentionally-blank Step 5 slot, and `stride-opencode` also numbers it Step 6; every Step 6 citation in those two ports is *correct*, and a fleet-wide replacement would corrupt both. Neither repo is touched by this release. Historical CHANGELOG entries citing an older step number are also left unchanged — they were accurate for the release they describe.
+
+### Backward compatibility
+
+Fully backward compatible. Documentation cross-references only — no skill logic, hook, credential path, authorization instruction, API payload, or schema is changed.
+
 ## [1.40.0] - 2026-07-28
 
 ### Changed — the `behaviour_test_matrix` rules treat row text as untrusted, and say what to do when it carries a credential
