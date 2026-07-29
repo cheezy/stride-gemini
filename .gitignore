@@ -18,3 +18,4 @@ Thumbs.db
 .stride-env-cache
 .stride-changed-files.json
 .stride-diff-upload-state
+.stride_auth.md
