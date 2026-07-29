@@ -23,6 +23,25 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.40.2] - 2026-07-29
+
+### Fixed — the two remaining stale step cross-references, and a live-or-frozen decision (D192)
+
+`[1.40.1]` corrected ten references of this class and explicitly left two for follow-up: a `Step 7 env matrix` comment in the hook script, and a `Step 9` citation in a document whose status was unclear. Both are resolved here, each checked against this port's own `## Step` headings rather than replaced in bulk.
+
+- **`hooks/stride-hook.sh` and `hooks/stride-hook.ps1`** — the server-env-forwarding comment cited "The Step 7 env matrix"; the matrix is `### Hook Environment Variables`, which sits inside `## Step 6: Execute Hooks`. Step 7 is Complete the Task. The workflow skill's own back-references already said Step 6, so the port disagreed with itself about the same section. The PowerShell mirror carried the identical reference plus a second at its empty-key re-add ("per the Step 7 env matrix contract"); its own header states both scripts must agree on behaviour, so fixing only the bash side would have left the pair inconsistent. All three are corrected. **Comment-only** — every hunk is a `#` line, and no hook command, credential path, env-var handling, or control flow changes in either script.
+- **`docs/HOOK_RESEARCH.md` is recorded as a frozen historical record**, and its `Step 9` citation is deliberately left as written. The file captured the research deciding whether stride 1.10.0's skill gate ports to Gemini CLI, and its "Action plan for downstream tasks" has been executed — W301 added the Orchestrator Activation Marker section to `skills/stride-workflow/SKILL.md`, and W302 ported the gate as `hooks/stride-skill-gate.sh` with its test harness. Nothing live references the document. A frozen-record note at the top now says so, and explains that its step numbers are the plan's contemporaneous expectations rather than current navigation: the plan says to clear the marker at "Step 9", and **that was accurate when written** — the document is dated 2026-04-29 and mirrors stride 1.10.0, and the canonical `stride` port carried `## Step 9: Post-Completion Decision` from 2026-04-13 (`9c2b3e4`) until 2026-07-02, when W1452 (`0109dfb`) resolved a missing Step 5 and renumbered it to Step 8. `stride-codex` and `stride-opencode` still number it Step 9 today. **This port carried `## Step 9` too**, from 2026-04-13 (`4272c70`) until 2026-07-03, when W1521 (`2021860`) closed its own empty-Step-5 gap — so the citation was accurate against stride-gemini's own headings on the day it was written, not merely the canonical port it mirrors. In this port the clear now lives under `## Step 8: Post-Completion Decision`.
+
+**Why freeze rather than renumber.** The citation is a faithful record of a plan made against numbering this port has since superseded, so correcting it in place would falsify what was actually planned — the same reason this changelog's historical entries citing superseded step numbers are not rewritten. The decision is written down in the document itself so the question is not reopened a third time.
+
+### Scope
+
+**Gemini-only — deliberately not a fleet fix**, on the same reasoning `[1.40.1]` recorded. `stride-codex` numbers Code Review as Step 6 to preserve an intentionally-blank Step 5 slot, and `stride-opencode` also numbers it Step 6; every Step 6 citation in those two ports is *correct*. Neither repo is touched by this release, and both working trees were verified clean. Historical CHANGELOG entries citing an older step number are likewise left unchanged.
+
+### Backward compatibility
+
+Fully backward compatible. A comment and a documentation note only — no skill logic, hook behaviour, credential path, authorization instruction, API payload, or schema is changed.
+
 ## [1.40.1] - 2026-07-28
 
 ### Fixed — nine stale workflow step cross-references (D175)

@@ -763,7 +763,7 @@ function Invoke-StrideSection {
             $secPsi.UseShellExecute = $false
             $secPsi.WorkingDirectory = (Get-Location).Path
             # (W1519) Re-add empty-valued keys the Process env block cannot
-            # hold, so user commands see them defined-but-empty per the Step 7
+            # hold, so user commands see them defined-but-empty per the Step 6
             # env matrix contract (prevents ${VAR?} / set -u aborts).
             foreach ($emptyKey in $script:StrideEmptyEnvKeys) {
                 $secPsi.Environment[$emptyKey] = ''
@@ -932,7 +932,7 @@ function Test-AfterGoalInResponse {
 }
 
 # --- Server-supplied hook env forwarding (W1519, mirrors stride W1453) ---
-# The Step 7 env matrix (skills/stride-workflow/SKILL.md) declares the server's
+# The Step 6 env matrix (skills/stride-workflow/SKILL.md) declares the server's
 # hook env block the single source of truth for the variables the executor
 # exports. The functions below extract the `env` object from the hook entry of
 # an intercepted response (singular `.hook` on claim responses, `.hooks[]` on

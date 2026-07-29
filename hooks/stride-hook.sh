@@ -1008,7 +1008,7 @@ response_has_after_goal() {
 }
 
 # --- Server-supplied hook env forwarding (W1519, mirrors stride W1453) ---
-# The Step 7 env matrix (skills/stride-workflow/SKILL.md) declares the
+# The Step 6 env matrix (skills/stride-workflow/SKILL.md) declares the
 # server's hook env block the single source of truth for the variables the
 # executor exports. The helpers below extract the `env` object from the hook
 # entry of an intercepted response (singular `.hook` on claim responses,

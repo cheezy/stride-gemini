@@ -1,5 +1,25 @@
 # Gemini CLI Hook Research — Skill-Gate Portability
 
+> **Frozen historical record — not live documentation.** This document captured the research that decided whether
+> stride 1.10.0's skill gate ports to Gemini CLI, and its "Action plan for downstream tasks" below was executed:
+> W301 added the Orchestrator Activation Marker section to `skills/stride-workflow/SKILL.md`, and W302 ported the
+> gate as `hooks/stride-skill-gate.sh` with its test harness. It is kept as a record of what was decided and why,
+> on the same footing as a CHANGELOG entry, and is deliberately **not** updated as the port evolves.
+>
+> Read its step numbers against the numbering that was current when it was written, not against this port today.
+> The action plan says to clear the marker at "Step 9", and **that was accurate when written**: this document is
+> dated 2026-04-29 and mirrors stride 1.10.0, and the canonical `stride` port carried
+> `## Step 9: Post-Completion Decision` from 2026-04-13 (`9c2b3e4`) until 2026-07-02, when W1452 (`0109dfb`)
+> resolved a missing Step 5 and renumbered it to Step 8. **This port carried `## Step 9` too**, from 2026-04-13
+> (`4272c70`) until 2026-07-03, when W1521 (`2021860`) closed its own empty-Step-5 gap — so on the day this document
+> was written the citation was accurate against stride-gemini's *own* headings, not merely the canonical port it
+> mirrors. Two sibling ports, `stride-codex` and `stride-opencode`, still number it Step 9 today. So the citation
+> is a faithful record of a plan made against numbering this port
+> has since superseded — correcting it in place would falsify what was actually planned, which is the same reason
+> historical CHANGELOG entries citing superseded step numbers are not rewritten. In this port the marker clear now
+> lives under `## Step 8: Post-Completion Decision`. For current guidance always read
+> `skills/stride-workflow/SKILL.md`, whose own `## Step` headings are the ground truth.
+
 Research target: decide whether stride 1.10.0's PreToolUse(Skill) gate
 (`stride-skill-gate.sh` + matcher `"Skill"`) ports to Gemini CLI.
 
