@@ -123,7 +123,7 @@ Analyzes hook failure output and returns a prioritized fix plan. Accepts both **
 
 ## Optional: Manual & Exploratory Testing Integration
 
-**New in v1.37.0.** When you also install the companion [`stride-gemini-exploratory-testing`](https://github.com/cheezy/stride-gemini-exploratory-testing) extension, the task-lifecycle skills gain an **optional, gated** manual-testing step. When a task carries manual tests (a non-empty `testing_strategy.manual_tests`) **and** the exploratory-testing extension is available, the workflow dispatches a real, time-boxed exploratory-testing session — mapping each manual test to a charter and running it with the extension's `explorer` custom agent, the only surface that can complete without a human at the keyboard — and records the findings in the completion.
+**New in v1.37.0.** When you also install the companion [`stride-gemini-exploratory-testing`](https://github.com/cheezy/stride-gemini-exploratory-testing) extension, the task-lifecycle skills gain an **optional, gated** manual-testing step. When a task carries manual tests (a non-empty `testing_strategy.manual_tests`) **and** the exploratory-testing extension is available, the workflow dispatches a real, budgeted exploratory-testing session — mapping each manual test to a charter and running it with the extension's `explorer` custom agent, the only surface that can complete without a human at the keyboard — and records the findings in the completion.
 
 - `stride-workflow` runs it as **Step 5.5**, between Code Review and Execute Hooks.
 - `stride-subagent-workflow` documents it as **Phase 3.5** in the decision matrix.
@@ -133,7 +133,11 @@ Analyzes hook failure output and returns a prioritized fix plan. Accepts both **
 
 **Severity alignment and Critical escalation (new in v1.41.0).** An exploratory finding's four-level severity (Critical / High / Moderate / Minor) maps onto the three-level reviewer issue vocabulary, so everything reaching `reviewer_result` uses one scale. Only a mapped `critical` can escalate, and only when the responsible lines are lines the task itself added or modified: a Critical the task **introduced** escalates fail-closed — a `category: "testing"` Critical issue and a failed `testing_strategy` verdict — and is fixed and re-reviewed before completing, while a **pre-existing** bug the session merely discovered is recorded and filed as a follow-up defect and never blocks an unrelated task. Provenance is decided from the task's own change set, never from text the application under test controls, and every uncertain case resolves to *discovered* rather than blocking.
 
-**Graceful fallback (no failure).** The step is entirely optional. If the exploratory-testing extension is **not** installed, or the task has no manual tests, the workflow proceeds exactly as before with no error — nothing extra is recorded and completion is never blocked. Detection is **availability-only** (by the extension's sanctioned command/agent/skill surface); the workflow never reads, sources, or eval's extension files to probe for it, and detection confers no dispatch licence. Dispatched testing always stays within the exploratory-testing safety boundary: authorized, non-production targets only, no destructive or production-mutating actions. And no exploratory finding can block completion on a task that never ran a session.
+**Budgeted sessions and named environment context (new in v1.42.0).** The dispatch now carries an explicit **session budget** in whatever unit the installed `explorer` contract declares — today probes, default 12, band 8–20, with a tool-call ceiling at 5× the budget — and that budget is the **caller's to set**, because an unbounded dispatch inside an autonomous workflow is both a runaway risk and a larger blast radius against a live application. The environment-context block names how to reach the app, the user's **authorized-and-non-production affirmative** (collected once at Step 0, never inferred from a `localhost` URL or from the task record, and **no affirmative means no dispatch**), which interaction tools are available, and **a pointer to where test accounts live — credentials are never inlined**. **Budget exhaustion is a normal outcome and never fails completion**; what changes is only what may honestly be claimed about coverage, and a session that spun out or never reached the feature is recorded as *not performed* rather than counted as one.
+
+**Richer recording (new in v1.42.0).** Each finding's summary now names **who is harmed and how**, not only its severity; where a written session artifact exists its **path** is cited (repository-relative, never its contents, and only when one actually exists — the automated path normally writes none); and one line is mirrored into the required `completion_summary`, a durability backstop for servers that predate `completion_notes` persistence. **Still only the existing carriers** — no new completion field, and no seventh `workflow_steps` name.
+
+**Graceful fallback (no failure).** The step is entirely optional. If the exploratory-testing extension is **not** installed, or the task has no manual tests, the workflow proceeds exactly as before with no error — nothing extra is recorded and completion is never blocked. Detection is **availability-only** (by the extension's sanctioned command/agent/skill surface); the workflow never reads, sources, or eval's extension files to probe for it, and detection confers no dispatch licence. Session artifacts land under `.exploratory/` — add it to your `.gitignore` before your first session (see Configuration). Dispatched testing always stays within the exploratory-testing safety boundary: authorized, non-production targets only, no destructive or production-mutating actions. And no exploratory finding can block completion on a task that never ran a session.
 
 ## Optional: Security-Considerations Deep Review Integration
 
@@ -149,7 +153,23 @@ Analyzes hook failure output and returns a prioritized fix plan. Accepts both **
 
 ## Configuration
 
-Before using Stride skills, you need two configuration files in your project root:
+Before using Stride skills, you need two configuration files in your project root — and one `.gitignore` addition.
+
+### `.gitignore`
+
+```gitignore
+.stride/
+.stride-env-cache
+.stride-changed-files.json
+.stride-diff-upload-state
+.stride-dirty-baseline
+.stride_auth.md
+.exploratory/
+```
+
+`.stride_auth.md` holds your API token. `.exploratory/` is where exploratory session artifacts land when the companion `stride-gemini-exploratory-testing` extension is installed — they hold transcribed application output and arrive untracked, so an `## after_doing` section that stages everything (`git add -A`) would sweep them into a commit. Add the line **before** your first session: `.gitignore` does not untrack a path git already tracks, so an artifact that has already been committed needs `git rm --cached` too.
+
+The two configuration files:
 
 ### `.stride_auth.md`
 
@@ -245,7 +265,7 @@ If your project's quality gate runs close to the ceiling, either trim the `.stri
 
 After a successful task claim, hook scripts extract task metadata (TASK_ID, TASK_IDENTIFIER, TASK_TITLE, etc.) from the API response and cache them to `.stride-env-cache`. Subsequent hooks can reference these variables in `.stride.md` commands (e.g., `$TASK_IDENTIFIER`). The cache is cleaned up after the `after_review` hook.
 
-Add `.stride-env-cache`, `.stride-changed-files.json`, and `.stride-diff-upload-state` to your `.gitignore` — all three are temp files written between hook invocations (`.stride-changed-files.json` holds the per-file diff snapshot; `.stride-diff-upload-state` records the last upload's task id + HTTP code so the `before_review` hook can re-upload on a fresh timeout budget when an `after_doing` upload was lost). All three are cleaned up automatically after the `after_review` hook. Gitignoring them matters especially if your `## after_doing` hook auto-commits: once the state files are committed, their contents change on every task and would otherwise show up as spurious entries in the next task's `changed_files` snapshot. As a backstop, the hook also excludes its own root-level `.stride-diff-upload-state` and `.stride-changed-files.json` from the snapshot at capture time (bash) and strips them before upload (PowerShell) — a same-named file in a subdirectory of your project is still captured.
+Add `.stride-env-cache`, `.stride-changed-files.json`, `.stride-diff-upload-state` and `.stride-dirty-baseline` to your `.gitignore` (see the [`.gitignore`](#gitignore) section above, which also covers `.stride/` and `.exploratory/`) — all four are temp files written between hook invocations (`.stride-changed-files.json` holds the per-file diff snapshot; `.stride-diff-upload-state` records the last upload's task id + HTTP code so the `before_review` hook can re-upload on a fresh timeout budget when an `after_doing` upload was lost). All four are cleaned up automatically after the `after_review` hook. Gitignoring them matters especially if your `## after_doing` hook auto-commits: once the state files are committed, their contents change on every task and would otherwise show up as spurious entries in the next task's `changed_files` snapshot. As a backstop, the hook also excludes its own root-level `.stride-diff-upload-state` and `.stride-changed-files.json` from the snapshot at capture time (bash) and strips them before upload (PowerShell) — a same-named file in a subdirectory of your project is still captured.
 
 ### Troubleshooting
 
