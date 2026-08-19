@@ -21,7 +21,7 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.44.0] - 2026-08-19
 
 
 ### Fixed — the failed-verdict `note` rule the server already enforces (D240)
