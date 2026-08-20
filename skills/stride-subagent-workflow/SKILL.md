@@ -76,8 +76,11 @@ Use this matrix to determine which custom agents to invoke based on task attribu
 | Goal type | Run | Skip* | Skip* | Skip* | Skip |
 | Large complexity, not yet decomposed | Run | Skip* | Skip* | Skip* | Skip |
 | 25+ hour estimate, not yet decomposed | Run | Skip* | Skip* | Skip* | Skip |
+| Complexity absent or unrecognised | Skip | Run | Run | Run | If manual_tests |
 
 *After decomposition, each resulting child task follows its own row in this matrix when claimed individually.
+
+**When several rows fit one task, `stride-workflow` Step 3 settles which one governs** — read the precedence paragraph there rather than re-deriving an order here; this table introduces none of its own. The `Complexity absent or unrecognised` row fires only where `complexity` arrived empty or carrying a value the table does not name, and never as a tiebreak between rows that both fit.
 
 †The `exploratory-testing` dispatch is **orthogonal to complexity**: it runs only when the task's `testing_strategy.manual_tests` is non-empty **AND** the `stride-gemini-exploratory-testing` extension is available. "If manual_tests" therefore means "dispatch only when both gates hold" — regardless of the complexity row. It is always **optional and never required for completion**, and is skipped for goals (decomposed, not implemented). It is dispatched with an explicit session budget and the user's authorized/non-production affirmative; **without that affirmative it is not dispatched at all**. Dispatch it **only via a surface that completes without requiring a human** — today the `explorer` custom agent and nothing else; never `/explore`, `/pair`, `/recon`, `/nightmare-headline`, or the extension's routing skill. A Critical finding escalates fail-closed **only** when the responsible lines are lines this task added or modified; anything else — a pre-existing bug, or provenance you could not determine — is reported and filed as a follow-up defect and never blocks. When the payload carries no structured review block there is nothing to escalate into, and nothing may be synthesized. And when that session returns convertible findings, **Phase 3.6** optionally hardens them into drafted regression checks — orthogonal to complexity for the same reason, and never required for completion. See Phase 3.5 and Phase 3.6.
 

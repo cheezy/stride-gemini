@@ -249,8 +249,21 @@ The `hooks.json` `AfterTool` handler automatically executes `.stride.md` `## bef
 | medium (any) | Skip | YES | YES | YES |
 | large (any) | Skip | YES | YES | YES |
 | Defect type | Skip | YES | Skip (unless large) | YES |
+| Complexity absent or unrecognised | Skip | YES | YES | YES |
 
+<!-- canon:decision-matrix-authority v1 -->
 **This matrix is the SOLE decision point for the Decompose, Explore, Plan, and Review columns.** Nothing elsewhere in this plugin may state a second, separately-satisfiable condition for any of them; where other prose mentions one of these steps it describes what this matrix already decided and defers to it. **If any prose appears to give an independent trigger, the matrix wins.** That ambiguity was defect D221, and this rule is its fix.
+
+<!-- canon:row-precedence v1 -->
+**Which row applies — the table is a sieve, not a menu.** Several rows can describe one task at once, so sift them by the questions below until a single row is left, and a single one always is. **Sift in the order the questions are asked, which is not the order the rows are printed** — `Defect type` prints sixth and is settled ahead of `medium (any)` at row four and `large (any)` at row five. Ask first whether the task decomposes at all: goal type, large complexity with no children yet, or a 25+ hour estimate takes the top row and closes the question, with nothing below it consulted. Failing that, ask whether the task is `small` carrying at most one `key_files` entry, **and ask that before you look at `type`**: the row is a cost floor rather than a claim about what kind of work this is, so a one-file fix qualifies whether somebody filed it as work or as a defect. Only then does `Defect type` come into play, and it takes priority over the bare `medium (any)` and `large (any)` rows because it was written to say something about defects that those two rows cannot; its `Skip (unless large)` cell means Plan resolves to YES on a large defect and to Skip on a defect of any other complexity. A task still unplaced falls to whichever complexity row fits — `small, 2+ key_files`, `medium (any)` or `large (any)`. `Complexity absent or unrecognised` is reached last and **only because `complexity` came in empty or carrying a value this table does not name**; it settles nothing between two populated rows that disagree, and reaching for it to break such a tie is a misread of the row.
+
+**Why the 0-1 `key_files` question is asked ahead of the `type` question.** Reverse the two and every small single-file defect starts drawing an explorer and a reviewer — two dispatches onto the cheapest shape of work on the board, and a flat contradiction of Branch B, which sends that same task straight to Step 4. Ordering a collision is meant to pick one of the answers the table already gives, never to manufacture a third, and this is the order that leaves behaviour where it stood.
+
+**Worked collisions.**
+- A `medium` **defect** fits `medium (any)` and `Defect type`, and the two disagree in the Plan column. `Defect type` governs: Explore YES, Plan Skip, Review YES.
+- A `large` **defect** fits `large (any)` and `Defect type`. `Defect type` still governs, and its `Skip (unless large)` resolves to Plan YES — the same answer `large (any)` would have given, but arrived at through the row that actually holds authority.
+- A `small` **defect** with one `key_files` entry fits `small, 0-1 key_files` and `Defect type`. The 0-1 row governs and nothing is dispatched at all.
+- A task whose `complexity` never arrived fits no complexity row. Without the last row it would land nowhere, and what ought to happen next would be anybody's guess — preventing exactly that is the row's whole job.
 
 ### Branch A: Goal / Large Undecomposed Task
 
@@ -941,6 +954,23 @@ Each element of `workflow_steps` is an object with these keys:
 | `dispatched` | boolean | Always | `true` if the step ran; `false` if intentionally skipped |
 | `duration_ms` | integer | When `dispatched=true` | Wall-clock time the step took, in milliseconds |
 | `reason` | string | When `dispatched=false` | Short explanation of why the step was skipped |
+| `reason_code` | enum | Optional, and only alongside `dispatched=false` | A fixed-vocabulary label for the *category* of skip, added under D239 so skips can be counted instead of read one at a time. It accompanies `reason` and does not stand in for it — the label is what aggregates across tasks, the sentence is what tells a person what happened on this one. Any value outside the six below comes back `422`; leaving the key off is never an error |
+
+<!-- canon:reason-code-vocabulary v1 -->
+### Choosing the `reason_code`
+
+Six labels and no seventh — the enum is closed, so a spelling this list does not contain is a `422` rather than a new category. Sending no `reason_code` at all stays valid on every entry; what is never valid is sending one *in place of* the prose `reason`, because the two answer different questions (D239).
+
+| Value | Record it when |
+|---|---|
+| `decision_matrix_skip` | The Step 3 row this task falls on already reads Skip in this step's column |
+| `ran_inline` | The step genuinely happened, just in the orchestrator's own turn instead of through a dispatched custom agent |
+| `hook_body_empty` | The matching `.stride.md` section has nothing under it, leaving the hook with no work to do |
+| `subsumed_by_task_spec` | The task record itself had already decided whatever this step was there to decide |
+| `folded_into_prior_step` | Something earlier came back carrying this step's output too — usually an explorer whose report already contained the plan |
+| `matrix_deviation` | This step was required by the matrix and did not happen |
+
+**`matrix_deviation` is the honest one.** It is the only label in the set that admits the workflow was not followed, and carrying it is the entire point: a step the matrix required and that nobody ran is reported under this label and never re-badged as `decision_matrix_skip`, which would file a deviation as though the table had sanctioned it. Put the actual circumstances into `reason`.
 
 ### End-of-Workflow Example (full dispatch)
 

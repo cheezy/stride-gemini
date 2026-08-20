@@ -21,6 +21,22 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Added — canon anchors, and the two rules this port did not yet carry (D253, D239)
+
+The fleet's port-canon drift check looks for a one-line HTML comment naming a rule id and a version, and reports a cell MISSING whenever it cannot find one. This port already stated two of the four rules in its own words but carried nothing machine-findable for them, and carried neither the wording nor the marker for the other two. All four cells now report ok.
+
+Marker only, no wording change: the failed-verdict `note` rule in `agents/task-reviewer.md` and the sole-decision-point statement under the `stride-workflow` Step 3 matrix already said what the canon says, so each gained a comment line directly above it and nothing else.
+
+New here: **row precedence**, written beside the Step 3 matrix. More than one row of that matrix can describe a single task — a `medium` defect matches two of them, a one-file defect matches two — and the table never said which one governs. It now resolves top-down: the decomposition row, then `small, 0-1 key_files` ahead of `Defect type`, then `Defect type` ahead of the bare complexity rows, then the matching complexity row, then the new `Complexity absent or unrecognised` row and only where `complexity` arrived empty or unknown. The 0-1 `key_files` step deliberately precedes the type step: reversed, every small single-file defect would begin dispatching an explorer and a reviewer, contradicting Branch B. Nothing about how a well-formed task routes changes — the order picks an answer the plugin already gave.
+
+`Complexity absent or unrecognised` is added to the `stride-subagent-workflow` mirror as well, in that table's own `Run`/`Skip` vocabulary and with `If manual_tests` in the `exploratory-testing` column like every other non-goal row, so the mirror still agrees with Step 3 row for row. The mirror points at Step 3 for the ordering rather than restating it.
+
+Also new: **`reason_code`** on `workflow_steps` entries, documented in `stride-workflow`'s Per-Step Schema. An optional enum of six values that rides alongside the existing prose `reason` and never replaces it, so skips can be counted by category instead of read one by one; an unlisted value is a `422`, an absent key is fine. One of the six, `matrix_deviation`, exists to record a step the matrix required and that did not run — the case the other five must not be stretched to cover.
+
+Documentation only. No extension behaviour changes and the version manifest is untouched.
+
 ## [1.44.0] - 2026-08-19
 
 
