@@ -21,7 +21,7 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.45.0] - 2026-08-20
 
 ### Added — canon anchors, and the two rules this port did not yet carry (D253, D239)
 
@@ -35,7 +35,7 @@ New here: **row precedence**, written beside the Step 3 matrix. More than one ro
 
 Also new: **`reason_code`** on `workflow_steps` entries, documented in `stride-workflow`'s Per-Step Schema. An optional enum of six values that rides alongside the existing prose `reason` and never replaces it, so skips can be counted by category instead of read one by one; an unlisted value is a `422`, an absent key is fine. One of the six, `matrix_deviation`, exists to record a step the matrix required and that did not run — the case the other five must not be stretched to cover.
 
-Documentation only. No extension behaviour changes and the version manifest is untouched.
+Documentation only. No extension behaviour changes; the manifest moves only to carry this release.
 
 ## [1.44.0] - 2026-08-19
 
