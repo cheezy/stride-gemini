@@ -21,6 +21,95 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.46.0] - 2026-09-01
+
+### Added — the loop gate (G422)
+
+Gemini CLI has a real blocking session-end hook, `AfterAgent`, and this
+extension registered `BeforeTool` and `AfterTool` while leaving it entirely
+unused. This release puts it to work: the agent can no longer quietly end a
+turn while a claimable task is still sitting in Ready.
+
+Two pieces, on both halves:
+
+- **A loop-state record.** A successful completion writes
+  `.stride/.loop-state.json` — the completed identifier, `needs_review`
+  verbatim from the API response, an ISO-8601 timestamp and the session id —
+  and any claim clears it. The HOOK writes it, never the agent: an
+  agent-written marker is exactly as skippable as the instruction it replaces.
+  The write is atomic and never fatal to the completion.
+- **An `AfterAgent` gate** that refuses the turn end on exactly one condition —
+  the record exists, `needs_review` is the JSON boolean `false`, and
+  `GET /api/tasks/next` answers 200 with a claimable identifier — and permits
+  on everything else, across 25 enumerated permit paths against one block path.
+
+Gemini's contract differs from the sibling ports in two ways that both matter.
+The decision value is `deny`, not `block` — the wrong token means no block at
+all. And stdout must carry the JSON document and nothing else, because a stray
+byte makes the CLI fall back to *allowing* the stop: a silent failure of the
+whole gate. Exactly one statement in each half writes to stdout; every
+diagnostic goes to stderr. Since deny and permit share exit 0, stdout is the
+only thing that distinguishes them.
+
+Gemini documents no runaway cap, so the gate owns its loop protection:
+`stop_hook_active` is honoured where the runtime sends it, and a bounded
+counter keyed on the completed identifier is the actual guarantee. The count is
+written before blocking and read back, and every failure to record it permits —
+a block that cannot be counted cannot be bounded, and a wedged session is
+strictly worse than a missed gate.
+
+### Fixed — cross-half divergences found while building it
+
+The two halves must agree on which branch fires for one input. Ten did not:
+
+- `Invoke-WebRequest` follows redirects by default, and Windows PowerShell 5.1
+  **preserves the `Authorization` header across them** — so a 30x would forward
+  the bearer token to whatever host the `Location` names. `curl` carries no
+  `-L`. Both now refuse to follow.
+- Command substitution strips a trailing newline before the charset gate, so
+  bash *sanitised by truncation* where the twin refused.
+- A shell variable cannot hold a NUL at all, so a NUL-bearing identifier
+  arrived charset-clean and reached the model's next prompt. The judgement
+  moved inside `jq`, where the raw bytes still exist.
+- `jq -e` reports its *last* output's status, so a multi-document body passed
+  every shape gate and `jq -j` concatenated two identifiers into that same
+  prompt. All reads are now slurped and asserted single-document.
+- A counter symlinked to `/dev/null` made the write succeed while the read
+  always saw 0 — a permanent, uncounted block. A hostile repo can commit that.
+- The loopback allowance matched a `127.` *prefix*, admitting the public domain
+  `127.0.0.1.evil.example.com` in cleartext.
+- `[PSCustomObject]` is an alias for `PSObject`, so `-is` was TRUE for a
+  String, an Int64 and a Boolean — every PowerShell type guard was a near
+  no-op.
+- `.PSObject.Properties.Name` throws under `StrictMode` on a zero-property
+  object, so an ordinary `{"data":{}}` hit the catch-all trap.
+- bash accepted a bare JSON string or array as a loop-state document.
+- `ConvertFrom-Json` unrolls a one-element top-level array, and a non-string
+  `cwd` rooted the two halves at different directories.
+
+Also hardened: the bearer token is refused over cleartext HTTP to any
+non-loopback host (loopback stays permitted, or local development breaks), and
+the server-supplied identifier is delimited and labelled as data in the reason,
+which the CLI feeds back to the model as a prompt.
+
+### Testing
+
+Bash Test Group 19 and PowerShell Test Group 15, mirrored case for case: 481
+and 400 assertions, weighted toward the permits, every case verified to fail
+when the behaviour it pins is removed. bash is mutation-verified by 26
+mutations each run against the complete suite; PowerShell by a differential
+probe on each of its nineteen permit branches. That verification found five
+cases that were passing while testing nothing, and the harness itself was found
+to inherit `STRIDE_ALLOW_STOP` from the ambient shell, which would have made
+~30 permit assertions vacuous.
+
+### Known limit
+
+`docs/HOOK_RESEARCH.md` documents the exit-0 plus JSON-decision pairing for
+`BeforeTool` only, not `AfterAgent`. If `AfterAgent` honours exit 2 alone, this
+gate silently never blocks — recorded as risk R1 in both script headers, and
+settled only by a live CLI restart.
+
 ## [1.45.0] - 2026-08-20
 
 ### Added — canon anchors, and the two rules this port did not yet carry (D253, D239)
