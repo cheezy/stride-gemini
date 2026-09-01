@@ -1,6 +1,7 @@
 # test-stride-hook.ps1 — Tests for stride-hook.ps1 PowerShell hook script
 #
-# Mirrors all 6 test groups from test-stride-hook.sh.
+# Mirrors the test groups in test-stride-hook.sh; Test Group 14 here is the
+# case-for-case mirror of that suite's Test Group 18 (W2144 loop state).
 # Self-contained — no Pester or external dependencies.
 #
 # Usage: pwsh test-stride-hook.ps1
@@ -1958,6 +1959,340 @@ echo "ran"
     } finally {
         Remove-Job $crListenerJob -Force -ErrorAction SilentlyContinue
     }
+}
+
+# ============================================================
+# Test Group 14: loop state on completion (W2144)
+# ============================================================
+# Case-for-case mirror of test-stride-hook.sh Test Group 18. The three cases
+# that suite documents as deliberately NOT ported from the Claude Code original
+# (33g/33h/33i, all Tier-2 snapshot-recovery guards for machinery this port
+# does not have) are absent here for the same reason — see the comment block at
+# the head of that group.
+Write-Host ""
+Write-Host "=== Test Group 14: loop state on completion (W2144) ==="
+
+$g14IsWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+    [System.Runtime.InteropServices.OSPlatform]::Windows)
+
+# curl is stubbed so the changed_files self-heal makes no network call: these
+# cases are about the loop-state record, and a real curl would make them slow
+# and non-deterministic. Windows keeps the real curl — the stub is a shell
+# script — which costs only a little time on that platform.
+$g14OldPath = $env:PATH
+$g14Stub = Join-Path $TmpDir 'g14stub'
+New-Item -ItemType Directory -Path $g14Stub -Force | Out-Null
+if (-not $g14IsWindows) {
+    [System.IO.File]::WriteAllText((Join-Path $g14Stub 'curl'), "#!/usr/bin/env bash`nexit 0`n")
+    & chmod '+x' (Join-Path $g14Stub 'curl')
+    $env:PATH = $g14Stub + [System.IO.Path]::PathSeparator + $env:PATH
+}
+
+function New-G14Proj {
+    $d = Join-Path $TmpDir ("g14-" + [System.Guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $d -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $d '.stride.md'),
+        "## before_doing`n``````bash`n``````n`n## before_review`n``````bash`n``````n")
+    return $d
+}
+function New-G14Input {
+    param([string]$SessionId, [string]$Command, [string]$Payload,
+          [switch]$NoSessionId, [switch]$NoResponse)
+    $o = [ordered]@{}
+    if (-not $NoSessionId) { $o['session_id'] = $SessionId }
+    $o['tool_input'] = [ordered]@{ command = $Command }
+    if (-not $NoResponse) { $o['tool_response'] = [ordered]@{ stdout = $Payload } }
+    return ($o | ConvertTo-Json -Compress -Depth 6)
+}
+function Get-G14StatePath { param([string]$Dir) return (Join-Path (Join-Path $Dir '.stride') '.loop-state.json') }
+function Get-G14Presence  { param([string]$Dir) if (Test-Path -LiteralPath (Get-G14StatePath $Dir)) { return 'present' } else { return 'absent' } }
+function Read-G14State    { param([string]$Dir) return (Get-Content -Raw -LiteralPath (Get-G14StatePath $Dir) | ConvertFrom-Json) }
+
+$g14Cmd    = 'curl -X PATCH https://stride.invalid/api/tasks/99/complete -H "Authorization: Bearer SECRETVALUE"'
+$g14Claim  = 'curl -X POST https://stride.invalid/api/tasks/claim'
+$g14Ok     = '{"data":{"id":99,"identifier":"W2144","needs_review":false},"hooks":[{"name":"before_review"}]}'
+$g14OkTrue = '{"data":{"id":99,"identifier":"W2144","needs_review":true},"hooks":[{"name":"before_review"}]}'
+$g14_422   = '{"errors":{"base":["completion is invalid"]}}'
+
+try {
+    # Session-id env vars must not leak in from the ambient environment.
+    Remove-Item Env:\GEMINI_SESSION_ID -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_SESSION_ID -ErrorAction SilentlyContinue
+
+    # 14a: a successful completion records all four fields
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-abc' -Command $g14Cmd -Payload $g14Ok) -Phase 'post' -ProjectDir $d
+    $j = Read-G14State $d
+    Assert-Eq "14a: records the identifier" "W2144" $j.identifier
+    Assert-Eq "14a: records needs_review false" "False" ([string]$j.needs_review)
+    Assert-Eq "14a: records the session id" "sess-abc" $j.session_id
+    # Asserted against the RAW file text, never the parsed object: PowerShell's
+    # ConvertFrom-Json silently converts an ISO-8601 string into a [DateTime],
+    # so $j.completed_at would be matched in the host's local format and the
+    # on-disk shape - the thing the other half has to agree with - would go
+    # untested.
+    Assert-Eq "14a: completed_at is ISO8601 Z" $true `
+        ((Get-Content -Raw -LiteralPath (Get-G14StatePath $d)) -cmatch '"completed_at":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"')
+
+    # 14b: needs_review=true is recorded verbatim AND as a real boolean. The
+    # type assert is the point: a quoted "true" would stringify identically.
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-b' -Command $g14Cmd -Payload $g14OkTrue) -Phase 'post' -ProjectDir $d
+    $j = Read-G14State $d
+    Assert-Eq "14b: needs_review true recorded" "True" ([string]$j.needs_review)
+    Assert-Eq "14b: needs_review is a boolean, not a string" "Boolean" $j.needs_review.GetType().Name
+
+    # 14b2: a STRING "true" in the response is refused outright
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-b2' -Command $g14Cmd -Payload '{"data":{"id":9,"identifier":"W9","needs_review":"true"}}') -Phase 'post' -ProjectDir $d
+    Assert-Eq "14b2: a quoted needs_review is refused, nothing recorded" "absent" (Get-G14Presence $d)
+
+    # 14c: the session id falls back to the environment when the input omits it
+    $noSid = New-G14Input -NoSessionId -Command $g14Cmd -Payload $g14Ok
+    $d = New-G14Proj
+    $env:CLAUDE_SESSION_ID = 'env-sess'
+    $null = Invoke-HookScript -InputJson $noSid -Phase 'post' -ProjectDir $d
+    Assert-Eq "14c: falls back to CLAUDE_SESSION_ID" "env-sess" (Read-G14State $d).session_id
+    $d = New-G14Proj
+    $env:GEMINI_SESSION_ID = 'gem-sess'
+    $null = Invoke-HookScript -InputJson $noSid -Phase 'post' -ProjectDir $d
+    Assert-Eq "14c: GEMINI_SESSION_ID wins over CLAUDE_SESSION_ID" "gem-sess" (Read-G14State $d).session_id
+    Remove-Item Env:\GEMINI_SESSION_ID -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_SESSION_ID -ErrorAction SilentlyContinue
+
+    # 14d: an absent session id degrades to "unknown" rather than dropping the record
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson $noSid -Phase 'post' -ProjectDir $d
+    $j = Read-G14State $d
+    Assert-Eq "14d: absent session id degrades to unknown" "unknown" $j.session_id
+    Assert-Eq "14d: the record is still written" "W2144" $j.identifier
+
+    # 14e: a non-identifier-shaped session id degrades to "unknown", never recorded raw
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'not a/session id' -Command $g14Cmd -Payload $g14Ok) -Phase 'post' -ProjectDir $d
+    Assert-Eq "14e: unsafe session id degrades to unknown" "unknown" (Read-G14State $d).session_id
+
+    # 14f: a 422 completion does NOT write the record, and is not announced
+    $d = New-G14Proj
+    $r = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-f' -Command $g14Cmd -Payload $g14_422) -Phase 'post' -ProjectDir $d
+    Assert-Eq "14f: a 422 completion writes nothing" "absent" (Get-G14Presence $d)
+    Assert-NotContains "14f: a well-formed 422 is not announced as unparsable" "unparsable" $r.Stderr
+
+    # 14g: a successful claim clears a previous completion's record
+    $d = New-G14Proj
+    New-Item -ItemType Directory -Path (Join-Path $d '.stride') -Force | Out-Null
+    [System.IO.File]::WriteAllText((Get-G14StatePath $d), '{"identifier":"W_OLD","needs_review":false,"completed_at":"2026-01-01T00:00:00Z","session_id":"old"}' + "`n")
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-g' -Command $g14Claim -Payload '{"data":{"id":1,"identifier":"W1"}}') -Phase 'post' -ProjectDir $d
+    Assert-Eq "14g: a claim clears the record" "absent" (Get-G14Presence $d)
+
+    # 14h: the writer's mechanics, asserted structurally on the source. The
+    # forbidden writers are the ones that would silently break byte-identity:
+    # Set-Content and Out-File append [Environment]::NewLine (CRLF on Windows)
+    # and, under Windows PowerShell 5.1, -Encoding UTF8 emits a BOM.
+    $g14Src = Get-Content -Raw -LiteralPath $HookScript
+    $g14Fn = [regex]::Match($g14Src, '(?ms)^function Write-LoopState \{.*?^\}').Value
+    # Comments are stripped before the NotContains checks below: the writer's
+    # own commentary NAMES the forbidden writers in order to explain why they
+    # are forbidden, and an unstripped body would match on that prose rather
+    # than on a real call.
+    $g14FnCode = (($g14Fn -split "`n") | Where-Object { $_.TrimStart() -notlike '#*' }) -join "`n"
+    Assert-Eq "14h: the writer produced a body to inspect" $true ($g14Fn.Length -gt 0)
+    Assert-Contains "14h: writes via WriteAllText (no BOM, explicit LF)" "System.IO.File]::WriteAllText" $g14FnCode
+    Assert-NotContains "14h: never uses Set-Content" "Set-Content" $g14FnCode
+    Assert-NotContains "14h: never uses Out-File" "Out-File" $g14FnCode
+    Assert-NotContains "14h: never writes to stdout" "Write-Output" $g14FnCode
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-h' -Command $g14Cmd -Payload $g14Ok) -Phase 'post' -ProjectDir $d
+    Assert-Eq "14h: a successful write leaves no temp behind" 0 `
+        (@(Get-ChildItem -LiteralPath (Join-Path $d '.stride') -Filter 'loop-state.*' -ErrorAction SilentlyContinue)).Count
+
+    # 14i: exactly the four documented keys, and never the Bearer token
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-i' -Command $g14Cmd -Payload $g14Ok) -Phase 'post' -ProjectDir $d
+    $j = Read-G14State $d
+    Assert-Eq "14i: exactly the four documented keys" "completed_at identifier needs_review session_id" `
+        (($j.PSObject.Properties.Name | Sort-Object) -join ' ')
+    $g14Raw = Get-Content -Raw -LiteralPath (Get-G14StatePath $d)
+    Assert-NotContains "14i: the token never reaches the record (value)" "SECRETVALUE" $g14Raw
+    Assert-NotContains "14i: the token never reaches the record (scheme)" "Bearer" $g14Raw
+
+    # 14j: an unwritable .stride/ is announced and never fails the completion
+    if ($g14IsWindows) {
+        Write-Host "  SKIP: 14j (POSIX mode bits unavailable on Windows)"
+    } else {
+        $d = New-G14Proj
+        New-Item -ItemType Directory -Path (Join-Path $d '.stride') -Force | Out-Null
+        & chmod '500' (Join-Path $d '.stride')
+        $r = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-j' -Command $g14Cmd -Payload $g14Ok) -Phase 'post' -ProjectDir $d
+        Assert-Exit "14j: an unwritable .stride/ still exits 0" 0 $r.ExitCode
+        Assert-Contains "14j: the failure is announced on stderr" "loop state" $r.Stderr
+        Assert-Eq "14j: nothing was recorded" "absent" (Get-G14Presence $d)
+        & chmod '700' (Join-Path $d '.stride')
+    }
+
+    # 14k: the claim -> complete -> claim cycle leaves absent, present, absent
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-k' -Command $g14Claim -Payload '{"data":{"id":1,"identifier":"W1"}}') -Phase 'post' -ProjectDir $d
+    $k1 = Get-G14Presence $d
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-k' -Command $g14Cmd -Payload $g14Ok) -Phase 'post' -ProjectDir $d
+    $k2 = Get-G14Presence $d
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-k' -Command $g14Claim -Payload '{"data":{"id":2,"identifier":"W2"}}') -Phase 'post' -ProjectDir $d
+    $k3 = Get-G14Presence $d
+    Assert-Eq "14k: claim/complete/claim cycles absent-present-absent" "absent present absent" "$k1 $k2 $k3"
+
+    # 14l: a failed or unparsable claim STILL clears — the safe direction
+    foreach ($g14Body in @('{"errors":{"base":["no task available"]}}', '{"data":{"identi')) {
+        $d = New-G14Proj
+        New-Item -ItemType Directory -Path (Join-Path $d '.stride') -Force | Out-Null
+        [System.IO.File]::WriteAllText((Get-G14StatePath $d), '{"identifier":"W_OLD","needs_review":false,"completed_at":"2026-01-01T00:00:00Z","session_id":"old"}' + "`n")
+        $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-l' -Command $g14Claim -Payload $g14Body) -Phase 'post' -ProjectDir $d
+        Assert-Eq "14l: a failed/unparsable claim still clears the record" "absent" (Get-G14Presence $d)
+    }
+
+    # 14m: an absent tool_response records nothing and is NOT announced as
+    # unparsable — "no body at all" must stay out of a channel claiming a body
+    # failed to parse. This is exactly why Get-CompletionRawBody exists.
+    $d = New-G14Proj
+    $r = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-m' -Command $g14Cmd -NoResponse) -Phase 'post' -ProjectDir $d
+    Assert-Exit "14m: an absent tool_response exits 0" 0 $r.ExitCode
+    Assert-Eq "14m: nothing recorded" "absent" (Get-G14Presence $d)
+    Assert-NotContains "14m: not announced as unparsable" "unparsable" $r.Stderr
+
+    # 14n: a truncated completion body records nothing and IS announced
+    $d = New-G14Proj
+    $r = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-n' -Command $g14Cmd -Payload '{"data":{"identifier":"W2 TRUNCA') -Phase 'post' -ProjectDir $d
+    Assert-Eq "14n: a truncated body records nothing" "absent" (Get-G14Presence $d)
+    Assert-Contains "14n: a truncated body is announced as unparsable" "unparsable" $r.Stderr
+
+    # 14o: the exact input class where the two shells can silently disagree.
+    # bash reads values through $( ), which strips every trailing newline;
+    # ConvertTo-LoopStateValue strips trailing LFs so both agree. An INTERIOR
+    # newline is refused by both.
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId "trail-nl`n" -Command $g14Cmd -Payload $g14Ok) -Phase 'post' -ProjectDir $d
+    Assert-Eq "14o: a trailing newline in the session id is stripped, not refused" "trail-nl" (Read-G14State $d).session_id
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId "a`nb" -Command $g14Cmd -Payload $g14Ok) -Phase 'post' -ProjectDir $d
+    Assert-Eq "14o: an interior newline is refused" "unknown" (Read-G14State $d).session_id
+
+    # 14p: AC5 — both halves produce a byte-identical record for the same input.
+    # The mirror image of test-stride-hook.sh 18p, driven from this side.
+    $g14Bash = Get-Command bash -ErrorAction SilentlyContinue
+    $g14ShHook = Join-Path $ScriptDir 'stride-hook.sh'
+    if (-not $g14Bash -or -not (Test-Path -LiteralPath $g14ShHook)) {
+        Write-Host "  SKIP: 14p cross-half byte-identity (bash not available — AC5 is still covered on this host by 14u, which pins the same on-disk shape without the other half)"
+    } else {
+        $dA = New-G14Proj
+        $dB = New-G14Proj
+        $g14In = New-G14Input -SessionId 'sess-p' -Command $g14Cmd -Payload $g14OkTrue
+        $null = Invoke-HookScript -InputJson $g14In -Phase 'post' -ProjectDir $dB
+        $env:GEMINI_PROJECT_DIR = $dA
+        $null = ($g14In | & bash $g14ShHook post 2>&1)
+        Remove-Item Env:\GEMINI_PROJECT_DIR -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath (Get-G14StatePath $dA))) {
+            Assert-Eq "14p: the bash half wrote a record" "present" "absent"
+        } else {
+            $bytesA = [System.IO.File]::ReadAllBytes((Get-G14StatePath $dA))
+            $bytesB = [System.IO.File]::ReadAllBytes((Get-G14StatePath $dB))
+            $textA = [System.Text.Encoding]::UTF8.GetString($bytesA)
+            $textB = [System.Text.Encoding]::UTF8.GetString($bytesB)
+            # A fixed-length timestamp plus an identical remainder means an
+            # identical byte layout, so substituting a constant is sound.
+            $normA = [regex]::Replace($textA, '"completed_at":"[^"]*"', '"completed_at":"TS"')
+            $normB = [regex]::Replace($textB, '"completed_at":"[^"]*"', '"completed_at":"TS"')
+            Assert-Eq "14p: both halves produce a byte-identical record" $normA $normB
+            Assert-Eq "14p: both records are the same size" $bytesA.Length $bytesB.Length
+            Assert-Eq "14p: the PowerShell record has no BOM" $false `
+                ($bytesB.Length -ge 3 -and $bytesB[0] -eq 0xEF -and $bytesB[1] -eq 0xBB -and $bytesB[2] -eq 0xBF)
+            Assert-Eq "14p: the PowerShell record has no CR" 0 (@($bytesB | Where-Object { $_ -eq 13 })).Count
+            Assert-Eq "14p: the PowerShell record ends in exactly one LF" 10 $bytesB[$bytesB.Length - 1]
+        }
+    }
+    # 14q: the OVERWRITE path — a completion over an EXISTING record. Without
+    # this the File::Replace branch (added to avoid .NET Framework's
+    # delete-then-move window) never executes, and AC2's atomicity is asserted
+    # only structurally. This is the case atomicity is actually about.
+    $d = New-G14Proj
+    New-Item -ItemType Directory -Path (Join-Path $d '.stride') -Force | Out-Null
+    [System.IO.File]::WriteAllText((Get-G14StatePath $d), '{"identifier":"W_OLD","needs_review":true,"completed_at":"2026-01-01T00:00:00Z","session_id":"old"}' + "`n")
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-q' -Command $g14Cmd -Payload $g14Ok) -Phase 'post' -ProjectDir $d
+    $j = Read-G14State $d
+    Assert-Eq "14q: a completion overwrites an existing record" "W2144" $j.identifier
+    Assert-Eq "14q: the overwritten record carries the new needs_review" "False" ([string]$j.needs_review)
+    Assert-Eq "14q: the overwritten record carries the new session id" "sess-q" $j.session_id
+    Assert-Eq "14q: the overwrite leaves no temp behind" 0 `
+        (@(Get-ChildItem -LiteralPath (Join-Path $d '.stride') -Filter 'loop-state.*' -ErrorAction SilentlyContinue)).Count
+
+    # 14r: an accented identifier is refused. The twin's gate was locale-
+    # dependent (a collation-ordered glob range accepted these on bash 3.2
+    # under UTF-8) while this side's -cmatch is codepoint-based; both now
+    # refuse, and this case pins the agreeing half.
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-r' -Command $g14Cmd -Payload '{"data":{"id":9,"identifier":"Wé144","needs_review":true}}') -Phase 'post' -ProjectDir $d
+    Assert-Eq "14r: an accented identifier is refused" "absent" (Get-G14Presence $d)
+
+    # 14s: session-id TYPE parity with jq — the ladder in
+    # Write-LoopStateForCompletion. A bare [string] cast fails all three.
+    $d = New-G14Proj
+    $env:CLAUDE_SESSION_ID = 'env-sess'
+    $null = Invoke-HookScript -InputJson '{"session_id":["abc"],"tool_input":{"command":"c /api/tasks/99/complete"},"tool_response":{"stdout":"{\"data\":{\"id\":99,\"identifier\":\"W2144\",\"needs_review\":false}}"}}' -Phase 'post' -ProjectDir $d
+    Assert-Eq "14s: an array session id degrades to unknown, never the env value" "unknown" (Read-G14State $d).session_id
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson '{"session_id":12345,"tool_input":{"command":"c /api/tasks/99/complete"},"tool_response":{"stdout":"{\"data\":{\"id\":99,\"identifier\":\"W2144\",\"needs_review\":false}}"}}' -Phase 'post' -ProjectDir $d
+    Assert-Eq "14s: a numeric session id is recorded as its plain rendering" "12345" (Read-G14State $d).session_id
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson '{"session_id":false,"tool_input":{"command":"c /api/tasks/99/complete"},"tool_response":{"stdout":"{\"data\":{\"id\":99,\"identifier\":\"W2144\",\"needs_review\":false}}"}}' -Phase 'post' -ProjectDir $d
+    Assert-Eq "14s: a literal false session id is absent to jq, so the env wins" "env-sess" (Read-G14State $d).session_id
+    Remove-Item Env:\CLAUDE_SESSION_ID -ErrorAction SilentlyContinue
+
+    # 14t: a mixed-case response key is refused, matching jq's case-SENSITIVE
+    # .data path. -contains and PowerShell property access are BOTH
+    # case-insensitive, so this is the case the -c forms exist for.
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-t' -Command $g14Cmd -Payload '{"Data":{"id":9,"Identifier":"W9","Needs_Review":true}}') -Phase 'post' -ProjectDir $d
+    Assert-Eq "14t: a mixed-case response key is refused" "absent" (Get-G14Presence $d)
+
+    # 14u: the on-disk byte shape, pinned WITHOUT reference to the other half.
+    # 14p and 18p can only run where BOTH shells exist — which is exactly not
+    # the native-Windows configuration the BOM, CRLF and atomic-replace
+    # defences were written for (there stride-hook.sh delegates to
+    # powershell.exe 5.1 and bash is absent, so both cross-half cases skip and
+    # AC5 would have no coverage at all). This case asserts the same on-disk
+    # properties against a fixed expectation, so it still runs there.
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson (New-G14Input -SessionId 'sess-u' -Command $g14Cmd -Payload $g14OkTrue) -Phase 'post' -ProjectDir $d
+    $tBytes = [System.IO.File]::ReadAllBytes((Get-G14StatePath $d))
+    $tText = [System.Text.Encoding]::UTF8.GetString($tBytes)
+    $tStamp = [regex]::Match($tText, '"completed_at":"([^"]*)"').Groups[1].Value
+    Assert-Eq "14u: the timestamp is ISO8601 Z" $true ($tStamp -cmatch '\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\z')
+    Assert-Eq "14u: the on-disk bytes match the pinned shape exactly" `
+        ('{"identifier":"W2144","needs_review":true,"completed_at":"' + $tStamp + '","session_id":"sess-u"}' + "`n") $tText
+    Assert-Eq "14u: no BOM" $false ($tBytes.Length -ge 3 -and $tBytes[0] -eq 0xEF -and $tBytes[1] -eq 0xBB -and $tBytes[2] -eq 0xBF)
+    Assert-Eq "14u: no CR anywhere" 0 (@($tBytes | Where-Object { $_ -eq 13 })).Count
+    Assert-Eq "14u: exactly one trailing LF" 10 $tBytes[$tBytes.Length - 1]
+    # 14v: an ISO-8601-shaped identifier and session id. ConvertFrom-Json
+    # coerces both into [DateTime] before the gates see them, and the original
+    # text cannot be read back off the object — so this is the counterexample
+    # Get-RawJsonString exists for. bash keeps the literal (every character is
+    # inside the charset), and this half must reproduce it exactly.
+    $d = New-G14Proj
+    $null = Invoke-HookScript -InputJson '{"session_id":"2026-02-02T11:22:33Z","tool_input":{"command":"c /api/tasks/99/complete"},"tool_response":{"stdout":"{\"data\":{\"id\":9,\"identifier\":\"2026-01-01T00:00:00Z\",\"needs_review\":true}}"}}' -Phase 'post' -ProjectDir $d
+    $vRaw = Get-Content -Raw -LiteralPath (Get-G14StatePath $d)
+    Assert-Contains "14v: a date-shaped identifier is kept verbatim" '"identifier":"2026-01-01T00:00:00Z"' $vRaw
+    Assert-Contains "14v: a date-shaped session id is kept verbatim" '"session_id":"2026-02-02T11:22:33Z"' $vRaw
+
+    # 14w: a mixed-case tool_response key. bash's jq '.tool_response' is
+    # case-sensitive and unwraps nothing, so Get-ResponsePayload must not
+    # either — otherwise the two halves disagree at the outer boundary.
+    $d = New-G14Proj
+    $r = Invoke-HookScript -InputJson '{"session_id":"sess-w","tool_input":{"command":"c /api/tasks/99/complete"},"Tool_Response":{"stdout":"{\"data\":{\"id\":99,\"identifier\":\"W2144\",\"needs_review\":false}}"}}' -Phase 'post' -ProjectDir $d
+    Assert-Eq "14w: a mixed-case tool_response key records nothing" "absent" (Get-G14Presence $d)
+    Assert-NotContains "14w: and is not announced as unparsable" "unparsable" $r.Stderr
+} finally {
+    $env:PATH = $g14OldPath
+    Remove-Item Env:\GEMINI_SESSION_ID -ErrorAction SilentlyContinue
+    Remove-Item Env:\CLAUDE_SESSION_ID -ErrorAction SilentlyContinue
+    Remove-Item Env:\GEMINI_PROJECT_DIR -ErrorAction SilentlyContinue
 }
 
 # ============================================================

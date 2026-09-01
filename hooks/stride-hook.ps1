@@ -23,6 +23,13 @@ $Phase = if ($args.Count -gt 0) { $args[0] } else { '' }
 $ProjectDir = if ($env:GEMINI_PROJECT_DIR) { $env:GEMINI_PROJECT_DIR } elseif ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } else { '.' }
 $StrideMd = Join-Path $ProjectDir '.stride.md'
 $EnvCache = Join-Path $ProjectDir '.stride-env-cache'
+# (W2144) The loop-state record the Stop/AfterAgent gate reads. THE HOOK writes
+# this, never the agent: an agent-written marker is exactly as skippable as the
+# instruction it replaces. Path is identical to the bash half and to the Claude
+# Code original (W2123) - all three must interoperate on one path. Nested
+# Join-Path rather than a '.stride/.loop-state.json' literal: Windows
+# PowerShell 5.1's Join-Path takes only two path arguments.
+$LoopStateFile = Join-Path (Join-Path $ProjectDir '.stride') '.loop-state.json'
 
 # (W1519) Keys the server supplied with an empty value. SetEnvironmentVariable
 # with '' DELETES the Process env var, so Invoke-StrideSection re-adds these to
@@ -274,6 +281,32 @@ if ($HookName -eq 'before_doing') {
     } catch {
         # Caching failure is non-fatal
     }
+
+    # (W2144) Deliberately OUTSIDE the try/catch above: the three sibling
+    # clears sit inside it, so an exception anywhere in the env-cache parse
+    # skips them. This one must be reached on EVERY claim, including one whose
+    # response body is unparsable, which is what makes it match the bash half
+    # (where the clears sit under no error trap at all).
+    #
+    # The clear is UNCONDITIONAL - it runs on a failed claim, an empty-queue
+    # claim and an unparsable claim body alike. The most common failed claim is
+    # against an empty Ready queue, which is how essentially every session ends;
+    # a record preserved there is byte-identical to one left by an agent that
+    # completed and never claimed again, yet a gate must refuse in the second
+    # case and must not in the first. An over-eager clear costs only a missed
+    # gate, and missed is the safe side.
+    #
+    # Announced on failure, unlike the silent siblings: their staleness is
+    # benign, a stale loop state is the one direction this design calls
+    # dangerous. Gemini requires JSON-only stdout, so it goes to stderr.
+    try {
+        if (Test-Path -LiteralPath $LoopStateFile) {
+            Remove-Item -LiteralPath $LoopStateFile -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $LoopStateFile) {
+                [Console]::Error.WriteLine("stride-hook: could not clear the loop state at $LoopStateFile; a stale completion record remains")
+            }
+        }
+    } catch { }
 }
 
 # Load cached env vars if available (all hooks benefit from this)
@@ -956,7 +989,10 @@ function Get-ResponsePayload {
         return $null
     }
 
-    if ($parsed.PSObject.Properties.Name -notcontains 'tool_response') { return $null }
+    # -cnotcontains: bash reads this with jq '.tool_response', which is
+    # case-SENSITIVE. Get-CompletionRawBody reads the same two keys, so leaving
+    # this case-insensitive would have the two readers of one field disagree.
+    if ($parsed.PSObject.Properties.Name -cnotcontains 'tool_response') { return $null }
 
     $resp = $parsed.tool_response
     if (-not $resp) { return $null }
@@ -964,7 +1000,7 @@ function Get-ResponsePayload {
     $payload = $null
 
     # Shape 1: {"stdout":"<json>"} wrapper (Bash-tool host)
-    if ($resp -is [PSCustomObject] -and $resp.PSObject.Properties.Name -contains 'stdout') {
+    if ($resp -is [PSCustomObject] -and $resp.PSObject.Properties.Name -ccontains 'stdout') {
         try { $payload = $resp.stdout | ConvertFrom-Json } catch { $payload = $null }
     }
 
@@ -979,6 +1015,283 @@ function Get-ResponsePayload {
     }
 
     return $payload
+}
+
+# (W2144) Loop-state helpers - the twin of the bash half's loop_state_safe /
+# loop_state_payload_ok / write_loop_state / record_loop_state_for_completion.
+# Both halves must produce a BYTE-IDENTICAL record for the same input, so every
+# divergence risk is closed deliberately and commented where it is closed.
+
+# Charset gate. \A and \z rather than ^ and $, and -cmatch rather than -match:
+# in .NET, $ matches at end-of-string OR immediately before a trailing newline,
+# so "abc`n" would pass a $-anchored pattern and be recorded verbatim while the
+# bash half's charset glob refuses it. \z admits no such trailing newline.
+function Test-LoopStateSafe {
+    param([string]$Value)
+    if (-not $Value) { return $false }
+    if ($Value.Length -gt 64) { return $false }
+    return ($Value -cmatch '\A[A-Za-z0-9_.:-]+\z')
+}
+
+# Strip trailing LFs, and ONLY trailing LFs. This exists solely because the
+# bash half reads both values through $( ), and command substitution strips
+# every trailing newline - without this the halves disagree on exactly one
+# input class. Deliberately not \r?\n: stripping CRLF would record "abc" for
+# "abc`r`n" where bash records "unknown", closing the LF divergence by opening
+# a CR one. Interior newlines are untouched and both halves still refuse them.
+function ConvertTo-LoopStateValue {
+    param([string]$Value)
+    if ($null -eq $Value) { return '' }
+    return ($Value -creplace '\n+\z', '')
+}
+
+# A payload describes a SUCCESSFUL completion only when it carries the two
+# fields the state file is built from, AT THE RIGHT JSON TYPES. Every
+# non-success body the API emits (validation errors, 404s, 422s) lacks .data
+# entirely, so this is the discriminator.
+#
+# -isnot [bool] is the exact mirror of the bash half's jq `type == "boolean"`:
+# ConvertFrom-Json maps JSON true to [bool], "true" to [string] and 1 to an
+# integer, so a body carrying "needs_review":"true" is refused on both halves
+# for the same reason. Set-StrictMode -Version Latest is active file-wide, so
+# every property read is existence-guarded first.
+#
+# -cnotcontains, not -notcontains: jq's `.data.identifier` is CASE-SENSITIVE,
+# whereas both -contains and PowerShell property access are case-INSENSITIVE.
+# Without the case-sensitive form a body carrying "Data" or "Identifier" would
+# be accepted and recorded here and refused by the bash half - the same
+# parse-boundary divergence class the task's pitfalls warn about, latent only
+# because the Stride API happens to emit lowercase keys.
+function Test-LoopStatePayloadOk {
+    param($Payload)
+    if ($null -eq $Payload) { return $false }
+    if ($Payload -isnot [PSCustomObject]) { return $false }
+    if ($Payload.PSObject.Properties.Name -cnotcontains 'data') { return $false }
+    $d = $Payload.data
+    if ($null -eq $d) { return $false }
+    if ($d -isnot [PSCustomObject]) { return $false }
+    if ($d.PSObject.Properties.Name -cnotcontains 'identifier') { return $false }
+    if ($d.PSObject.Properties.Name -cnotcontains 'needs_review') { return $false }
+    # [datetime] is accepted because it can only arise from ConvertFrom-Json
+    # coercing a JSON STRING - jq's `type == "string"` is true for the original,
+    # so refusing it here would diverge from bash. The literal is recovered in
+    # Write-LoopStateForCompletion via Get-RawJsonString.
+    if (($d.identifier -isnot [string]) -and ($d.identifier -isnot [datetime])) { return $false }
+    if (-not $d.identifier) { return $false }
+    if ($d.needs_review -isnot [bool]) { return $false }
+    return $true
+}
+
+# Return the UNPARSED tool_response body, so the unparsable-body diagnostic can
+# be decided by an actual parse attempt. This helper has no bash counterpart
+# and is required: bash's RESPONSE_PAYLOAD *is* the raw string, so `jq empty`
+# can test it directly, whereas Get-ResponsePayload returns $null for four
+# distinct reasons of which only one is a parse failure. Without this, an
+# ABSENT tool_response would be announced as a body that failed to parse.
+function Get-CompletionRawBody {
+    param([string]$InputJson)
+    if (-not $InputJson) { return '' }
+    try { $parsed = $InputJson | ConvertFrom-Json } catch { return '' }
+    if ($null -eq $parsed) { return '' }
+    if ($parsed -isnot [PSCustomObject]) { return '' }
+    if ($parsed.PSObject.Properties.Name -cnotcontains 'tool_response') { return '' }
+    $resp = $parsed.tool_response
+    if ($null -eq $resp) { return '' }
+    if ($resp -is [string]) { return $resp }
+    if ($resp -is [PSCustomObject] -and $resp.PSObject.Properties.Name -ccontains 'stdout') {
+        if ($null -eq $resp.stdout) { return '' }
+        return [string]$resp.stdout
+    }
+    return ''
+}
+
+# ConvertFrom-Json silently coerces any ISO-8601-shaped JSON STRING into a
+# [DateTime] - on every PowerShell version, and with -AsHashtable too - and the
+# original text is NOT recoverable from the resulting object ("2026-01-01T00:00:00Z"
+# comes back as 01/01/2026 00:00:00). jq performs no such coercion, so without
+# this recovery a date-shaped identifier or session id is recorded by the bash
+# half and refused here: one input, two outcomes, which is exactly what AC5
+# forbids. Re-read the literal out of the raw JSON text instead.
+#
+# The pattern deliberately matches only an ESCAPE-FREE literal. Any value
+# carrying a backslash or a quote would fail the charset gate regardless, so
+# declining to recover it costs nothing and keeps this well clear of having to
+# reimplement JSON string unescaping. A $null return means "could not recover",
+# which every caller treats as a refusal rather than a fallback.
+function Get-RawJsonString {
+    param([string]$Raw, [string]$Key)
+    if (-not $Raw) { return $null }
+    $m = [regex]::Match($Raw, '"' + [regex]::Escape($Key) + '"\s*:\s*"([^"\\]*)"')
+    if (-not $m.Success) { return $null }
+    return $m.Groups[1].Value
+}
+
+# Atomic and never fatal, mirroring the bash half: the temp is staged in the
+# DESTINATION directory so the move is same-volume, a failure at any point
+# leaves no temp behind, and the function still returns normally. A completion
+# must never fail because a gate input could not be recorded.
+function Write-LoopState {
+    param([string]$Json)
+
+    # Refuse a destination that exists and is not a regular file, for the same
+    # reason the bash half does: a move onto a DIRECTORY relocates the temp
+    # inside it and reports success, so the record would land where no reader
+    # looks and the temp would survive indefinitely.
+    try {
+        if ((Test-Path -LiteralPath $LoopStateFile) -and -not (Test-Path -LiteralPath $LoopStateFile -PathType Leaf)) {
+            [Console]::Error.WriteLine('stride-hook: loop-state path is not a regular file; not recording')
+            return
+        }
+    } catch { return }
+
+    # Assigned before the try: under Set-StrictMode -Version Latest, reading an
+    # unassigned variable in the catch cleanup is itself a terminating error.
+    $_tmp = $null
+    try {
+        $_dir = Split-Path -Parent $LoopStateFile
+        if (-not (Test-Path -LiteralPath $_dir)) {
+            New-Item -ItemType Directory -Path $_dir -Force -ErrorAction Stop | Out-Null
+        }
+        $_tmp = Join-Path $_dir ('loop-state.{0}.tmp' -f [System.IO.Path]::GetRandomFileName())
+
+        # WriteAllText with an explicit BOM-less UTF8 encoder and a literal LF.
+        # Set-Content and Out-File are BOTH forbidden here: they append
+        # [Environment]::NewLine (CRLF on Windows) and, under Windows
+        # PowerShell 5.1, -Encoding UTF8 emits a BOM. Either alone breaks
+        # byte-identity with the bash half.
+        [System.IO.File]::WriteAllText($_tmp, $Json + "`n", (New-Object System.Text.UTF8Encoding $false))
+
+        # Windows PowerShell 5.1 runs on .NET Framework, whose Move-Item -Force
+        # is delete-then-move: never partial, but there is a window where the
+        # destination is ABSENT. That path is live in this port, not
+        # theoretical - stride-hook.sh delegates to powershell.exe (5.1), not
+        # pwsh, on native Windows without bash. File::Replace is an atomic
+        # overwrite on NTFS; File::Move is an atomic create. Move-Item remains
+        # the fallback for the volumes Replace refuses (FAT, some SMB shares).
+        # This is an intentional improvement over the reference ps1 - do not
+        # "fix" it back on a 1:1 diff.
+        try {
+            if (Test-Path -LiteralPath $LoopStateFile -PathType Leaf) {
+                [System.IO.File]::Replace($_tmp, $LoopStateFile, $null)
+            } else {
+                [System.IO.File]::Move($_tmp, $LoopStateFile)
+            }
+        } catch {
+            Move-Item -LiteralPath $_tmp -Destination $LoopStateFile -Force -ErrorAction Stop
+        }
+    } catch {
+        [Console]::Error.WriteLine('stride-hook: could not write the loop state; continuing')
+        if ($_tmp) {
+            try { Remove-Item -LiteralPath $_tmp -Force -ErrorAction SilentlyContinue } catch { }
+        }
+    }
+}
+
+# Self-gates on before_review - the hook that fires AFTER a /complete succeeds.
+# Never writes to stdout: Gemini CLI parses this script's stdout as one JSON
+# document, so every diagnostic goes to stderr.
+#
+# The Claude Code original's Tier 2 snapshot-recovery branch is deliberately
+# NOT ported: this port has neither .stride/.last-api-response.json nor
+# STRIDE_ROUTE_TASK_ID, so there is nothing to fall back to. A harness-
+# truncated success simply records nothing, which is the safe direction.
+function Write-LoopStateForCompletion {
+    param([string]$InputJson, $ResponsePayload)
+
+    if ($HookName -ne 'before_review') { return }
+
+    if (-not (Test-LoopStatePayloadOk -Payload $ResponsePayload)) {
+        # A 422 legitimately records nothing and is silent - announcing every
+        # failed completion would be noise. An UNPARSABLE body is the different
+        # case: the completion may well have succeeded server-side and the
+        # evidence is simply lost. Decided by an actual parse of the raw body,
+        # never by ($null -eq $ResponsePayload), which conflates four causes.
+        $raw = Get-CompletionRawBody -InputJson $InputJson
+        if ($raw) {
+            $parsedOk = $true
+            try { $null = $raw | ConvertFrom-Json } catch { $parsedOk = $false }
+            if (-not $parsedOk) {
+                [Console]::Error.WriteLine('stride-hook: completion response was unparsable; no loop state recorded')
+            }
+        }
+        return
+    }
+
+    $identRaw = $ResponsePayload.data.identifier
+    if ($identRaw -is [datetime]) {
+        # Coerced from a JSON string - recover the literal bash would have seen.
+        $identRaw = Get-RawJsonString -Raw (Get-CompletionRawBody -InputJson $InputJson) -Key 'identifier'
+        if ($null -eq $identRaw) { return }
+    }
+    $ident = ConvertTo-LoopStateValue -Value ([string]$identRaw)
+    if (-not (Test-LoopStateSafe -Value $ident)) { return }
+
+    # The session id is the ONLY field read out of the hook input, which also
+    # carries the Bearer token in .tool_input.command - never widen this read.
+    # GEMINI_ before CLAUDE_, the same order the bash half uses and the same
+    # order $ProjectDir uses at the top of this file.
+    $sid = ''
+    try {
+        $parsedInput = $InputJson | ConvertFrom-Json
+        if ($null -ne $parsedInput -and $parsedInput -is [PSCustomObject] -and
+            $parsedInput.PSObject.Properties.Name -ccontains 'session_id' -and
+            $null -ne $parsedInput.session_id) {
+            # The ladder below mirrors `jq -r '.session_id // empty'` exactly. A
+            # bare [string] cast does NOT: it unwraps a single-element array to
+            # its element (bash renders the array multi-line and refuses it),
+            # renders a PSCustomObject as a dotted type name the charset gate
+            # would ACCEPT, and capitalises booleans.
+            $v = $parsedInput.session_id
+            if ($v -is [string]) {
+                $sid = $v
+            } elseif ($v -is [bool]) {
+                # jq's `//` treats `false` as absent, so bash falls through to
+                # the environment for a literal false; `true` renders lowercase.
+                $sid = if ($v) { 'true' } else { '' }
+            } elseif ($v -is [datetime]) {
+                # Must precede the [ValueType] arm - DateTime IS a value type,
+                # and Convert.ToString would render it "01/01/2026 00:00:00",
+                # which the charset gate refuses while bash records the literal.
+                $rec = Get-RawJsonString -Raw $InputJson -Key 'session_id'
+                $sid = if ($null -eq $rec) { '<non-scalar>' } else { $rec }
+            } elseif ($v -is [ValueType]) {
+                # InvariantCulture, or a de-DE host renders 1.5 as "1,5" - a
+                # string the bash half could never produce.
+                $sid = [System.Convert]::ToString($v, [System.Globalization.CultureInfo]::InvariantCulture)
+            } else {
+                # An array or object. jq renders it multi-line, so bash's gate
+                # refuses it WITHOUT falling back to the environment. This
+                # sentinel is non-empty (so no fallback) and cannot pass the
+                # gate (so it degrades to "unknown") - the same two steps bash
+                # performs, in the same order.
+                $sid = '<non-scalar>'
+            }
+        }
+    } catch { $sid = '' }
+    if (-not $sid) { $sid = [string]$env:GEMINI_SESSION_ID }
+    if (-not $sid) { $sid = [string]$env:CLAUDE_SESSION_ID }
+    $sid = ConvertTo-LoopStateValue -Value $sid
+    if (-not (Test-LoopStateSafe -Value $sid)) { $sid = 'unknown' }
+
+    # [ordered] is load-bearing: a plain @{} is unordered and would scramble the
+    # key order against the bash half's jq object literal. InvariantCulture is
+    # equally load-bearing and is a deliberate divergence from the reference
+    # ps1, which omits it: '-' is the culture's date separator and ':' its time
+    # separator, so under th-TH this would write a Buddhist-era year and under
+    # a '.'-separator culture it would write 12.30.00. 'Z' is appended as a
+    # literal rather than formatted, so no custom-specifier ambiguity arises.
+    $ts = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) + 'Z'
+    $obj = [ordered]@{
+        identifier   = $ident
+        needs_review = [bool]$ResponsePayload.data.needs_review
+        completed_at = $ts
+        session_id   = $sid
+    }
+
+    try { $json = $obj | ConvertTo-Json -Compress -Depth 4 } catch { return }
+    if (-not $json) { return }
+
+    Write-LoopState -Json $json
 }
 
 # Collect the env object of the named hook entry as an ordered map. Keys must
@@ -1103,6 +1416,17 @@ if ($Phase -eq 'post') {
 # TASK_ID is in scope from the env cache. Self-gates on
 # $HookName == 'before_review'; best-effort, never fails the hook.
 try { Invoke-SelfHealChangedFilesUpload } catch { }
+
+# (W2144) Record the loop state for a successful completion. Self-gates on
+# $HookName -eq 'before_review' and is best-effort: a failure to record is
+# logged to stderr and swallowed, never fatal to the completion. Placed BEFORE
+# the primary section because the record is built only from the hook input and
+# $responsePayload - nothing the section produces - so a before_review section
+# that fails (and exits below) must not cost us the record. The completion
+# already succeeded server-side by then; AfterTool cannot un-complete it.
+# $responsePayload is $null on the pre phase, where the $HookName gate already
+# returns.
+try { Write-LoopStateForCompletion -InputJson $RawInput -ResponsePayload $responsePayload } catch { }
 
 # --- Execute the primary hook ---
 $primaryRc = Invoke-StrideSection -Section $HookName

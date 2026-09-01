@@ -3103,6 +3103,353 @@ STRIDE
 fi
 
 # ============================================================
+# Test Group 18: loop state on completion (W2144)
+# ============================================================
+# Mirrored case-for-case by test-stride-hook.ps1 Test Group 14.
+#
+# NOT PORTED from the Claude Code original's Test Group 33, deliberately —
+# recorded here so the omission reads as a decision rather than an oversight,
+# and so a later port-parity audit does not re-add them:
+#   33g "a truncated 422 must not inherit the previous claim's payload" —
+#       guards extract_response_payload's canonical-file-first behaviour
+#       (D118). This port has no .stride/.last-api-response.json and its
+#       extract_response_payload reads only $INPUT, so there is no second
+#       source to inherit from. Porting it would pass vacuously and mislead
+#       the next reader into thinking the mechanism exists.
+#   33h "a truncated success recovers from the matching snapshot" — asserts
+#       Tier 2, which this port does not implement. Here a truncated success
+#       records nothing (safe miss), so the case would fail by design.
+#   33i "recovery refuses a snapshot for another task id" — the negative half
+#       of 33h; guards STRIDE_ROUTE_TASK_ID plumbing this port does not have.
+echo ""
+echo "=== Test Group 18: loop state on completion (W2144) ==="
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "  SKIP: Test Group 18 (jq not available — the writer self-gates on HAS_JQ)"
+else
+  # curl is stubbed so the changed_files self-heal makes no network call: these
+  # cases are about the loop-state record, and a real curl would make them slow
+  # and non-deterministic.
+  G18_STUB=$(mktemp -d "$TMPDIR_TEST/g18stub.XXXXXX")
+  cat > "$G18_STUB/curl" << 'G18CURL'
+#!/usr/bin/env bash
+exit 0
+G18CURL
+  chmod +x "$G18_STUB/curl"
+
+  g18_proj() {
+    local d
+    d=$(mktemp -d "$TMPDIR_TEST/g18.XXXXXX")
+    printf '## before_doing\n```bash\n```\n\n## before_review\n```bash\n```\n' > "$d/.stride.md"
+    printf '%s' "$d"
+  }
+  # $1=session_id  $2=command  $3=raw tool_response.stdout payload
+  g18_input() {
+    jq -nc --arg s "$1" --arg c "$2" --arg r "$3" \
+      '{session_id: $s, tool_input: {command: $c}, tool_response: {stdout: $r}}'
+  }
+  g18_run() {  # $1=project dir  $2=input json  (stderr -> $G18_ERR)
+    printf '%s' "$2" | GEMINI_PROJECT_DIR="$1" PATH="$G18_STUB:$PATH" \
+      bash "$HOOK_SCRIPT" post > /dev/null 2> "$G18_ERR"
+  }
+
+  G18_ERR="$TMPDIR_TEST/g18.err"
+  G18_CMD='curl -X PATCH https://stride.invalid/api/tasks/99/complete -H "Authorization: Bearer SECRETVALUE"'
+  G18_CLAIM='curl -X POST https://stride.invalid/api/tasks/claim'
+  G18_OK='{"data":{"id":99,"identifier":"W2144","needs_review":false},"hooks":[{"name":"before_review"}]}'
+  G18_OK_TRUE='{"data":{"id":99,"identifier":"W2144","needs_review":true},"hooks":[{"name":"before_review"}]}'
+  G18_422='{"errors":{"base":["completion is invalid"]}}'
+
+  # 18a: a successful completion records all four fields
+  D=$(g18_proj); g18_run "$D" "$(g18_input 'sess-abc' "$G18_CMD" "$G18_OK")"
+  S="$D/.stride/.loop-state.json"
+  assert_eq "18a: records the identifier" "W2144" "$(jq -r '.identifier' "$S" 2>/dev/null)"
+  assert_eq "18a: records needs_review false" "false" "$(jq -r '.needs_review' "$S" 2>/dev/null)"
+  assert_eq "18a: records the session id" "sess-abc" "$(jq -r '.session_id' "$S" 2>/dev/null)"
+  assert_eq "18a: completed_at is ISO8601 Z" "1" \
+    "$(jq -r '.completed_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") | if . then 1 else 0 end' "$S" 2>/dev/null)"
+
+  # 18b: needs_review=true is recorded verbatim AND as a real JSON boolean.
+  # The type assert is the point: jq -r prints the string "true" and the
+  # boolean true identically, so only `| type` can tell them apart.
+  D=$(g18_proj); g18_run "$D" "$(g18_input 'sess-b' "$G18_CMD" "$G18_OK_TRUE")"
+  S="$D/.stride/.loop-state.json"
+  assert_eq "18b: needs_review true recorded" "true" "$(jq -r '.needs_review' "$S" 2>/dev/null)"
+  assert_eq "18b: needs_review is a boolean, not a string" "boolean" \
+    "$(jq -r '.needs_review | type' "$S" 2>/dev/null)"
+
+  # 18b2: a STRING "true" in the response is refused outright
+  D=$(g18_proj)
+  g18_run "$D" "$(g18_input 'sess-b2' "$G18_CMD" '{"data":{"id":9,"identifier":"W9","needs_review":"true"}}')"
+  assert_eq "18b2: a quoted needs_review is refused, nothing recorded" "absent" \
+    "$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)"
+
+  # 18c: the session id falls back to the environment when the input omits it
+  D=$(g18_proj)
+  NOSID=$(jq -nc --arg c "$G18_CMD" --arg r "$G18_OK" '{tool_input:{command:$c},tool_response:{stdout:$r}}')
+  printf '%s' "$NOSID" | GEMINI_PROJECT_DIR="$D" CLAUDE_SESSION_ID="env-sess" PATH="$G18_STUB:$PATH" \
+    bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  assert_eq "18c: falls back to CLAUDE_SESSION_ID" "env-sess" \
+    "$(jq -r '.session_id' "$D/.stride/.loop-state.json" 2>/dev/null)"
+  D=$(g18_proj)
+  printf '%s' "$NOSID" | GEMINI_PROJECT_DIR="$D" GEMINI_SESSION_ID="gem-sess" CLAUDE_SESSION_ID="env-sess" \
+    PATH="$G18_STUB:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  assert_eq "18c: GEMINI_SESSION_ID wins over CLAUDE_SESSION_ID" "gem-sess" \
+    "$(jq -r '.session_id' "$D/.stride/.loop-state.json" 2>/dev/null)"
+
+  # 18d: an absent session id degrades to "unknown" rather than dropping the record
+  D=$(g18_proj)
+  printf '%s' "$NOSID" | GEMINI_PROJECT_DIR="$D" PATH="$G18_STUB:$PATH" \
+    env -u GEMINI_SESSION_ID -u CLAUDE_SESSION_ID bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  S="$D/.stride/.loop-state.json"
+  assert_eq "18d: absent session id degrades to unknown" "unknown" "$(jq -r '.session_id' "$S" 2>/dev/null)"
+  assert_eq "18d: the record is still written" "W2144" "$(jq -r '.identifier' "$S" 2>/dev/null)"
+
+  # 18e: a non-identifier-shaped session id degrades to "unknown", never recorded raw
+  D=$(g18_proj); g18_run "$D" "$(g18_input 'not a/session id' "$G18_CMD" "$G18_OK")"
+  assert_eq "18e: unsafe session id degrades to unknown" "unknown" \
+    "$(jq -r '.session_id' "$D/.stride/.loop-state.json" 2>/dev/null)"
+
+  # 18f: a 422 completion does NOT write the record, and is not announced
+  D=$(g18_proj); g18_run "$D" "$(g18_input 'sess-f' "$G18_CMD" "$G18_422")"
+  assert_eq "18f: a 422 completion writes nothing" "absent" \
+    "$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)"
+  assert_eq "18f: a well-formed 422 is not announced as unparsable" "0" \
+    "$(grep -c 'unparsable' "$G18_ERR" 2>/dev/null || true)"
+
+  # 18g: a successful claim clears a previous completion's record
+  D=$(g18_proj); mkdir -p "$D/.stride"
+  printf '{"identifier":"W_OLD","needs_review":false,"completed_at":"2026-01-01T00:00:00Z","session_id":"old"}\n' \
+    > "$D/.stride/.loop-state.json"
+  g18_run "$D" "$(g18_input 'sess-g' "$G18_CLAIM" '{"data":{"id":1,"identifier":"W1"}}')"
+  assert_eq "18g: a claim clears the record" "absent" \
+    "$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)"
+
+  # 18h: atomicity and stdout discipline, asserted structurally on the source
+  G18_FN=$(awk '/^write_loop_state\(\) \{/,/^\}/' "$HOOK_SCRIPT")
+  assert_eq "18h: never redirects straight at the destination" "0" \
+    "$(printf '%s' "$G18_FN" | grep -c '> *"\$LOOP_STATE_FILE"' || true)"
+  assert_eq "18h: stages a temp in the destination directory" "1" \
+    "$(printf '%s' "$G18_FN" | grep -c 'mktemp "\$PROJECT_DIR/.stride/loop-state' || true)"
+  assert_eq "18h: every diagnostic goes to stderr" "0" \
+    "$(printf '%s' "$G18_FN" | grep -c "printf '[^']*'[^>]*$" || true)"
+  D=$(g18_proj); g18_run "$D" "$(g18_input 'sess-h' "$G18_CMD" "$G18_OK")"
+  assert_eq "18h: a successful write leaves no temp behind" "0" \
+    "$(ls "$D/.stride" 2>/dev/null | grep -c '^loop-state\.' || true)"
+
+  # 18i: exactly the four documented keys, and never the Bearer token.
+  # The command in every case above embeds a synthetic SECRETVALUE precisely so
+  # this assertion has something to catch.
+  D=$(g18_proj); g18_run "$D" "$(g18_input 'sess-i' "$G18_CMD" "$G18_OK")"
+  S="$D/.stride/.loop-state.json"
+  assert_eq "18i: exactly the four documented keys" "completed_at identifier needs_review session_id" \
+    "$(jq -r '[keys_unsorted[]] | sort | join(" ")' "$S" 2>/dev/null)"
+  assert_eq "18i: the token never reaches the record" "0" \
+    "$(grep -c 'SECRETVALUE\|Bearer' "$S" 2>/dev/null || true)"
+
+  # 18j: an unwritable .stride/ is announced and never fails the completion
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "  SKIP: 18j (running as root — a 0500 directory would still be writable)"
+  else
+    D=$(g18_proj); mkdir -p "$D/.stride"; chmod 500 "$D/.stride"
+    printf '%s' "$(g18_input 'sess-j' "$G18_CMD" "$G18_OK")" | GEMINI_PROJECT_DIR="$D" \
+      PATH="$G18_STUB:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2> "$G18_ERR"
+    G18_RC=$?
+    assert_exit "18j: an unwritable .stride/ still exits 0" 0 "$G18_RC"
+    assert_contains "18j: the failure is announced on stderr" "loop state" "$(cat "$G18_ERR")"
+    chmod 700 "$D/.stride"
+    assert_eq "18j: nothing was recorded" "absent" \
+      "$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)"
+  fi
+
+  # 18k: the claim -> complete -> claim cycle leaves absent, present, absent
+  D=$(g18_proj)
+  g18_run "$D" "$(g18_input 'sess-k' "$G18_CLAIM" '{"data":{"id":1,"identifier":"W1"}}')"
+  K1=$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)
+  g18_run "$D" "$(g18_input 'sess-k' "$G18_CMD" "$G18_OK")"
+  K2=$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)
+  g18_run "$D" "$(g18_input 'sess-k' "$G18_CLAIM" '{"data":{"id":2,"identifier":"W2"}}')"
+  K3=$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)
+  assert_eq "18k: claim/complete/claim cycles absent-present-absent" "absent present absent" "$K1 $K2 $K3"
+
+  # 18l: a failed or unparsable claim STILL clears — the safe direction. The
+  # empty-queue claim is the common case and the one that would otherwise leave
+  # a record indistinguishable from a completed-and-never-claimed-again agent.
+  for G18_BODY in '{"errors":{"base":["no task available"]}}' '{"data":{"identi'; do
+    D=$(g18_proj); mkdir -p "$D/.stride"
+    printf '{"identifier":"W_OLD","needs_review":false,"completed_at":"2026-01-01T00:00:00Z","session_id":"old"}\n' \
+      > "$D/.stride/.loop-state.json"
+    g18_run "$D" "$(g18_input 'sess-l' "$G18_CLAIM" "$G18_BODY")"
+    assert_eq "18l: a failed/unparsable claim still clears the record" "absent" \
+      "$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)"
+  done
+
+  # 18m: an absent tool_response records nothing and is NOT announced as
+  # unparsable — "no body at all" must stay out of a channel claiming a body
+  # failed to parse.
+  D=$(g18_proj)
+  NORESP=$(jq -nc --arg c "$G18_CMD" '{session_id:"sess-m",tool_input:{command:$c}}')
+  printf '%s' "$NORESP" | GEMINI_PROJECT_DIR="$D" PATH="$G18_STUB:$PATH" \
+    bash "$HOOK_SCRIPT" post > /dev/null 2> "$G18_ERR"
+  G18_RC=$?
+  assert_exit "18m: an absent tool_response exits 0" 0 "$G18_RC"
+  assert_eq "18m: nothing recorded" "absent" \
+    "$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)"
+  assert_eq "18m: not announced as unparsable" "0" \
+    "$(grep -c 'unparsable' "$G18_ERR" 2>/dev/null || true)"
+
+  # 18n: a truncated completion body records nothing and IS announced
+  D=$(g18_proj); g18_run "$D" "$(g18_input 'sess-n' "$G18_CMD" '{"data":{"identifier":"W2 TRUNCA')"
+  assert_eq "18n: a truncated body records nothing" "absent" \
+    "$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)"
+  assert_contains "18n: a truncated body is announced as unparsable" \
+    "unparsable" "$(cat "$G18_ERR")"
+
+  # 18o: the exact input class where the two shells can silently disagree.
+  # bash reads values through $( ), which strips every trailing newline; the
+  # twin strips trailing LFs explicitly so both agree. An INTERIOR newline is
+  # refused by both.
+  D=$(g18_proj); g18_run "$D" "$(g18_input 'trail-nl
+' "$G18_CMD" "$G18_OK")"
+  assert_eq "18o: a trailing newline in the session id is stripped, not refused" "trail-nl" \
+    "$(jq -r '.session_id' "$D/.stride/.loop-state.json" 2>/dev/null)"
+  D=$(g18_proj); g18_run "$D" "$(g18_input 'a
+b' "$G18_CMD" "$G18_OK")"
+  assert_eq "18o: an interior newline is refused" "unknown" \
+    "$(jq -r '.session_id' "$D/.stride/.loop-state.json" 2>/dev/null)"
+
+  # 18p: AC5 — both halves produce a byte-identical record for the same input.
+  if ! command -v pwsh > /dev/null 2>&1; then
+    echo "  SKIP: 18p cross-half byte-identity (pwsh not available — AC5 goes UNVERIFIED on this host; the twin's suite covers the same shape via 14u)"
+  else
+    DA=$(g18_proj); DB=$(g18_proj)
+    G18_IN=$(g18_input 'sess-p' "$G18_CMD" "$G18_OK_TRUE")
+    g18_run "$DA" "$G18_IN"
+    printf '%s' "$G18_IN" | GEMINI_PROJECT_DIR="$DB" PATH="$G18_STUB:$PATH" \
+      pwsh -NoProfile -File "$SCRIPT_DIR/stride-hook.ps1" post > /dev/null 2>&1
+    SA="$DA/.stride/.loop-state.json"; SB="$DB/.stride/.loop-state.json"
+    if [ ! -f "$SB" ]; then
+      assert_eq "18p: the PowerShell half wrote a record" "present" "absent"
+    else
+      # Both timestamps are asserted against the same strict pattern and the
+      # same fixed length, then substituted with a constant: a fixed-length
+      # field plus an identical remainder means an identical byte layout.
+      assert_eq "18p: both completed_at values are ISO8601 Z" "1 1" \
+        "$(jq -r '.completed_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") | if . then 1 else 0 end' "$SA") $(jq -r '.completed_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") | if . then 1 else 0 end' "$SB")"
+      sed -E 's/"completed_at":"[^"]*"/"completed_at":"TS"/' "$SA" > "$TMPDIR_TEST/g18.a.norm"
+      sed -E 's/"completed_at":"[^"]*"/"completed_at":"TS"/' "$SB" > "$TMPDIR_TEST/g18.b.norm"
+      if cmp -s "$TMPDIR_TEST/g18.a.norm" "$TMPDIR_TEST/g18.b.norm"; then
+        assert_eq "18p: both halves produce a byte-identical record" "identical" "identical"
+      else
+        assert_eq "18p: both halves produce a byte-identical record" \
+          "$(cat "$TMPDIR_TEST/g18.a.norm")" "$(cat "$TMPDIR_TEST/g18.b.norm")"
+      fi
+      # No BOM, LF only, exactly one trailing newline — the three ways the
+      # PowerShell writer could silently diverge.
+      assert_eq "18p: the PowerShell record has no BOM" "0" \
+        "$(head -c 3 "$SB" | grep -c $'\xef\xbb\xbf' || true)"
+      assert_eq "18p: the PowerShell record has no CR" "0" \
+        "$(tr -cd '\r' < "$SB" | wc -c | tr -d ' ')"
+      assert_eq "18p: both records are the same size" \
+        "$(wc -c < "$SA" | tr -d ' ')" "$(wc -c < "$SB" | tr -d ' ')"
+    fi
+  fi
+
+  # 18q: the OVERWRITE path — a completion over an EXISTING record. Every case
+  # above starts from a fresh directory, and 18g/18k/18l pre-create the file
+  # only to run a CLAIM, which removes it — so without this case `mv -f` over an
+  # existing destination never executes, nor does the twin's File::Replace
+  # branch, which exists specifically to avoid .NET Framework's delete-then-move
+  # window. Atomicity is the property that only matters when a destination
+  # already exists, so this is the case AC2 is actually about.
+  D=$(g18_proj); mkdir -p "$D/.stride"
+  printf '{"identifier":"W_OLD","needs_review":true,"completed_at":"2026-01-01T00:00:00Z","session_id":"old"}\n' \
+    > "$D/.stride/.loop-state.json"
+  g18_run "$D" "$(g18_input 'sess-q' "$G18_CMD" "$G18_OK")"
+  S="$D/.stride/.loop-state.json"
+  assert_eq "18q: a completion overwrites an existing record" "W2144" "$(jq -r '.identifier' "$S" 2>/dev/null)"
+  assert_eq "18q: the overwritten record carries the new needs_review" "false" "$(jq -r '.needs_review' "$S" 2>/dev/null)"
+  assert_eq "18q: the overwritten record carries the new session id" "sess-q" "$(jq -r '.session_id' "$S" 2>/dev/null)"
+  assert_eq "18q: the overwrite leaves no temp behind" "0" \
+    "$(ls "$D/.stride" 2>/dev/null | grep -c '^loop-state\.' || true)"
+
+  # 18r: the charset gate must be LOCALE-INDEPENDENT. Written as A-Z / a-z
+  # ranges it was not — a glob bracket RANGE is collation-ordered rather than
+  # codepoint-ordered on bash < 5.0 (macOS ships 3.2) under a UTF-8 locale, so
+  # accented Latin letters passed here while the twin's codepoint-based -cmatch
+  # refused them. One input, two different outcomes: a split brain in the very
+  # gate this record feeds. Run under both a UTF-8 locale and C.
+  for G18_LOC in en_US.UTF-8 C; do
+    D=$(g18_proj)
+    printf '%s' "$(g18_input 'sess-r' "$G18_CMD" '{"data":{"id":9,"identifier":"Wé144","needs_review":true}}')" \
+      | GEMINI_PROJECT_DIR="$D" LC_ALL="$G18_LOC" PATH="$G18_STUB:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+    assert_eq "18r: an accented identifier is refused under LC_ALL=$G18_LOC" "absent" \
+      "$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)"
+  done
+
+  # 18s: session-id TYPE parity with jq. bash reads the value through
+  # `jq -r '.session_id // empty'`, so a non-scalar renders multi-line and the
+  # charset gate refuses it WITHOUT falling back to the environment, while a
+  # number renders plainly and is kept. The twin must reproduce both; a bare
+  # string cast reproduces neither (it unwraps a one-element array to its
+  # element, and jq's `//` treats a literal false as absent).
+  D=$(g18_proj)
+  printf '%s' "$(jq -nc --arg c "$G18_CMD" --arg r "$G18_OK" '{session_id:["abc"],tool_input:{command:$c},tool_response:{stdout:$r}}')" \
+    | GEMINI_PROJECT_DIR="$D" CLAUDE_SESSION_ID="env-sess" PATH="$G18_STUB:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  assert_eq "18s: an array session id degrades to unknown, never the env value" "unknown" \
+    "$(jq -r '.session_id' "$D/.stride/.loop-state.json" 2>/dev/null)"
+  D=$(g18_proj)
+  printf '%s' "$(jq -nc --arg c "$G18_CMD" --arg r "$G18_OK" '{session_id:12345,tool_input:{command:$c},tool_response:{stdout:$r}}')" \
+    | GEMINI_PROJECT_DIR="$D" PATH="$G18_STUB:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  assert_eq "18s: a numeric session id is recorded as its plain rendering" "12345" \
+    "$(jq -r '.session_id' "$D/.stride/.loop-state.json" 2>/dev/null)"
+  D=$(g18_proj)
+  printf '%s' "$(jq -nc --arg c "$G18_CMD" --arg r "$G18_OK" '{session_id:false,tool_input:{command:$c},tool_response:{stdout:$r}}')" \
+    | GEMINI_PROJECT_DIR="$D" CLAUDE_SESSION_ID="env-sess" PATH="$G18_STUB:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  assert_eq "18s: a literal false session id is absent to jq, so the env wins" "env-sess" \
+    "$(jq -r '.session_id' "$D/.stride/.loop-state.json" 2>/dev/null)"
+
+  # 18t: a mixed-case key is refused, matching jq's case-SENSITIVE .data path.
+  # PowerShell's -contains and property access are both case-insensitive, so
+  # without the -c forms the twin would accept this and bash would not.
+  D=$(g18_proj)
+  g18_run "$D" "$(g18_input 'sess-t' "$G18_CMD" '{"Data":{"id":9,"Identifier":"W9","Needs_Review":true}}')"
+  assert_eq "18t: a mixed-case response key is refused" "absent" \
+    "$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)"
+
+  # 18u: an ISO-8601-shaped identifier and session id. .NET's ConvertFrom-Json
+  # silently coerces any date-shaped JSON STRING into a [DateTime] before the
+  # twin's gates see it, and the original text is not recoverable from the
+  # resulting object — so before Get-RawJsonString the twin refused this input
+  # outright while bash recorded it in full. Every character here is inside the
+  # charset (digits, '-', 'T', ':', 'Z'), so bash keeps the literal verbatim and
+  # the twin must reproduce exactly that.
+  D=$(g18_proj)
+  printf '%s' "$(jq -nc --arg c "$G18_CMD" --arg r '{"data":{"id":9,"identifier":"2026-01-01T00:00:00Z","needs_review":true}}' \
+    '{session_id:"2026-02-02T11:22:33Z",tool_input:{command:$c},tool_response:{stdout:$r}}')" \
+    | GEMINI_PROJECT_DIR="$D" PATH="$G18_STUB:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  S="$D/.stride/.loop-state.json"
+  assert_eq "18u: a date-shaped identifier is kept verbatim" "2026-01-01T00:00:00Z" \
+    "$(jq -r '.identifier' "$S" 2>/dev/null)"
+  assert_eq "18u: a date-shaped session id is kept verbatim" "2026-02-02T11:22:33Z" \
+    "$(jq -r '.session_id' "$S" 2>/dev/null)"
+
+  # 18v: a mixed-case tool_response key. bash reads it with jq '.tool_response',
+  # which is case-sensitive, so nothing is unwrapped and nothing is recorded —
+  # and nothing is announced either, because an empty payload is "no body at
+  # all", not a body that failed to parse.
+  D=$(g18_proj)
+  printf '%s' "$(jq -nc --arg c "$G18_CMD" --arg r "$G18_OK" '{session_id:"sess-v",tool_input:{command:$c},Tool_Response:{stdout:$r}}')" \
+    | GEMINI_PROJECT_DIR="$D" PATH="$G18_STUB:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2> "$G18_ERR"
+  assert_eq "18v: a mixed-case tool_response key records nothing" "absent" \
+    "$([ -e "$D/.stride/.loop-state.json" ] && echo present || echo absent)"
+  assert_eq "18v: and is not announced as unparsable" "0" \
+    "$(grep -c 'unparsable' "$G18_ERR" 2>/dev/null || true)"
+
+  rm -rf "$G18_STUB"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
