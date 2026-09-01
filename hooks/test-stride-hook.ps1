@@ -2650,14 +2650,24 @@ Assert-Eq "15w: an unparseable 200 body permits" "" $r.Stdout.Trim()
 Assert-Contains "15w: and says the API RESPONSE could not be parsed" "the API response could not be parsed" $r.Stderr
 
 # 15y: partial credentials permit
+# The EXACT reason, and a live listener. Asserting only stdout emptiness left
+# this case unable to fail: the fixture pointed at a dead port, so deleting the
+# credentials guard still permitted - via the transport-failure branch, with
+# empty stdout - and the case stayed green. The reason discriminates the two
+# routes, and for the missing-token half the listener is a positive control:
+# without the guard the request would go out and come back a DENY.
 foreach ($g15Drop in @('API URL', 'API Token')) {
     $port = New-G15Port; $d = New-G15Proj -Port $port
     Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
     $auth = Join-Path $d '.stride_auth.md'
     $kept = (Get-Content -LiteralPath $auth | Where-Object { $_ -notmatch [regex]::Escape($g15Drop) }) -join "`n"
     [System.IO.File]::WriteAllText($auth, $kept + "`n")
+    $job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
     $r = Invoke-G15Gate -ProjectDir $d
+    Stop-G15Listener $job
     Assert-Eq "15y: partial credentials permit (missing $g15Drop)" "" $r.Stdout.Trim()
+    Assert-Contains "15y: at the credentials branch, not the transport branch (missing $g15Drop)" "no API URL or token could be resolved" $r.Stderr
+    Assert-NotContains "15y: and never reports a transport failure (missing $g15Drop)" "could not be reached" $r.Stderr
 }
 
 # 15q: a malformed max-blocks override must fall back, never wedge

@@ -4280,6 +4280,27 @@ G19NUL
   # loop-state read cannot silently drop it.
   assert_eq "19as2: the .stride-directory guard is still present" "1" \
     "$(grep -c 'could not be created' "$STOP_GATE" || true)"
+
+  # 19as3: the counter read-back arm. Like the two above it is unreachable by
+  # fixture on THIS half — a symlink to /dev/null is caught one guard earlier by
+  # [ -f ], and no other non-persisting shape is fixturable here — so it is
+  # pinned structurally for the same reason. The twin DOES reach it
+  # behaviourally (see 15ad: .NET reports /dev/null as a regular file, so that
+  # half falls through to the read-back), which is exactly why the arm has to
+  # exist on both halves even though only one can drive it.
+  assert_eq "19as3: the counter read-back guard is still present" "1" \
+    "$(grep -c 'did not persist' "$STOP_GATE" || true)"
+  # And it must PERMIT, never block: a block the gate cannot count is a block it
+  # cannot bound. Pinned on the permit helper rather than the reason alone.
+  #
+  # What a structural pin can and cannot do, stated plainly: it reds on DELETION
+  # of the guard, which is what M31 verifies. It does NOT red on a guard that is
+  # neutered in place (`if false; then permit ...`), because the string survives.
+  # No fixture on this half can reach the arm to close that gap - the twin
+  # reaches it behaviourally instead, which is why the arm exists on both halves
+  # even though only one can drive it. The same limit applies to 19as/19as2.
+  assert_eq "19as3: and it permits rather than blocking" "1" \
+    "$(grep -c 'permit "the block count did not persist' "$STOP_GATE" || true)"
 fi
 
 # ============================================================
