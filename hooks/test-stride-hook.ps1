@@ -2928,8 +2928,13 @@ Stop-G15Listener $job
 Assert-Contains "15al: a non-string cwd falls back to the environment" "deny" $r.Stdout
 
 # ---- W2146: permit-path coverage, hardened --------------------------------
-# Suffixes are a GLOBAL namespace shared with bash Group 19: 15xx and 19xx pin
-# the same behaviour. Cases with no twin say why, in place.
+# Suffix alignment, stated accurately: 15xx and 19xx pin the same behaviour from
+# "ak" onward, and again for everything before "ab". Between them the halves are
+# offset by one, because 15ab (one-line stdout) has no bash twin and pushed the
+# rest along — 15ac/19ab trailing newline, 15ad/19ac symlink counter, 15ae/19ad
+# cleartext http, and so on to 15aj/19ai multi-document. Every case
+# cross-references its own twin in place; trust that, not the suffix. Cases with
+# no twin at all say why, in place.
 
 # 15am / 15am2: "the loop-state file records no identifier". Previously
 # unreachable - every fixture wrote a well-formed identifier. The listener is

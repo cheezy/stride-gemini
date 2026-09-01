@@ -4146,9 +4146,16 @@ G19NUL
   assert_contains "19ak: and reported as not an object" "was not an object" "$G19_ERR"
 
   # ---- W2146: permit-path coverage, hardened -------------------------------
-  # Suffixes are a GLOBAL namespace: 19xx and 15xx pin the same behaviour. The
-  # block deliberately starts at "am" on both halves so they stay aligned; 19al
-  # is skipped rather than reused for something the twin numbers differently.
+  # Suffix alignment, stated accurately: 19xx and 15xx pin the same behaviour
+  # from "ak" ONWARD, and again for everything before "ab". Between them the two
+  # halves are offset by one — 19ab/15ac trailing newline, 19ac/15ad symlink
+  # counter, 19ad/15ae cleartext http, 19ae/15af 3xx, 19af/15ag corrupted
+  # counter, 19ag/15ah NUL, 19ah/15ai loopback octets, 19ai/15aj
+  # multi-document — because 15ab (one-line stdout) has no bash twin and pushed
+  # the rest along. Every case cross-references its own twin in place, so trust
+  # those references rather than the suffix. This block starts at "am" on both
+  # halves; 19al is skipped rather than reused for something numbered
+  # differently on the other side.
   #
   # Every case below names the mutation that must turn it red (see the ledger in
   # the task's completion evidence). A permit case that cannot go red is testing
