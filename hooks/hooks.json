@@ -1,5 +1,18 @@
 {
   "hooks": {
+    "AfterAgent": [
+      {
+        "hooks": [
+          {
+            "name": "stride-stop-gate",
+            "type": "command",
+            "command": "${extensionPath}/hooks/stride-stop-gate.sh",
+            "timeout": 10000,
+            "description": "Refuses to end a turn while a completed task has gone unclaimed and Stride's Ready column still holds a claimable task"
+          }
+        ]
+      }
+    ],
     "AfterTool": [
       {
         "matcher": "run_shell_command",
