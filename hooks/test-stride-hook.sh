@@ -3475,6 +3475,18 @@ echo "=== Test Group 19: AfterAgent stop gate (W2145) ==="
 if ! command -v jq > /dev/null 2>&1; then
   echo "  SKIP: Test Group 19 (jq not available — the gate self-gates on jq)"
 else
+  # Scrub the gate's own control variables from the suite's environment before
+  # any case runs. The PowerShell twin's Invoke-G15Gate already removes these
+  # from every child it spawns; this half inherited them wholesale, so a shell
+  # that exported STRIDE_ALLOW_STOP=1 - the gate's documented operator escape
+  # hatch - would send EVERY case down the escape-hatch branch. The deny cases
+  # fail loudly, but ~30 permit cases would pass VACUOUSLY, because "exit 0 with
+  # empty stdout" is exactly what the escape hatch produces. That is this
+  # group's own subject matter reintroduced through the harness, so it is fixed
+  # here rather than noted. Cases that need one of these set it inline on the
+  # command, which still works.
+  unset STRIDE_ALLOW_STOP STRIDE_STOP_GATE_MAX_BLOCKS
+  unset GEMINI_PROJECT_DIR CLAUDE_PROJECT_DIR
   STOP_GATE="$SCRIPT_DIR/stride-stop-gate.sh"
   G19_TOKEN='NOT-A-REAL-TOKEN-g19-fixture'
   # Captured ONCE, absolute: the PATH-farm cases below run with a restricted
