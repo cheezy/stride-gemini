@@ -2535,12 +2535,17 @@ Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
 $job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok -Count 4
 $h1 = (Invoke-G15Gate -ProjectDir $d).Stdout.Trim()
 $h2 = (Invoke-G15Gate -ProjectDir $d).Stdout.Trim()
-$h3 = (Invoke-G15Gate -ProjectDir $d).Stdout.Trim()
+$r3 = Invoke-G15Gate -ProjectDir $d
+$h3 = $r3.Stdout.Trim()
 $h4 = (Invoke-G15Gate -ProjectDir $d).Stdout.Trim()
 Stop-G15Listener $job
 Assert-Eq "15h: refuses twice then yields" "deny deny permit" `
     (@($h1, $h2, $h3 | ForEach-Object { if ($_) { 'deny' } else { 'permit' } }) -join ' ')
 Assert-Eq "15h: the spent record is retained, not deleted" $true (Test-Path -LiteralPath (Get-G15Counter $d))
+# The exact budget-spent reason, mirroring bash 19af. Without it this half
+# exercises the branch behaviourally but never asserts WHICH permit it took, so
+# any other permit reaching the third run would satisfy the sequence above.
+Assert-Contains "15h: and the third turn end names the spent budget" "the re-block budget for this completion is spent" $r3.Stderr
 # The budget is spent once per COMPLETION, not once per counter lifetime:
 # deleting the spent record would cycle 2,2,0,2,2,0 forever.
 Assert-Eq "15r: a fourth turn end still permits" "" $h4
@@ -2988,8 +2993,13 @@ $job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
 $r = Invoke-G15Gate -ProjectDir $d
 Stop-G15Listener $job
 $g15Raw = $r.Stdout
-Assert-Eq "15aq: stdout carries exactly one newline, at the end" 1 `
-    (@($g15Raw -split "`n" | Where-Object { $_ -ne '' }).Count)
+# Counting non-empty split segments does NOT test the trailing newline: output
+# with no trailing newline splits to one non-empty segment and passes too. The
+# bash twin uses wc -l, which does catch that direction; assert the byte
+# directly here.
+Assert-Eq "15aq: stdout ends with a newline" $true ($g15Raw.EndsWith("`n"))
+Assert-Eq "15aq: and carries exactly one, nowhere else" 1 `
+    ([regex]::Matches($g15Raw, "`n").Count)
 Assert-Eq "15aq: and the text before it is exactly the compact JSON, nothing else" `
     (($g15Raw -replace "`r?`n$", '') | ConvertFrom-Json | ConvertTo-Json -Compress -Depth 3) `
     ($g15Raw -replace "`r?`n$", '')
@@ -3008,6 +3018,17 @@ Assert-Eq "15as: a non-http scheme permits" "" $r.Stdout.Trim()
 Assert-Contains "15as: at the credentials branch, one step before the scheme arm" "no API URL or token could be resolved" $r.Stderr
 $g15GateTxt = Get-Content -Raw -LiteralPath $G15Gate
 Assert-Contains "15as: and the defensive scheme arm is still present" "has no recognised scheme" $g15GateTxt
+# The other half of the unreachability argument, mirroring bash 19as: the
+# resolver's own extraction is case-sensitive and http(s)-only, which is WHY the
+# scheme arm above can never be reached. Pinning only the arm would leave the
+# argument resting on an unasserted premise.
+Assert-Contains "15as: the resolver's scheme match is case-sensitive and http(s)-only"  "https?://[A-Za-z0-9._:/-]+" $g15GateTxt
+
+# 15as2: the .stride-directory guard, mirroring bash 19as2. Also unreachable by
+# construction - the gate only gets here after the loop-state file was found,
+# which implies the directory exists - so it is pinned structurally on this half
+# too rather than left covered on one side only.
+Assert-Contains "15as2: the .stride-directory guard is still present"  "could not be created" $g15GateTxt
 
 # 15at [PS-only; bash has 19h4]: an unwritable .stride means the block cannot be
 # counted, so it must permit. Guarded like 14j/15ad - chmod does not exist on
@@ -3021,7 +3042,12 @@ if ($g15IsWindows) {
     $job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok -Count 2
     $r = Invoke-G15Gate -ProjectDir $d
     Assert-Eq "15at: an unrecordable block permits rather than blocking unbounded" "" $r.Stdout.Trim()
-    Assert-Contains "15at: with a bounding-related reason" "bounded" $r.Stderr
+    # The EXACT reason. "bounded" appears in three permit reasons, so with the
+    # loose needle this case stayed green when the guard it pins was deleted -
+    # the read-back fired instead and its reason also says "bounded". The
+    # documented looseness applies only to 15ad's character device, where the
+    # two halves genuinely land on different branches; here they do not.
+    Assert-Contains "15at: with the write-failure reason specifically"  "the block count could not be recorded" $r.Stderr
     & chmod '700' (Join-Path $d '.stride')
     $r = Invoke-G15Gate -ProjectDir $d
     Stop-G15Listener $job
@@ -3042,7 +3068,12 @@ $g15Perm1 = (Invoke-G15Gate -ProjectDir $d).Stdout
 Stop-G15Listener $job
 $d2 = New-G15Proj -Port (New-G15Port)
 $g15Perm2 = (Invoke-G15Gate -ProjectDir $d2).Stdout
-Assert-Eq "15av: every permit path writes zero bytes to stdout, untrimmed" "" ($g15Perm1 + $g15Perm2)
+$d3 = New-G15Proj -Port (New-G15Port)
+Set-G15State -Dir $d3 -Ident 'W1; rm -rf /' -NeedsReview $false
+$g15Perm3 = (Invoke-G15Gate -ProjectDir $d3).Stdout
+# Named for what it actually covers: three permit paths, not "every".
+Assert-Eq "15av: three different permit paths each write zero bytes, untrimmed" "" `
+    ($g15Perm1 + $g15Perm2 + $g15Perm3)
 
 # 15q extension: bash 19q runs two malformed override values; this half ran one.
 $port = New-G15Port; $d = New-G15Proj -Port $port
