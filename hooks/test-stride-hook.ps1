@@ -2310,7 +2310,7 @@ Write-Host "=== Test Group 15: AfterAgent stop gate (W2145) ==="
 $g15IsWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows)
 $G15Gate = Join-Path $ScriptDir 'stride-stop-gate.ps1'
-$G15Token = 'stride_dev_FAKE_G15_SENTINEL'
+$G15Token = 'NOT-A-REAL-TOKEN-g15-fixture'
 $script:g15Port = 18911
 
 function New-G15Port { $script:g15Port++; return $script:g15Port }
@@ -2425,6 +2425,15 @@ $r = Invoke-G15Gate -ProjectDir $d
 Stop-G15Listener $job
 Assert-Exit "15c: no loop state exits 0" 0 $r.ExitCode
 Assert-Eq "15c: no loop state writes nothing to stdout" "" $r.Stdout.Trim()
+# Exit 0 and empty stdout are true of EVERY permit, so neither pins this branch.
+# Silence on stderr can: this is one of only two silent permits on this half.
+Assert-Eq "15c: and is SILENT, which no other permit path is" "" $r.Stderr.Trim()
+# Positive control: the same directory WITH a loop state must deny.
+Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
+$job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
+$r = Invoke-G15Gate -ProjectDir $d
+Stop-G15Listener $job
+Assert-Contains "15c: writing a loop state into the same dir denies (positive control)" "deny" $r.Stdout
 
 # 15d: a transport failure permits (closed port — a genuine failure, not a short-circuit)
 $d = New-G15Proj -Port (New-G15Port)
@@ -2432,21 +2441,28 @@ Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
 $r = Invoke-G15Gate -ProjectDir $d
 Assert-Exit "15d: a transport failure exits 0" 0 $r.ExitCode
 Assert-Eq "15d: a transport failure writes nothing to stdout" "" $r.Stdout.Trim()
+Assert-Contains "15d: with the unreachable reason" "could not be reached" $r.Stderr
+Assert-NotContains "15d: and never the answered-N reason" "answered" $r.Stderr
 
 # 15d2 / 15d3: non-200 permits
 $port = New-G15Port; $d = New-G15Proj -Port $port
 Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
-$job = Start-G15Listener -Port $port -Code 404 -Body '{"error":"no task"}'
+# The body is deliberately NOT JSON, for the reason given in bash 19d2: with a
+# JSON body, removing the 404 arm lets the response fall through to the body
+# parse and yield the SAME reason, so the case could not fail.
+$job = Start-G15Listener -Port $port -Code 404 -Body '<html>404 Not Found</html>'
 $r = Invoke-G15Gate -ProjectDir $d
 Stop-G15Listener $job
 Assert-Eq "15d2: an empty-queue 404 permits" "" $r.Stdout.Trim()
-Assert-Contains "15d2: and says so" "no claimable task remains" $r.Stderr
+Assert-Contains "15d2: and says so, without ever reading the body" "no claimable task remains" $r.Stderr
+Assert-NotContains "15d2: and never reports the body as unparseable" "could not be parsed" $r.Stderr
 $port = New-G15Port; $d = New-G15Proj -Port $port
 Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
 $job = Start-G15Listener -Port $port -Code 500 -Body '{"error":"boom"}'
 $r = Invoke-G15Gate -ProjectDir $d
 Stop-G15Listener $job
 Assert-Eq "15d3: a 500 permits" "" $r.Stdout.Trim()
+Assert-Contains "15d3: naming the status, which no other permit does" "answered 500" $r.Stderr
 
 # 15d4: no .stride_auth.md permits without reaching the network
 $port = New-G15Port; $d = New-G15Proj -Port $port
@@ -2456,8 +2472,13 @@ $job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
 $r = Invoke-G15Gate -ProjectDir $d
 Stop-G15Listener $job
 Assert-Eq "15d4: no .stride_auth.md permits" "" $r.Stdout.Trim()
+Assert-Contains "15d4: with the credentials reason" "no API URL or token could be resolved" $r.Stderr
 
 # 15e: a 200 with no usable identifier permits
+# The full reason per sub-case. Asserting only empty stdout let two of these
+# three pass without pinning the presence guard: data:null and data:{} also
+# satisfy the charset check, so with the presence guard deleted they still
+# permit, but with a different reason.
 foreach ($g15Body in @('{"data":null}', '{"data":{"identifier":""}}', '{"data":{}}')) {
     $port = New-G15Port; $d = New-G15Proj -Port $port
     Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
@@ -2465,7 +2486,16 @@ foreach ($g15Body in @('{"data":null}', '{"data":{"identifier":""}}', '{"data":{
     $r = Invoke-G15Gate -ProjectDir $d
     Stop-G15Listener $job
     Assert-Eq "15e: a 200 with no claimable identifier permits" "" $r.Stdout.Trim()
+    Assert-Contains "15e: with the no-task reason, not the shape reason" "no claimable task remains" $r.Stderr
+    Assert-NotContains "15e: and never the shape reason" "identifier-shaped" $r.Stderr
 }
+# Positive control: the same fixture with a claimable identifier must deny.
+$port = New-G15Port; $d = New-G15Proj -Port $port
+Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
+$job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
+$r = Invoke-G15Gate -ProjectDir $d
+Stop-G15Listener $job
+Assert-Contains "15e: the same fixture with an identifier denies (positive control)" "deny" $r.Stdout
 
 # 15f: needs_review=true permits WITHOUT touching the network (live listener)
 $port = New-G15Port; $d = New-G15Proj -Port $port
@@ -2478,11 +2508,25 @@ Assert-Contains "15f: and says the task needs review" "needs human review" $r.St
 
 # 15f2: malformed loop-state shapes permit. The quoted "false" matters — the
 # boolean TYPE is load-bearing here exactly as it is in the writer.
-foreach ($g15Ls in @('{"identifier":"W1","needs_rev', '[1,2,3]', '"just a string"', '{"identifier":"W1","needs_review":"false"}')) {
+# Per-shape reasons, not just empty stdout.
+#
+# Tightening these from "stdout is empty" to a per-shape reason surfaced a real
+# cross-half divergence, now FIXED in the gate rather than documented. It also
+# surfaced two PowerShell traps that made this half's type guards near no-ops:
+# [PSCustomObject] is an alias for PSObject, so `'abc' -is [PSCustomObject]` is
+# TRUE, and .PSObject.Properties.Name THROWS under StrictMode on an object with
+# zero properties. Both are fixed in the gate; all four shapes now report
+# identically on both halves, and bash 19f2 asserts the same four.
+foreach ($g15Case in @(
+        @{ Body = '{"identifier":"W1","needs_rev';                  Want = 'could not be parsed' },
+        @{ Body = '[1,2,3]';                                        Want = 'could not be parsed' },
+        @{ Body = '"just a string"';                                Want = 'could not be parsed' },
+        @{ Body = '{"identifier":"W1","needs_review":"false"}';     Want = 'no usable needs_review' })) {
     $d = New-G15Proj -Port (New-G15Port)
-    [System.IO.File]::WriteAllText((Join-Path (Join-Path $d '.stride') '.loop-state.json'), $g15Ls)
+    [System.IO.File]::WriteAllText((Join-Path (Join-Path $d '.stride') '.loop-state.json'), $g15Case.Body)
     $r = Invoke-G15Gate -ProjectDir $d
     Assert-Eq "15f2: a malformed loop state permits" "" $r.Stdout.Trim()
+    Assert-Contains "15f2: with its own branch's reason ($($g15Case.Want))" $g15Case.Want $r.Stderr
 }
 
 # 15h / 15r: refuses at most twice, then yields — Gemini caps nothing
@@ -2543,7 +2587,13 @@ $job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
 $r = Invoke-G15Gate -ProjectDir $d -StdinJson (@{ cwd = $d; stop_hook_active = $true } | ConvertTo-Json -Compress)
 Stop-G15Listener $job
 Assert-Eq "15k: stop_hook_active permits" "" $r.Stdout.Trim()
+Assert-Eq "15k: and is SILENT" "" $r.Stderr.Trim()
 Assert-Eq "15k: and spends no budget" $false (Test-Path -LiteralPath (Get-G15Counter $d))
+# Positive control: the identical fixture WITHOUT the flag must deny.
+$job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
+$r = Invoke-G15Gate -ProjectDir $d
+Stop-G15Listener $job
+Assert-Contains "15k: the same fixture without the flag denies (positive control)" "deny" $r.Stdout
 
 # 15l: the escape hatch
 $port = New-G15Port; $d = New-G15Proj -Port $port
@@ -2552,6 +2602,7 @@ $job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
 $r = Invoke-G15Gate -ProjectDir $d -EnvOverride @{ STRIDE_ALLOW_STOP = '1' }
 Stop-G15Listener $job
 Assert-Eq "15l: STRIDE_ALLOW_STOP=1 permits" "" $r.Stdout.Trim()
+Assert-Contains "15l: with the escape-hatch reason specifically" "STRIDE_ALLOW_STOP=1 was set" $r.Stderr
 
 # 15m / 15m2: a server-supplied identifier is REFUSED, never sanitised
 $port = New-G15Port; $d = New-G15Proj -Port $port
@@ -2567,6 +2618,7 @@ $job = Start-G15Listener -Port $port -Code 200 -Body '{"data":{"identifier":"Wé
 $r = Invoke-G15Gate -ProjectDir $d
 Stop-G15Listener $job
 Assert-Eq "15m2: an accented identifier is refused" "" $r.Stdout.Trim()
+Assert-Contains "15m2: for its shape specifically" "the next task identifier is not identifier-shaped" $r.Stderr
 
 # 15x: a 65-character identifier permits, naming the NEXT one
 $port = New-G15Port; $d = New-G15Proj -Port $port
@@ -2575,7 +2627,7 @@ $job = Start-G15Listener -Port $port -Code 200 -Body '{"data":{"identifier":"W12
 $r = Invoke-G15Gate -ProjectDir $d
 Stop-G15Listener $job
 Assert-Eq "15x: an over-long next identifier permits" "" $r.Stdout.Trim()
-Assert-Contains "15x: and the reason names the next identifier" "next task identifier" $r.Stderr
+Assert-Contains "15x: and the reason is the LENGTH one, not the shape one" "the next task identifier is longer than 64 characters" $r.Stderr
 
 # 15w: a 200 whose body is not JSON permits. This is also the regression for the
 # Byte[] Content trap: Invoke-WebRequest hands back bytes rather than a string
@@ -2588,7 +2640,9 @@ $job = Start-G15Listener -Port $port -Code 200 -Body '<html>gateway</html>'
 $r = Invoke-G15Gate -ProjectDir $d
 Stop-G15Listener $job
 Assert-Eq "15w: an unparseable 200 body permits" "" $r.Stdout.Trim()
-Assert-Contains "15w: and says the response could not be parsed" "could not be parsed" $r.Stderr
+# The FULL reason: "could not be parsed" alone is emitted by the loop-state
+# branch too, so the short needle cannot tell the two apart.
+Assert-Contains "15w: and says the API RESPONSE could not be parsed" "the API response could not be parsed" $r.Stderr
 
 # 15y: partial credentials permit
 foreach ($g15Drop in @('API URL', 'API Token')) {
@@ -2827,7 +2881,7 @@ $job = Start-G15Listener -Port $port -Code 200 `
 $r = Invoke-G15Gate -ProjectDir $d
 Stop-G15Listener $job
 Assert-Eq "15aj: a multi-document response body is refused" "" $r.Stdout.Trim()
-Assert-Contains "15aj: and reported as unparseable" "could not be parsed" $r.Stderr
+Assert-Contains "15aj: and reported as the API RESPONSE" "the API response could not be parsed" $r.Stderr
 Assert-NotContains "15aj: and neither identifier reaches stderr" "IGNORE PRIOR" $r.Stderr
 # The same shape in the loop-state file, mirroring 19ai's second half. Not
 # exploitable there — a contaminated completed identifier only ever reaches the
@@ -2837,7 +2891,7 @@ $d = New-G15Proj -Port (New-G15Port)
     '{"identifier":"W1","needs_review":false}{"identifier":"W2","needs_review":false}')
 $r = Invoke-G15Gate -ProjectDir $d
 Assert-Eq "15aj: a multi-document loop-state file is refused" "" $r.Stdout.Trim()
-Assert-Contains "15aj: and reported as unparseable" "could not be parsed" $r.Stderr
+Assert-Contains "15aj: and reported as the LOOP-STATE file, not the response" "the loop-state file could not be parsed" $r.Stderr
 
 # 15ak: a one-element top-level array is refused. ConvertFrom-Json unrolls it to
 # a scalar, so without the raw-first-token check this half would accept a body
@@ -2857,6 +2911,150 @@ $job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
 $r = Invoke-G15Gate -ProjectDir $d -EnvOverride @{ GEMINI_PROJECT_DIR = $d } -StdinJson '{"cwd":5,"session_id":"g15"}'
 Stop-G15Listener $job
 Assert-Contains "15al: a non-string cwd falls back to the environment" "deny" $r.Stdout
+
+# ---- W2146: permit-path coverage, hardened --------------------------------
+# Suffixes are a GLOBAL namespace shared with bash Group 19: 15xx and 19xx pin
+# the same behaviour. Cases with no twin say why, in place.
+
+# 15am / 15am2: "the loop-state file records no identifier". Previously
+# unreachable - every fixture wrote a well-formed identifier. The listener is
+# armed to DENY, so each fixture is one field away from a block.
+foreach ($g15Ls in @('{"needs_review":false,"completed_at":"2026-01-01T00:00:00Z"}',
+                     '{"identifier":5,"needs_review":false}')) {
+    $port = New-G15Port; $d = New-G15Proj -Port $port
+    [System.IO.File]::WriteAllText((Join-Path (Join-Path $d '.stride') '.loop-state.json'), $g15Ls)
+    $job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
+    $r = Invoke-G15Gate -ProjectDir $d
+    Stop-G15Listener $job
+    Assert-Eq "15am: an absent or non-string completed identifier permits" "" $r.Stdout.Trim()
+    Assert-Contains "15am: with the presence reason, not the shape reason" "the loop-state file records no identifier" $r.Stderr
+}
+$port = New-G15Port; $d = New-G15Proj -Port $port
+Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
+$job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
+$r = Invoke-G15Gate -ProjectDir $d
+Stop-G15Listener $job
+Assert-Contains "15am2: the same fixture with an identifier denies (positive control)" "deny" $r.Stdout
+
+# 15an / 15ao: the COMPLETED identifier's shape and length guards - independent
+# branches from the next identifier's, and never previously exercised.
+$port = New-G15Port; $d = New-G15Proj -Port $port
+[System.IO.File]::WriteAllText((Join-Path (Join-Path $d '.stride') '.loop-state.json'),
+    '{"identifier":"W1; rm -rf /","needs_review":false}')
+$job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
+$r = Invoke-G15Gate -ProjectDir $d
+Stop-G15Listener $job
+Assert-Eq "15an: a malformed completed identifier permits" "" $r.Stdout.Trim()
+Assert-Contains "15an: with the completed-identifier reason" "the completed identifier is not identifier-shaped" $r.Stderr
+Assert-NotContains "15an: and never the next-identifier reason" "next task identifier" $r.Stderr
+
+$port = New-G15Port; $d = New-G15Proj -Port $port
+[System.IO.File]::WriteAllText((Join-Path (Join-Path $d '.stride') '.loop-state.json'),
+    ('{"identifier":"' + ('W' * 65) + '","needs_review":false}'))
+$job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
+$r = Invoke-G15Gate -ProjectDir $d
+Stop-G15Listener $job
+Assert-Eq "15ao: a 65-character completed identifier permits" "" $r.Stdout.Trim()
+Assert-Contains "15ao: with the completed-identifier length reason" "the completed identifier is longer than 64 characters" $r.Stderr
+# Boundary control: exactly 64 must still reach the block path.
+$port = New-G15Port; $d = New-G15Proj -Port $port
+[System.IO.File]::WriteAllText((Join-Path (Join-Path $d '.stride') '.loop-state.json'),
+    ('{"identifier":"' + ('W' * 64) + '","needs_review":false}'))
+$job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
+$r = Invoke-G15Gate -ProjectDir $d
+Stop-G15Listener $job
+Assert-Contains "15ao: exactly 64 characters is accepted (boundary control)" "deny" $r.Stdout
+
+# 15ap: the counter's non-regular-file guard, using a DIRECTORY - the one shape
+# BOTH halves reject at the early guard, so it can assert the exact reason where
+# 15ad must stay loose (see the platform-limit comment in the gate).
+$port = New-G15Port; $d = New-G15Proj -Port $port
+Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
+New-Item -ItemType Directory -Path (Get-G15Counter $d) -Force | Out-Null
+$job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok -Count 2
+$r = Invoke-G15Gate -ProjectDir $d
+Assert-Eq "15ap: a directory in the counter's place permits" "" $r.Stdout.Trim()
+Assert-Contains "15ap: with the exact non-regular-file reason" "the block counter is not a regular file" $r.Stderr
+Remove-Item -LiteralPath (Get-G15Counter $d) -Force -Recurse
+$r = Invoke-G15Gate -ProjectDir $d
+Stop-G15Listener $job
+Assert-Contains "15ap: and removing it restores the block (positive control)" "deny" $r.Stdout
+
+# 15aq: AC3 - stdout carries ONLY the JSON decision. Every other case on this
+# half uses .Trim(), which cannot see a stray newline; this one must not.
+$port = New-G15Port; $d = New-G15Proj -Port $port
+Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
+$job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
+$r = Invoke-G15Gate -ProjectDir $d
+Stop-G15Listener $job
+$g15Raw = $r.Stdout
+Assert-Eq "15aq: stdout carries exactly one newline, at the end" 1 `
+    (@($g15Raw -split "`n" | Where-Object { $_ -ne '' }).Count)
+Assert-Eq "15aq: and the text before it is exactly the compact JSON, nothing else" `
+    (($g15Raw -replace "`r?`n$", '') | ConvertFrom-Json | ConvertTo-Json -Compress -Depth 3) `
+    ($g15Raw -replace "`r?`n$", '')
+
+# 15as: a non-http(s) scheme. The permit arm is UNREACHABLE by design - the
+# resolver's [regex]::Match is case-sensitive and http(s)-only, so an ftp:// URL
+# yields no URL and the gate stops one branch earlier. A fixture claiming to
+# reach the scheme arm would be a fixture that cannot fail. Assert the reachable
+# behaviour, and pin the unreachability structurally.
+$port = New-G15Port; $d = New-G15Proj -Port $port
+Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
+[System.IO.File]::WriteAllText((Join-Path $d '.stride_auth.md'),
+    "# auth`n`n- **API URL:** ``ftp://api.example.invalid```n- **API Token:** ``$G15Token```n")
+$r = Invoke-G15Gate -ProjectDir $d
+Assert-Eq "15as: a non-http scheme permits" "" $r.Stdout.Trim()
+Assert-Contains "15as: at the credentials branch, one step before the scheme arm" "no API URL or token could be resolved" $r.Stderr
+$g15GateTxt = Get-Content -Raw -LiteralPath $G15Gate
+Assert-Contains "15as: and the defensive scheme arm is still present" "has no recognised scheme" $g15GateTxt
+
+# 15at [PS-only; bash has 19h4]: an unwritable .stride means the block cannot be
+# counted, so it must permit. Guarded like 14j/15ad - chmod does not exist on
+# Windows and would abort the group under ErrorActionPreference='Stop'.
+if ($g15IsWindows) {
+    Write-Host "  SKIP: 15at (POSIX mode bits unavailable on Windows)"
+} else {
+    $port = New-G15Port; $d = New-G15Proj -Port $port
+    Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
+    & chmod '500' (Join-Path $d '.stride')
+    $job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok -Count 2
+    $r = Invoke-G15Gate -ProjectDir $d
+    Assert-Eq "15at: an unrecordable block permits rather than blocking unbounded" "" $r.Stdout.Trim()
+    Assert-Contains "15at: with a bounding-related reason" "bounded" $r.Stderr
+    & chmod '700' (Join-Path $d '.stride')
+    $r = Invoke-G15Gate -ProjectDir $d
+    Stop-G15Listener $job
+    Assert-Contains "15at: restoring write access restores the block (positive control)" "deny" $r.Stdout
+}
+
+# 15au [PS-only]: the request is bounded. bash 19g asserts both flags from the
+# stub's argv; this half has no argv to inspect, so it is structural.
+Assert-Contains "15au: the request pins a timeout" "-TimeoutSec 5" $g15GateTxt
+Assert-Contains "15au: and pins no-redirect-following" "-MaximumRedirection 0" $g15GateTxt
+
+# 15av [PS-only]: stdout is BYTE-empty on every permit path. Every other case
+# here trims, which cannot see a stray newline - the silent-total-failure mode.
+$port = New-G15Port; $d = New-G15Proj -Port $port
+Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $true
+$job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok
+$g15Perm1 = (Invoke-G15Gate -ProjectDir $d).Stdout
+Stop-G15Listener $job
+$d2 = New-G15Proj -Port (New-G15Port)
+$g15Perm2 = (Invoke-G15Gate -ProjectDir $d2).Stdout
+Assert-Eq "15av: every permit path writes zero bytes to stdout, untrimmed" "" ($g15Perm1 + $g15Perm2)
+
+# 15q extension: bash 19q runs two malformed override values; this half ran one.
+$port = New-G15Port; $d = New-G15Proj -Port $port
+Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
+$job = Start-G15Listener -Port $port -Code 200 -Body $G15Ok -Count 3
+$q2 = 0
+foreach ($i in 1..3) {
+    $rr = Invoke-G15Gate -ProjectDir $d -EnvOverride @{ STRIDE_STOP_GATE_MAX_BLOCKS = '9999999999' }
+    if ($rr.Stdout.Trim()) { $q2++ }
+}
+Stop-G15Listener $job
+Assert-Eq "15q: a 10-digit override also falls back to the default of 2" 2 $q2
 
 # ============================================================
 # Summary

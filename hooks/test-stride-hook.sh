@@ -1976,8 +1976,8 @@ D54_DIR=$(mktemp -d)
 cat > "$D54_DIR/.stride_auth.md" << 'AUTH'
 # Stride API Authentication
 - **API URL:** `https://www.stridelikeaboss.com`
-- **Local API Token:** `stride_dev_LOCALONLYTOKEN`
-- **API Token:** `stride_dev_PRODUCTIONTOKEN`
+- **Local API Token:** `NOT-A-REAL-TOKEN-local-only`
+- **API Token:** `NOT-A-REAL-TOKEN-production`
 AUTH
 RESULT=$(
   # shellcheck disable=SC1090
@@ -1986,7 +1986,7 @@ RESULT=$(
   resolve_stride_api_token
 )
 assert_eq "10a: token resolved from .stride_auth.md (production line)" \
-  "stride_dev_PRODUCTIONTOKEN" "$RESULT"
+  "NOT-A-REAL-TOKEN-production" "$RESULT"
 RESULT=$(
   # shellcheck disable=SC1090
   source "$HOOK_SCRIPT" 2>/dev/null || true
@@ -2003,7 +2003,7 @@ RESULT=$(
   PROJECT_DIR="$D54_DIR"; COMMAND=''
   resolve_stride_api_token
 )
-if [ "$RESULT" = "stride_dev_LOCALONLYTOKEN" ]; then
+if [ "$RESULT" = "NOT-A-REAL-TOKEN-local-only" ]; then
   echo -e "  ${RED}FAIL${RESET}: 10b: resolved the Local API Token instead of the production token"
   FAIL=$((FAIL + 1))
 else
@@ -2015,7 +2015,7 @@ rm -rf "$D54_DIR"
 # 10c: only the Local API Token line present + no $COMMAND → empty (never Local)
 LOCAL_DIR=$(mktemp -d)
 cat > "$LOCAL_DIR/.stride_auth.md" << 'AUTH'
-- **Local API Token:** `stride_dev_LOCALONLYTOKEN`
+- **Local API Token:** `NOT-A-REAL-TOKEN-local-only`
 AUTH
 RESULT=$(
   # shellcheck disable=SC1090
@@ -2063,7 +2063,7 @@ rm -rf "$SHELLVAR_DIR"
 SHELLVAR_AUTH_DIR=$(mktemp -d)
 cat > "$SHELLVAR_AUTH_DIR/.stride_auth.md" << 'AUTH'
 - **API URL:** `https://www.stridelikeaboss.com`
-- **API Token:** `stride_dev_PRODUCTIONTOKEN`
+- **API Token:** `NOT-A-REAL-TOKEN-production`
 AUTH
 RESULT=$(
   # shellcheck disable=SC1090
@@ -2073,14 +2073,14 @@ RESULT=$(
   printf '%s|%s' "$(resolve_stride_api_url)" "$(resolve_stride_api_token)"
 )
 assert_eq "10f: shell-variable command + auth file → auth-file URL+token win" \
-  "https://www.stridelikeaboss.com|stride_dev_PRODUCTIONTOKEN" "$RESULT"
+  "https://www.stridelikeaboss.com|NOT-A-REAL-TOKEN-production" "$RESULT"
 rm -rf "$SHELLVAR_AUTH_DIR"
 
 # 10g: no-token-logging — the resolver prints the token on stdout (consumed by
 # the caller) but must NEVER write it to stderr, even in error paths.
 LOG_DIR=$(mktemp -d)
 cat > "$LOG_DIR/.stride_auth.md" << 'AUTH'
-- **API Token:** `stride_dev_SECRETTOKEN`
+- **API Token:** `NOT-A-REAL-TOKEN-secret`
 AUTH
 LOG_STDERR=$(mktemp)
 (
@@ -2089,7 +2089,7 @@ LOG_STDERR=$(mktemp)
   PROJECT_DIR="$LOG_DIR"; COMMAND=''
   resolve_stride_api_token
 ) > /dev/null 2>"$LOG_STDERR"
-if grep -q 'stride_dev_SECRETTOKEN' "$LOG_STDERR"; then
+if grep -q 'NOT-A-REAL-TOKEN-secret' "$LOG_STDERR"; then
   echo -e "  ${RED}FAIL${RESET}: 10g: token leaked to stderr"
   FAIL=$((FAIL + 1))
 else
@@ -2164,13 +2164,13 @@ else
     echo v2 > f.txt; git add f.txt > /dev/null; git commit -q -m v2
     printf '## after_doing\n```bash\necho ran\n```\n' > .stride.md
     printf "TASK_ID='42'\nTASK_BASE_REF='%s'\n" "$ST_BASE" > .stride-env-cache
-    J='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer stride_dev_SECRETTOKEN\""}}'
+    J='{"tool_input":{"command":"curl -X PATCH https://stride.example.com/api/tasks/42/complete -H \"Authorization: Bearer NOT-A-REAL-TOKEN-secret\""}}'
     echo "$J" | CLAUDE_PROJECT_DIR="$PWD" PATH="$ST_STUB:$PATH" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
   )
   ST_STATE=$(cat "$ST_DIR/.stride-diff-upload-state" 2>/dev/null || true)
   assert_contains "11b: upload-state records task_id" "task_id=42" "$ST_STATE"
   assert_contains "11b: upload-state records http_code" "http_code=200" "$ST_STATE"
-  if printf '%s' "$ST_STATE" | grep -qE 'stride_dev_SECRETTOKEN|stride[.]example[.]com'; then
+  if printf '%s' "$ST_STATE" | grep -qE 'NOT-A-REAL-TOKEN-secret|stride[.]example[.]com'; then
     echo -e "  ${RED}FAIL${RESET}: 11b: upload-state leaked token or URL"; FAIL=$((FAIL + 1))
   else
     echo -e "  ${GREEN}PASS${RESET}: 11b: upload-state contains no token or URL"; PASS=$((PASS + 1))
@@ -3476,7 +3476,7 @@ if ! command -v jq > /dev/null 2>&1; then
   echo "  SKIP: Test Group 19 (jq not available — the gate self-gates on jq)"
 else
   STOP_GATE="$SCRIPT_DIR/stride-stop-gate.sh"
-  G19_TOKEN='stride_dev_FAKE_G19_SENTINEL'
+  G19_TOKEN='NOT-A-REAL-TOKEN-g19-fixture'
   # Captured ONCE, absolute: the PATH-farm cases below run with a restricted
   # PATH, and a bare `bash` would resolve through it, so the gate would never
   # start and every assertion in those cases would pass vacuously.
@@ -3563,34 +3563,78 @@ G19STUB
   g19_run "$D" "$S"
   assert_exit "19c: no loop state exits 0" 0 "$G19_RC"
   assert_eq "19c: no loop state writes nothing to stdout" "" "$G19_OUT"
+  # Exit 0 and empty stdout are true of EVERY permit, so neither can pin this
+  # branch. Silence on stderr can: this is one of only three silent permits, so
+  # deleting the guard makes a talkative permit fire instead (mutation M1).
+  assert_eq "19c: and is SILENT, which no other permit path is" "" "$G19_ERR"
   assert_eq "19c: no loop state never calls the API" "absent" \
     "$([ -e "$S/curl.log" ] && echo present || echo absent)"
+  # Positive control: the same directory WITH a loop state must deny, proving
+  # the fixture was one file away from the block path.
+  g19_state "$D" "W2144" false
+  g19_run "$D" "$S"
+  assert_eq "19c: writing a loop state into the same dir denies (positive control)" "deny" \
+    "$(printf '%s' "$G19_OUT" | jq -r '.decision' 2>/dev/null)"
 
   # 19d / 19d2 / 19d3 / 19d4: every non-200 outcome permits
   D=$(g19_proj); S="$D/stub"; g19_stub "$S" "" "000" 7; g19_state "$D" "W2144" false
   g19_run "$D" "$S"
   assert_exit "19d: a transport failure exits 0" 0 "$G19_RC"
   assert_eq "19d: a transport failure writes nothing to stdout" "" "$G19_OUT"
-  D=$(g19_proj); S="$D/stub"; g19_stub "$S" '{"error":"no task"}' 404; g19_state "$D" "W2144" false
+  assert_contains "19d: with the unreachable reason" "could not be reached" "$G19_ERR"
+  # Never the answered-N reason: deleting the empty-response guard reports
+  # "the API answered " with no code (mutation M16).
+  assert_eq "19d: and never the answered-N reason" "0" \
+    "$(printf '%s' "$G19_ERR" | grep -c 'answered' || true)"
+  # The body is deliberately NOT JSON. With a JSON body this case could not
+  # fail: deleting the 404 arm lets the response fall through to the body parse,
+  # where the absent identifier yields the SAME "no claimable task remains"
+  # reason. An unparseable body separates them — the 404 arm permits before the
+  # body is ever read, while the fall-through reports it as unparseable
+  # (mutation M18).
+  D=$(g19_proj); S="$D/stub"; g19_stub "$S" '<html>404 Not Found</html>' 404
+  g19_state "$D" "W2144" false
   g19_run "$D" "$S"
   assert_eq "19d2: an empty-queue 404 permits" "" "$G19_OUT"
-  assert_contains "19d2: and says so" "no claimable task remains" "$G19_ERR"
+  assert_contains "19d2: and says so, without ever reading the body" \
+    "no claimable task remains" "$G19_ERR"
+  assert_eq "19d2: and never reports the body as unparseable" "0" \
+    "$(printf '%s' "$G19_ERR" | grep -c 'could not be parsed' || true)"
   D=$(g19_proj); S="$D/stub"; g19_stub "$S" '{"error":"boom"}' 500; g19_state "$D" "W2144" false
   g19_run "$D" "$S"
   assert_eq "19d3: a 500 permits" "" "$G19_OUT"
+  assert_contains "19d3: naming the status, which no other permit does" "answered 500" "$G19_ERR"
   D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200; g19_state "$D" "W2144" false
   rm -f "$D/.stride_auth.md"
   g19_run "$D" "$S"
   assert_eq "19d4: no .stride_auth.md permits" "" "$G19_OUT"
+  assert_contains "19d4: with the credentials reason" \
+    "no API URL or token could be resolved" "$G19_ERR"
   assert_eq "19d4: and never calls the API" "absent" \
     "$([ -e "$S/curl.log" ] && echo present || echo absent)"
 
   # 19e: a 200 with no usable identifier permits
+  # The full reason, per sub-case. Asserting only empty stdout let two of these
+  # three pass without pinning anything: with the presence guard deleted,
+  # data:null and data:{} still permit, but via the CHARSET guard and with a
+  # different reason. Only identifier:"" is load-bearing for the presence guard
+  # specifically; the other two are kept because they prove the same reason is
+  # reached from three shapes (mutation M23 reds all three).
   for G19_BODY in '{"data":null}' '{"data":{"identifier":""}}' '{"data":{}}'; do
     D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_BODY" 200; g19_state "$D" "W2144" false
     g19_run "$D" "$S"
     assert_eq "19e: a 200 with no claimable identifier permits" "" "$G19_OUT"
+    assert_contains "19e: with the no-task reason, not the shape reason" \
+      "no claimable task remains" "$G19_ERR"
+    assert_eq "19e: and never the shape reason" "0" \
+      "$(printf '%s' "$G19_ERR" | grep -c 'identifier-shaped' || true)"
   done
+  # Positive control: the same stub body replaced with a claimable identifier
+  # must deny, proving these fixtures were one field away from the block.
+  D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200; g19_state "$D" "W2144" false
+  g19_run "$D" "$S"
+  assert_eq "19e: the same fixture with an identifier denies (positive control)" "deny" \
+    "$(printf '%s' "$G19_OUT" | jq -r '.decision' 2>/dev/null)"
 
   # 19f: needs_review=true permits WITHOUT touching the network
   D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200; g19_state "$D" "W2144" true
@@ -3602,11 +3646,25 @@ G19STUB
 
   # 19f2: malformed loop-state shapes all permit. The quoted "false" matters —
   # the boolean TYPE is load-bearing here exactly as it is in the writer.
-  for G19_LS in '{"identifier":"W1","needs_rev' '[1,2,3]' '"just a string"' '{"identifier":"W1","needs_review":"false"}'; do
+  # Per-shape reasons, not just empty stdout.
+  #
+  # Tightening these from "stdout is empty" to a per-shape reason is what
+  # surfaced a real cross-half divergence, now FIXED in the gate rather than
+  # documented: a top-level array or a bare string was a valid single document
+  # to this half, so it fell through to "no usable needs_review" two branches
+  # later, while the twin refused it outright as not-an-object. Both halves now
+  # require the loop-state document to BE an object, so all four shapes report
+  # identically. The twin's 15f2 asserts the same four reasons.
+  for G19_CASE in '{"identifier":"W1","needs_rev|could not be parsed' \
+                  '[1,2,3]|could not be parsed' \
+                  '"just a string"|could not be parsed' \
+                  '{"identifier":"W1","needs_review":"false"}|no usable needs_review'; do
+    G19_LS="${G19_CASE%%|*}"; G19_WANT="${G19_CASE##*|}"
     D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200
     printf '%s' "$G19_LS" > "$D/.stride/.loop-state.json"
     g19_run "$D" "$S"
     assert_eq "19f2: a malformed loop state permits" "" "$G19_OUT"
+    assert_contains "19f2: with its own branch's reason ($G19_WANT)" "$G19_WANT" "$G19_ERR"
   done
 
   # 19g: the network call is bounded, so a hung API cannot hang a turn end
@@ -3658,7 +3716,13 @@ G19STUB
     g19_run "$D" "$S"
     assert_exit "19h4: an unrecordable block exits 0" 0 "$G19_RC"
     assert_eq "19h4: an unrecordable block permits rather than blocking unbounded" "" "$G19_OUT"
+    assert_contains "19h4: with the write-failure reason specifically" \
+      "the block count could not be recorded" "$G19_ERR"
     chmod 700 "$D/.stride"
+    # Positive control: restoring write access must restore the block.
+    g19_run "$D" "$S"
+    assert_eq "19h4: restoring write access restores the block (positive control)" "deny" \
+      "$(printf '%s' "$G19_OUT" | jq -r '.decision' 2>/dev/null)"
   fi
 
   # 19i: the token reaches neither stream, on three different paths
@@ -3688,12 +3752,24 @@ G19STUB
   assert_eq "19k: stop_hook_active permits" "" "$G19_OUT"
   assert_eq "19k: and never calls the API" "absent" \
     "$([ -e "$S/curl.log" ] && echo present || echo absent)"
+  assert_eq "19k: and spends no re-block budget" "absent" \
+    "$([ -e "$D/.stride/.stop-gate-blocks" ] && echo present || echo absent)"
+  # Positive control: the identical fixture WITHOUT the flag must deny.
+  g19_run "$D" "$S"
+  assert_eq "19k: the same fixture without the flag denies (positive control)" "deny" \
+    "$(printf '%s' "$G19_OUT" | jq -r '.decision' 2>/dev/null)"
 
   # 19l: the escape hatch
   D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200; g19_state "$D" "W2144" false
+  # stderr captured into its OWN variable: reading the shared $G19_ERR here
+  # would assert against whatever the PREVIOUS case left behind, which is a
+  # stale-fixture bug of exactly the kind this task exists to remove.
   G19_OUT=$(printf '{"cwd":"%s"}' "$D" \
-    | PATH="$S:$PATH" STRIDE_ALLOW_STOP=1 "$G19_BASH" "$STOP_GATE" 2>/dev/null)
+    | PATH="$S:$PATH" STRIDE_ALLOW_STOP=1 "$G19_BASH" "$STOP_GATE" 2> "$TMPDIR_TEST/g19l.err")
+  G19_LERR=$(cat "$TMPDIR_TEST/g19l.err" 2>/dev/null || printf '')
   assert_eq "19l: STRIDE_ALLOW_STOP=1 permits" "" "$G19_OUT"
+  assert_contains "19l: with the escape-hatch reason specifically" \
+    "STRIDE_ALLOW_STOP=1 was set" "$G19_LERR"
   assert_eq "19l: and never calls the API" "absent" \
     "$([ -e "$S/curl.log" ] && echo present || echo absent)"
 
@@ -3710,24 +3786,44 @@ G19STUB
     D=$(g19_proj); S="$D/stub"; g19_stub "$S" '{"data":{"identifier":"Wé145"}}' 200
     g19_state "$D" "W2144" false
     G19_OUT=$(printf '{"cwd":"%s"}' "$D" \
-      | PATH="$S:$PATH" LC_ALL="$G19_LOC" "$G19_BASH" "$STOP_GATE" 2>/dev/null)
+      | PATH="$S:$PATH" LC_ALL="$G19_LOC" "$G19_BASH" "$STOP_GATE" 2> "$TMPDIR_TEST/g19m2.err")
+    G19_M2ERR=$(cat "$TMPDIR_TEST/g19m2.err" 2>/dev/null || printf '')
     assert_eq "19m2: an accented identifier is refused under LC_ALL=$G19_LOC" "" "$G19_OUT"
+    # The reason, not just the silence: without it this case passes for any
+    # permit at all, including one reached before the charset gate.
+    assert_contains "19m2: for its shape, under LC_ALL=$G19_LOC" \
+      "the next task identifier is not identifier-shaped" "$G19_M2ERR"
   done
 
   # 19x: a 65-character identifier permits, and the message names the NEXT one
+  # EXACTLY 65 characters, generated rather than typed. The hand-typed literal
+  # this replaced was 66 long, so the boundary mutation -gt 64 -> -gt 65 still
+  # caught it and this case could not go red (mutation M25). The 64-character
+  # control below is what makes the boundary itself the thing under test.
   D=$(g19_proj); S="$D/stub"
-  g19_stub "$S" '{"data":{"identifier":"W12345678901234567890123456789012345678901234567890123456789012345"}}' 200
+  g19_stub "$S" "$(jq -nc --arg i "$(printf 'W%.0s' $(seq 1 65))" '{data:{identifier:$i}}')" 200
   g19_state "$D" "W2144" false
   g19_run "$D" "$S"
   assert_eq "19x: an over-long next identifier permits" "" "$G19_OUT"
-  assert_contains "19x: and the reason names the next identifier, not the completed one" \
-    "next task identifier" "$G19_ERR"
+  assert_contains "19x: and the reason is the LENGTH one, not the shape one" \
+    "the next task identifier is longer than 64 characters" "$G19_ERR"
+  # Boundary control: exactly 64 must still reach the block path, so a widened
+  # bound reds the case above while this one stays green.
+  D=$(g19_proj); S="$D/stub"
+  g19_stub "$S" "$(jq -nc --arg i "$(printf 'W%.0s' $(seq 1 64))" '{data:{identifier:$i}}')" 200
+  g19_state "$D" "W2144" false
+  g19_run "$D" "$S"
+  assert_eq "19x: exactly 64 characters is accepted (boundary control)" "deny" \
+    "$(printf '%s' "$G19_OUT" | jq -r '.decision' 2>/dev/null)"
 
   # 19w: a 200 whose body is not JSON permits
   D=$(g19_proj); S="$D/stub"; g19_stub "$S" '<html>gateway</html>' 200; g19_state "$D" "W2144" false
   g19_run "$D" "$S"
   assert_eq "19w: an unparseable 200 body permits" "" "$G19_OUT"
-  assert_contains "19w: and says the response could not be parsed" "could not be parsed" "$G19_ERR"
+  # The FULL reason: "could not be parsed" alone is emitted by the loop-state
+  # branch too, so the short needle cannot tell the two apart.
+  assert_contains "19w: and says the API RESPONSE could not be parsed" \
+    "the API response could not be parsed" "$G19_ERR"
 
   # 19y: partial credentials permit without reaching the network
   for G19_DROP in 'API URL' 'API Token'; do
@@ -3768,12 +3864,33 @@ G19STUB
   # 19t / 19u [bash-only]: a missing tool permits. The farm is the only way to
   # drive `command -v` failing — a stub can add, never remove.
   D=$(g19_proj); g19_state "$D" "W2144" false
+  # Stderr is captured, NOT discarded. Without it this case could not fail:
+  # deleting the jq guard still produces exit 0 and empty stdout, because the
+  # next jq call fails and the gate falls open anyway. The difference is that
+  # the shell then prints "jq: command not found" — so stderr-silence is the
+  # only assertion that distinguishes "guarded" from "broken" (mutation M3).
+  # GEMINI_PROJECT_DIR is set as well as the stdin cwd, and that is what makes
+  # this case provable. Without jq the gate cannot READ .cwd, so with the guard
+  # deleted it would resolve PROJECT_DIR to "." , find no loop state there, and
+  # take the SILENT exit — indistinguishable from the guard firing. With the env
+  # var set, the mutant instead reaches the loop-state parse, which fails
+  # noisily, so the silence assertion below can tell the two apart (mutation M3).
   G19_FARM="$D/farm-nojq"; g19_farm "$G19_FARM" cat rm mkdir head grep tr curl chmod
-  G19_OUT=$(printf '{"cwd":"%s"}' "$D" | PATH="$G19_FARM" "$G19_BASH" "$STOP_GATE" 2>/dev/null)
+  G19_OUT=$(printf '{"cwd":"%s"}' "$D" \
+    | PATH="$G19_FARM" GEMINI_PROJECT_DIR="$D" "$G19_BASH" "$STOP_GATE" \
+    2> "$TMPDIR_TEST/g19t.err")
+  G19_TERR=$(cat "$TMPDIR_TEST/g19t.err" 2>/dev/null || printf '')
   assert_eq "19t: no jq on PATH permits" "" "$G19_OUT"
+  assert_eq "19t: and does so SILENTLY, rather than falling through to a failure" "" "$G19_TERR"
   G19_FARM2="$D/farm-nocurl"; g19_farm "$G19_FARM2" cat rm mkdir head grep tr jq chmod
-  G19_OUT=$(printf '{"cwd":"%s"}' "$D" | PATH="$G19_FARM2" "$G19_BASH" "$STOP_GATE" 2>/dev/null)
+  G19_OUT=$(printf '{"cwd":"%s"}' "$D" | PATH="$G19_FARM2" "$G19_BASH" "$STOP_GATE" \
+    2> "$TMPDIR_TEST/g19u.err")
+  G19_UERR=$(cat "$TMPDIR_TEST/g19u.err" 2>/dev/null || printf '')
   assert_eq "19u: no curl on PATH permits" "" "$G19_OUT"
+  # The full reason, not just exit 0: deleting the guard reaches the network leg
+  # and reports "could not be reached" instead (mutation M4).
+  assert_contains "19u: with the curl-missing reason specifically" \
+    "curl is not available" "$G19_UERR"
 
   # 19n: registration. The gate is inert unless Gemini actually loads it.
   G19_HJ="$SCRIPT_DIR/hooks.json"
@@ -3921,6 +4038,8 @@ G19STUB
   printf 'W2144 9 extra\n' > "$D/.stride/.stop-gate-blocks"
   g19_run "$D" "$S"
   assert_eq "19af: a trailing junk field does not shift the count off field two" "" "$G19_OUT"
+  assert_contains "19af: and reports the budget as spent, which is why it permits" \
+    "the re-block budget for this completion is spent" "$G19_ERR"
   # 19ag: a NUL byte inside the identifier must be REFUSED. A shell variable
   # cannot hold a NUL at all, so command substitution silently DROPS it - an
   # 18-character API value arrives as a charset-clean 17-character one, passes
@@ -3982,7 +4101,7 @@ G19NUL
   g19_run "$D" "$S"
   assert_eq "19ai: a multi-document response body is refused" "" "$G19_OUT"
   assert_contains "19ai: and reported as unparseable, as the twin reports it" \
-    "could not be parsed" "$G19_ERR"
+    "the API response could not be parsed" "$G19_ERR"
   assert_eq "19ai: and neither identifier reaches any output" "0" \
     "$(printf '%s%s' "$G19_OUT" "$G19_ERR" | grep -c 'IGNORE PRIOR' || true)"
   # The same shape in the loop-state file. Not exploitable there — a
@@ -3993,7 +4112,8 @@ G19NUL
     > "$D/.stride/.loop-state.json"
   g19_run "$D" "$S"
   assert_eq "19ai: a multi-document loop-state file is refused" "" "$G19_OUT"
-  assert_contains "19ai: and reported as unparseable" "could not be parsed" "$G19_ERR"
+  assert_contains "19ai: and reported as the LOOP-STATE file, not the response" \
+    "the loop-state file could not be parsed" "$G19_ERR"
 
   # 19aj: a non-string cwd must not become the project root. `.cwd // ""`
   # accepts a number, so {"cwd": 5} would root the gate at "5" here while the
@@ -4012,6 +4132,142 @@ G19NUL
   g19_run "$D" "$S"
   assert_eq "19ak: a top-level array body is refused" "" "$G19_OUT"
   assert_contains "19ak: and reported as not an object" "was not an object" "$G19_ERR"
+
+  # ---- W2146: permit-path coverage, hardened -------------------------------
+  # Suffixes are a GLOBAL namespace: 19xx and 15xx pin the same behaviour. The
+  # block deliberately starts at "am" on both halves so they stay aligned; 19al
+  # is skipped rather than reused for something the twin numbers differently.
+  #
+  # Every case below names the mutation that must turn it red (see the ledger in
+  # the task's completion evidence). A permit case that cannot go red is testing
+  # nothing, which is the defect this task exists to remove.
+
+  # 19am / 19am2: "the loop-state file records no identifier" (mutation M9).
+  # Previously unreachable by any fixture — every one wrote a well-formed
+  # identifier. The stub is armed to DENY, so the fixture is one property away
+  # from a block: that is the positive control.
+  for G19_LS in '{"needs_review":false,"completed_at":"2026-01-01T00:00:00Z"}' \
+                '{"identifier":5,"needs_review":false}'; do
+    D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200
+    printf '%s' "$G19_LS" > "$D/.stride/.loop-state.json"
+    g19_run "$D" "$S"
+    assert_eq "19am: an absent or non-string completed identifier permits" "" "$G19_OUT"
+    assert_contains "19am: with the presence reason, not the shape reason" \
+      "the loop-state file records no identifier" "$G19_ERR"
+  done
+  # Positive control: the same fixture WITH an identifier must deny, proving the
+  # cases above were one field away from the block path.
+  D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200; g19_state "$D" "W2144" false
+  g19_run "$D" "$S"
+  assert_eq "19am2: the same fixture with an identifier denies (positive control)" "deny" \
+    "$(printf '%s' "$G19_OUT" | jq -r '.decision' 2>/dev/null)"
+
+  # 19an: the COMPLETED identifier's charset guard (mutation M10). Only the NEXT
+  # identifier's shape was ever exercised; these are independent branches.
+  D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200
+  printf '{"identifier":"W1; rm -rf /","needs_review":false}' > "$D/.stride/.loop-state.json"
+  g19_run "$D" "$S"
+  assert_eq "19an: a malformed completed identifier permits" "" "$G19_OUT"
+  assert_contains "19an: with the completed-identifier reason" \
+    "the completed identifier is not identifier-shaped" "$G19_ERR"
+  # Proves the case cannot be satisfied by the NEXT identifier's guard instead.
+  assert_eq "19an: and never the next-identifier reason" "0" \
+    "$(printf '%s' "$G19_ERR" | grep -c 'next task identifier' || true)"
+
+  # 19ao: the COMPLETED identifier's length guard (mutation M11, -gt 64 -> -gt 65).
+  D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200
+  printf '{"identifier":"%s","needs_review":false}' \
+    "$(printf 'W%.0s' $(seq 1 65))" > "$D/.stride/.loop-state.json"
+  g19_run "$D" "$S"
+  assert_eq "19ao: a 65-character completed identifier permits" "" "$G19_OUT"
+  assert_contains "19ao: with the completed-identifier length reason" \
+    "the completed identifier is longer than 64 characters" "$G19_ERR"
+  assert_eq "19ao: and never the next-identifier reason" "0" \
+    "$(printf '%s' "$G19_ERR" | grep -c 'next task identifier' || true)"
+  # Boundary control: 64 characters must still reach the block path, so the
+  # length mutation reds 19ao while this stays green.
+  D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200
+  printf '{"identifier":"%s","needs_review":false}' \
+    "$(printf 'W%.0s' $(seq 1 64))" > "$D/.stride/.loop-state.json"
+  g19_run "$D" "$S"
+  assert_eq "19ao: exactly 64 characters is accepted (boundary control)" "deny" \
+    "$(printf '%s' "$G19_OUT" | jq -r '.decision' 2>/dev/null)"
+
+  # 19ap: the counter's non-regular-file guard, using a DIRECTORY (mutation M29).
+  # A directory is the one shape BOTH halves reject at the early guard, so this
+  # case can assert the exact reason where 19ac must stay loose — see the
+  # platform-limit comment in the gate.
+  D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200; g19_state "$D" "W2144" false
+  mkdir -p "$D/.stride/.stop-gate-blocks"
+  g19_run "$D" "$S"
+  assert_eq "19ap: a directory in the counter's place permits" "" "$G19_OUT"
+  assert_contains "19ap: with the exact non-regular-file reason" \
+    "the block counter is not a regular file" "$G19_ERR"
+  rmdir "$D/.stride/.stop-gate-blocks"
+  g19_run "$D" "$S"
+  assert_eq "19ap: and removing it restores the block (positive control)" "deny" \
+    "$(printf '%s' "$G19_OUT" | jq -r '.decision' 2>/dev/null)"
+
+  # 19aq: AC3 — stdout carries ONLY the JSON decision. Captured RAW, because
+  # $( ) strips the trailing newline and the point is the exact byte layout: a
+  # stray byte here makes Gemini allow the stop and report nothing (mutation
+  # M32 inserts one).
+  D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200; g19_state "$D" "W2144" false
+  G19_RAW=$(printf '{"cwd":"%s","session_id":"g19"}' "$D" \
+    | PATH="$S:$PATH" "$G19_BASH" "$STOP_GATE" 2>/dev/null; printf x)
+  G19_RAW="${G19_RAW%x}"
+  assert_eq "19aq: stdout carries exactly one newline, at the end" "1" \
+    "$(printf '%s' "$G19_RAW" | wc -l | tr -d ' ')"
+  # Re-encoding the newline-stripped text must return it unchanged, which is
+  # only true if it was already compact JSON with nothing around it.
+  assert_eq "19aq: and the text before it is exactly the compact JSON, nothing else" \
+    "$(printf '%s' "$G19_RAW" | tr -d '\n' | jq -c . 2>/dev/null)" \
+    "$(printf '%s' "$G19_RAW" | tr -d '\n')"
+
+  # 19ar [bash-only]: an HTTP code of literally "000" from a SUCCESSFUL curl.
+  # Distinct from 19d, which drives curl's non-zero exit and takes the
+  # empty-response branch instead; the two share reason text on purpose, so the
+  # discriminator is that this one DID reach the network (mutation M17).
+  # The twin folds both into one catch block, so it has no counterpart.
+  D=$(g19_proj); S="$D/stub"; g19_stub "$S" "" "000" 0; g19_state "$D" "W2144" false
+  g19_run "$D" "$S"
+  assert_eq "19ar: a 000 status from a successful curl permits" "" "$G19_OUT"
+  assert_contains "19ar: with the unreachable reason" "could not be reached" "$G19_ERR"
+  assert_eq "19ar: and never the answered-N reason" "0" \
+    "$(printf '%s' "$G19_ERR" | grep -c 'answered' || true)"
+  assert_eq "19ar: and the network leg really ran" "present" \
+    "$([ -e "$S/curl.log" ] && echo present || echo absent)"
+
+  # 19as: a non-http(s) scheme. The permit arm for it is UNREACHABLE by design —
+  # resolve_stride_api_url extracts with a case-sensitive `https?://`, so an
+  # ftp:// URL yields NO url and the gate stops one branch earlier. A fixture
+  # that claimed to reach the scheme arm would be a fixture that cannot fail,
+  # which is the hazard this task exists to remove. So: assert the behaviour
+  # that IS reachable, and pin the unreachability structurally (mutations M13
+  # and M14 red the two halves of this respectively).
+  D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_OK" 200; g19_state "$D" "W2144" false
+  printf '# auth\n\n- **API URL:** `ftp://api.example.invalid`\n- **API Token:** `%s`\n' \
+    "$G19_TOKEN" > "$D/.stride_auth.md"
+  g19_run "$D" "$S"
+  assert_eq "19as: a non-http scheme permits" "" "$G19_OUT"
+  assert_contains "19as: at the credentials branch, one step before the scheme arm" \
+    "no API URL or token could be resolved" "$G19_ERR"
+  assert_eq "19as: and never reaches the network" "absent" \
+    "$([ -e "$S/curl.log" ] && echo present || echo absent)"
+  # -F, because the needle is a regex literal: pattern-matching it as a pattern
+  # is how this assertion silently matched nothing on the first attempt.
+  assert_eq "19as: the resolver's scheme match is case-sensitive and http(s)-only" "1" \
+    "$(grep -cF "grep -oE 'https?://" "$STOP_GATE" || true)"
+  assert_eq "19as: and the defensive scheme arm is still present" "1" \
+    "$(grep -c 'has no recognised scheme' "$STOP_GATE" || true)"
+
+  # 19as2: the .stride-directory guard is likewise unreachable — the gate only
+  # gets here after [ -f "$LOOP_STATE_FILE" ] succeeded, which implies .stride
+  # exists, and mkdir -p on an existing directory returns 0 whatever its mode.
+  # Kept as defence in depth; pinned structurally so a refactor that moves the
+  # loop-state read cannot silently drop it.
+  assert_eq "19as2: the .stride-directory guard is still present" "1" \
+    "$(grep -c 'could not be created' "$STOP_GATE" || true)"
 fi
 
 # ============================================================

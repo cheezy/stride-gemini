@@ -223,6 +223,15 @@ if ! jq -e -s 'length == 1' "$LOOP_STATE_FILE" > /dev/null 2>&1; then
   reset_counter
   permit "the loop-state file could not be parsed"
 fi
+# The document must be an OBJECT, the same requirement the API body carries
+# below. Without this a bare JSON string or array is a valid single document
+# here, and the failure surfaces two branches later as "no usable needs_review"
+# — while the twin refuses it outright as not-an-object. Same decision, but a
+# different reason for one file, which this pair of files treats as a defect.
+if ! jq -e -s '.[0] | type == "object"' "$LOOP_STATE_FILE" > /dev/null 2>&1; then
+  reset_counter
+  permit "the loop-state file could not be parsed"
+fi
 
 # The boolean TYPE is load-bearing, exactly as it is in the writer: a quoted
 # "false" is not a completion that needs no review, and treating it as one

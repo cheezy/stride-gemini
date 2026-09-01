@@ -73,6 +73,33 @@ function Invoke-Permit {
     exit 0
 }
 
+# (W2146) Two PowerShell traps that made the type guards below near no-ops.
+#
+# 1. [PSCustomObject] is an ALIAS for System.Management.Automation.PSObject, and
+#    every PowerShell value is viewable as one — `'abc' -is [PSCustomObject]` is
+#    TRUE, as is 42 and $true. Only Object[] is rejected. So a loop-state file
+#    of `"just a string"` sailed past the "could not be parsed" guard. Compare
+#    the CONCRETE type name instead.
+# 2. Under Set-StrictMode -Version Latest, `.PSObject.Properties.Name` THROWS
+#    ("The property 'Name' cannot be found") when the object has ZERO
+#    properties, so a body of {"data":{}} hit the top-level trap and reported
+#    "unexpected error" where the bash half reports "no claimable task remains".
+#    Enumerating the collection is safe on an empty object.
+function Test-IsJsonObject {
+    param($Value)
+    if ($null -eq $Value) { return $false }
+    return ($Value.GetType().Name -ceq 'PSCustomObject')
+}
+function Test-HasProperty {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $false }
+    foreach ($prop in $Object.PSObject.Properties) {
+        # -ceq: jq's paths are case-sensitive and the halves must agree.
+        if ($prop.Name -ceq $Name) { return $true }
+    }
+    return $false
+}
+
 # --- Escape hatch -------------------------------------------------------
 if ([System.Environment]::GetEnvironmentVariable('STRIDE_ALLOW_STOP') -eq '1') {
     Invoke-Permit 'STRIDE_ALLOW_STOP=1 was set'
@@ -96,7 +123,7 @@ if ($rawInput) {
 # no file I/O and no counter budget. Gemini's documented AfterAgent stdin may
 # omit the field entirely, which is why the counter below is the real guarantee.
 if ($null -ne $parsedInput -and $parsedInput -is [PSCustomObject] -and
-    $parsedInput.PSObject.Properties.Name -ccontains 'stop_hook_active' -and
+    (Test-HasProperty -Object $parsedInput -Name 'stop_hook_active') -and
     $parsedInput.stop_hook_active -is [bool] -and $parsedInput.stop_hook_active) {
     exit 0
 }
@@ -104,7 +131,7 @@ if ($null -ne $parsedInput -and $parsedInput -is [PSCustomObject] -and
 # --- Project root: stdin cwd first, then the env chain ------------------
 $ProjectDir = ''
 if ($null -ne $parsedInput -and $parsedInput -is [PSCustomObject] -and
-    $parsedInput.PSObject.Properties.Name -ccontains 'cwd' -and
+    (Test-HasProperty -Object $parsedInput -Name 'cwd') -and
     $parsedInput.cwd -is [string]) {
     $ProjectDir = $parsedInput.cwd
 }
@@ -175,13 +202,13 @@ try { $loopRaw = Get-Content -Raw -LiteralPath $LoopStateFile -ErrorAction Stop 
 $loopState = $null
 if ($loopRaw) { try { $loopState = $loopRaw | ConvertFrom-Json } catch { $loopState = $null } }
 
-if ($null -eq $loopState -or $loopState -isnot [PSCustomObject]) {
+if (-not (Test-IsJsonObject -Value $loopState)) {
     Reset-BlockCounter
     Invoke-Permit 'the loop-state file could not be parsed'
 }
 # The boolean TYPE is load-bearing, exactly as it is in the writer: a quoted
 # "false" is not a completion that needs no review.
-if ($loopState.PSObject.Properties.Name -cnotcontains 'needs_review' -or
+if (-not (Test-HasProperty -Object $loopState -Name 'needs_review') -or
     $loopState.needs_review -isnot [bool]) {
     Reset-BlockCounter
     Invoke-Permit 'the loop-state file records no usable needs_review'
@@ -192,7 +219,7 @@ if ($loopState.needs_review) {
 }
 
 $completedIdent = ''
-if ($loopState.PSObject.Properties.Name -ccontains 'identifier' -and
+if ((Test-HasProperty -Object $loopState -Name 'identifier') -and
     $loopState.identifier -is [string]) {
     $completedIdent = $loopState.identifier
 }
@@ -328,7 +355,7 @@ try {
     $httpCode = 0
     try {
         $r = $_.Exception.Response
-        if ($null -ne $r -and $r.PSObject.Properties.Name -contains 'StatusCode') {
+        if (Test-HasProperty -Object $r -Name 'StatusCode') {
             $httpCode = [int]$r.StatusCode
         }
     } catch { $httpCode = 0 }
@@ -354,12 +381,12 @@ if ($null -eq $parsedBody) { Invoke-Permit 'the API response could not be parsed
 # past the -isnot [PSCustomObject] test below, while the bash half's
 # `jq -s '.[0] | type'` sees "array" and refuses — one wire body, two decisions.
 if (-not $body.TrimStart().StartsWith('{')) { Invoke-Permit 'the API response was not an object' }
-if ($parsedBody -isnot [PSCustomObject]) { Invoke-Permit 'the API response was not an object' }
+if (-not (Test-IsJsonObject -Value $parsedBody)) { Invoke-Permit 'the API response was not an object' }
 
 $nextIdent = ''
-if ($parsedBody.PSObject.Properties.Name -ccontains 'data' -and
+if ((Test-HasProperty -Object $parsedBody -Name 'data') -and
     $null -ne $parsedBody.data -and $parsedBody.data -is [PSCustomObject] -and
-    $parsedBody.data.PSObject.Properties.Name -ccontains 'identifier' -and
+    (Test-HasProperty -Object $parsedBody.data -Name 'identifier') -and
     $parsedBody.data.identifier -is [string]) {
     $nextIdent = $parsedBody.data.identifier
 }
