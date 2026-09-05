@@ -189,10 +189,10 @@ The reviewer returns a human-readable prose summary followed by a fenced ```json
 **Copy the whole structured block into `reviewer_result` — never a subset.** Beyond the prose `review_report`, the reviewer's structured JSON block must be carried into `reviewer_result` by a mechanical whole-object copy, then verified by the mandatory self-check before submission. The passthrough mechanics and the self-check (every section present; `project_checks` count equals the reviewer's; no `not_assessed` for a task-supplied section) are owned by `stride-workflow` ("Extracting the structured review block") and `stride-completing-tasks` ("MANDATORY pre-submission self-check") — follow them; do not re-enumerate or sub-select keys here.
 
 **If issues are found:**
-- Fix all Critical issues before proceeding
-- Fix Important issues before proceeding
-- Minor issues are optional but recommended
-- After fixing, you do NOT need to re-run the reviewer — proceed to the after_doing hook
+- Fix all Critical issues before proceeding — never capped, in any round
+- Fix Important issues before proceeding — through round two; after that, record them per the cap in `stride-workflow` Step 5 rather than fixing them, and never a `category: "security"` one
+- Minor issues are optional but recommended — except a `category: "security"` one, which is never optional at any severity
+- **Re-review is bounded, not ruled out.** **Two review rounds is the ceiling**, and round two verifies round one's fixes rather than starting over — it is still shown the full diff. After round two the `important` and `minor` findings still standing are recorded rather than fixed, never a `category: "security"` one, and a `critical` is exempt from the cap and blocks in whatever round it surfaces. A fix that clears every finding needs no second round at all, and going straight on to the `after_doing` hook is then correct. **The rule belongs to `stride-workflow` Step 5 — follow it there rather than working from this summary.**
 
 ### Extracting the structured review block
 

@@ -4311,6 +4311,287 @@ G19NUL
 fi
 
 # ============================================================
+# Test Group 20: two-round review cap (W2158)
+# ============================================================
+# NOT mirrored by test-stride-hook.ps1, deliberately. Groups 1-19 all exercise
+# stride-hook.sh or stride-stop-gate.sh, and the ps1 half exists to prove the
+# PowerShell twin behaves like the bash one. This group asserts on CONTRACT
+# MARKDOWN, which has no per-runtime twin — there is nothing behavioural for a
+# second half to mirror, and numbering it over there would imply otherwise.
+#
+# NOT PORTED from stride/hooks/test-stride-hook.sh Group 36, deliberately:
+#   * Group 36's executed half (36m onward) extracts the round_cap_ok jq out of
+#     review-block-extraction.md and RUNS it against fixtures. This port has no
+#     such sibling and embeds no executable check anywhere in its contract
+#     markdown, so there are no bytes to extract and run. Only 36's
+#     text-assertion half has an analog here.
+#   * Group 36j's task-runner assertion goes with it: agents/task-runner.md does
+#     not exist in this port, so the check would pass vacuously.
+#
+# HOW THIS GROUP AVOIDS MERELY RESTATING THE CONTRACT. Two devices, both of
+# which take their expected value FROM the contract at run time:
+#   (i)  The ceiling clause and the security carve-out are extracted out of the
+#        orchestrator with grep -o and then used as the expected value in the
+#        other two files. The cross-file cases therefore pin CONSISTENCY: reword
+#        the ceiling in Step 5 alone and they red, rather than three copies
+#        drifting apart in silence.
+#   (ii) The Step 5 slice is cut with awk and the cap's own sentences are
+#        asserted INSIDE it, not merely somewhere in the file. That makes the
+#        canon check_hint ("beside the port's statement of the review-round
+#        ceiling") executable, and is strictly stronger than a whole-file grep.
+#
+# WHAT THIS GROUP CANNOT CATCH, stated rather than left to be discovered. One
+# literal anchor per concept is irreducible: a text group has to name something
+# to look for. So it reds on deletion, on drift between the four files, and on
+# the cap paragraph migrating out of Step 5 — but NOT on a coordinated reword of
+# all four files, and never on prose that is present and ignored at run time.
+# That last limit is the cap's own: the cap is stated, not pinned, and this
+# group inherits exactly that reach.
+echo ""
+echo "=== Test Group 20: two-round review cap (W2158) ==="
+
+G20_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G20_CT="$SCRIPT_DIR/../skills/stride-completing-tasks/SKILL.md"
+G20_SAW="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G20_REV="$SCRIPT_DIR/../agents/task-reviewer.md"
+
+if [ ! -f "$G20_WF" ] || [ ! -f "$G20_CT" ] || [ ! -f "$G20_SAW" ] || [ ! -f "$G20_REV" ]; then
+  echo "  SKIP: Test Group 20 (contract files not found relative to the hooks directory)"
+else
+  # Device (i): take the canonical clauses from the orchestrator itself. If a
+  # reword empties either, every case that consumes it fails loudly rather than
+  # comparing against "" and passing vacuously — 20a and 20k assert non-empty
+  # first, precisely so the extraction cannot fail silently.
+  G20_CEILING="$(grep -o 'Two review rounds is the ceiling' "$G20_WF" | head -1)"
+  G20_SEC="$(grep -o 'closed to a `category: "security"` issue at every severity' "$G20_WF" | head -1)"
+
+  # Device (ii): the Step 5 slice, so placement is asserted rather than presence.
+  G20_STEP5="$(awk '/^## Step 5: Code Review/{f=1} /^## Step 5\.5:/{f=0} f' "$G20_WF")"
+
+  # Whole-file cases match against the FILE, never against "$(cat file)" fed to
+  # assert_contains. That shape is unsafe here and the reason is worth recording
+  # rather than rediscovering: this suite runs under `set -o pipefail`, and
+  # assert_contains pipes its haystack into `grep -qF`. On a haystack larger than
+  # the 64 KB pipe buffer, grep -q matches and exits while echo is still writing,
+  # echo takes EPIPE, and pipefail promotes that to a failing pipeline — so the
+  # case reports FAIL on input it actually matched. skills/stride-completing-tasks
+  # /SKILL.md is ~80 KB, which is how this surfaced. The helper below sidesteps it
+  # entirely by never building a pipe. assert_contains stays correct for the
+  # small, in-memory haystacks the earlier groups give it, and for $G20_STEP5.
+  g20_has() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    if grep -qF -- "$1" "$2"; then echo "found"; else echo "missing"; fi
+  }
+
+  # The same question asked of an in-memory slice rather than a file. It exists
+  # for the second hazard, which bites in the opposite direction: `grep -qF ""`
+  # matches ANY input, so an extraction that came back empty would make its case
+  # pass vacuously — the precise failure this group is meant to catch, passing
+  # itself off as a green. Both helpers shape the needle only; the assertion is
+  # still the suite's own assert_eq.
+  g20_in() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    case "$2" in (*"$1"*) echo "found" ;; (*) echo "missing" ;; esac
+  }
+
+  # --- AC1: the ceiling is stated in the port's review step ---
+  assert_eq "20a: the ceiling clause is extractable from the orchestrator" \
+    "Two review rounds is the ceiling" "$G20_CEILING"
+
+  assert_eq "20b: the ceiling is stated INSIDE Step 5, not merely somewhere in the file" "found" \
+    "$(g20_in "$G20_CEILING" "$G20_STEP5")"
+
+  # The task's own verification grep is 'two rounds\|round cap'; pin both needles
+  # so a reword that satisfies neither cannot pass this group.
+  assert_eq "20c: Step 5 carries the 'round cap' wording the verification grep looks for" "found" \
+    "$(g20_in "round cap" "$G20_STEP5")"
+
+  # --- AC2: a round is defined in terms this port actually has ---
+  assert_eq "20d: a round is defined as an invocation whose block parsed" "found" \
+    "$(g20_in "block that parsed" "$G20_STEP5")"
+
+  assert_eq "20e: an unparsable invocation is re-invoked and costs no round" "found" \
+    "$(g20_in "costs no round" "$G20_STEP5")"
+
+  # The two shapes this port does NOT carry. Importing either would define the
+  # round in terms of a file that does not exist here.
+  assert_eq "20f: no \$MERGED carrier was pasted in from stride" "0" \
+    "$(grep -c 'MERGED' "$G20_WF" || true)"
+
+  assert_eq "20g: no round-counter file was invented" "0" \
+    "$(grep -c 'review-rounds' "$G20_WF" || true)"
+
+  # --- AC3: round two is scoped in mission, never in evidence ---
+  assert_eq "20h: round two is narrowed in mission, not in what it is shown" "found" \
+    "$(g20_in "never in what it is shown" "$G20_STEP5")"
+
+  assert_eq "20i: round two still receives the full task diff" "found" \
+    "$(g20_in "receives the **full** task diff" "$G20_STEP5")"
+
+  # --- AC4: remaining non-critical findings are recorded, not fixed ---
+  assert_eq "20j: after two rounds the remaining findings are RECORDED" "found" \
+    "$(g20_in "RECORDED rather than fixed" "$G20_STEP5")"
+
+  # --- AC6: a security-category finding is never recordable ---
+  assert_eq "20k: the security carve-out clause is extractable from the orchestrator" \
+    'closed to a `category: "security"` issue at every severity' "$G20_SEC"
+
+  # --- AC5: a critical still blocks, whatever the round number ---
+  assert_eq "20l: a critical is exempt from the cap" "found" \
+    "$(g20_in "exempt from the cap" "$G20_STEP5")"
+
+  # --- AC7: prose-vs-pin is stated, not left implied ---
+  assert_eq "20m: the cap discloses that it is self-certified rather than pinned" "found" \
+    "$(g20_in "self-certified" "$G20_STEP5")"
+
+  # --- the reviewer contract carries the round metadata and its scoping ---
+  assert_eq "20n: the reviewer documents review_round and its round-1 default" "found" \
+    "$(g20_has "When it is absent, this is round 1" "$G20_REV")"
+
+  assert_eq "20o: the reviewer emits the same block whatever the round" "found" \
+    "$(g20_has "Narrowing changes what you look for, never what you emit" "$G20_REV")"
+
+  # --- the completion gate carries the cap, using the orchestrator's own bytes ---
+  assert_eq "20p: the completion self-check gates on the round cap" "found" \
+    "$(g20_has "Review rounds are inside the cap" "$G20_CT")"
+
+  assert_eq "20q: and the completion gate's ceiling matches the orchestrator's, byte for byte" "found" \
+    "$(g20_has "$G20_CEILING" "$G20_CT")"
+
+  assert_eq "20r: and its security carve-out matches the orchestrator's, byte for byte" "found" \
+    "$(g20_has "$G20_SEC" "$G20_CT")"
+
+  # --- the subagent-workflow summary no longer contradicts the cap ---
+  # Before W2158 this file said re-review never happens, which made round two
+  # unreachable and the critical exemption dead text. Pinned as a count so the
+  # sentence cannot come back.
+  assert_eq "20s: the subagent-workflow no longer forbids re-running the reviewer" "0" \
+    "$(grep -c 'you do NOT need to re-run the reviewer' "$G20_SAW" || true)"
+
+  assert_eq "20t: and its ceiling matches the orchestrator's, byte for byte" "found" \
+    "$(g20_has "$G20_CEILING" "$G20_SAW")"
+
+  # --- 20u-20w: three cases added after round one of review, each pinning a
+  # --- specific way the cap could be misread rather than a wording preference.
+
+  # 20u: every bullet that mentions RECORDING states the security carve-out in
+  # the same breath. The minor bullet originally said "they too are recorded
+  # rather than fixed" and stopped there, and severity/category are independent
+  # enums in agents/task-reviewer.md, so {minor, security} is constructible —
+  # which made the omission an invitation to record one, not a style nit. The
+  # governing paragraph two lines up already closes it "at every severity", so
+  # this pins CO-LOCATION, which is the property that actually survives being
+  # read in isolation.
+  assert_eq "20u: the minor-issues bullet carries the security carve-out inline" "found" \
+    "$(g20_in 'they too are recorded rather than fixed, and never a `category: "security"` one' "$G20_STEP5")"
+
+  # 20v: the security branch holds the task the same way the critical branch
+  # does. Before this, the critical paragraph said DO NOT submit and the
+  # security paragraph said only "escalate", which left "mention it and carry
+  # on" as a readable option for the one finding class the cap must never let
+  # through. The needle is the re-verify allowance, which only the repaired
+  # wording carries.
+  assert_eq "20v: an unfixed security finding holds the task, and its fix may be re-verified at the ceiling" "found" \
+    "$(g20_in "verifying a security fix is correctness, not process" "$G20_STEP5")"
+
+  # 20w: the completion gate's closing paragraph must not sweep the round-cap
+  # bullet into its "compares counts, keys, and status enums only" claim, nor
+  # into the server-hard-rejects claim. Both are false of a self-certified
+  # count, and together they read as a mechanical pin backing the cap — the
+  # precise impression the disclosure exists to prevent.
+  assert_eq "20w: the completion gate exempts the round-cap check from its machine-checkable claim" "found" \
+    "$(g20_has "The round-cap check is the one exception" "$G20_CT")"
+
+  # 20x: the gate must recognise the two exemptions the review step grants, or
+  # it punishes the correct behaviour. Step 5 tells an agent to run a further
+  # round to verify a critical or security fix; the gate counted rounds and
+  # would have failed that agent at three, making "skip the verification round"
+  # the cheapest escape — for exactly the two finding classes that must never go
+  # unverified. Pinned because the two files can drift apart again.
+  assert_eq "20x: the completion gate does not count a critical/security verification round against the cap" "found" \
+    "$(g20_has "is not a third review round and does not fail this check" "$G20_CT")"
+
+  # --- 20y-20ad: five cases added after an exploratory session walked the cap
+  # --- on paper and found five ways a correct agent could strand or fail open.
+  # --- Each pins the repair, not the wording it happens to use.
+
+  # 20y: a count only ever rises, so a check that fails on a third round can
+  # never be made to pass by acting. Without a stated exit the agent may not
+  # submit and has nothing it can do — the task sits claimed until it expires,
+  # with no error a human ever sees. Pinned at BOTH carriers, because whichever
+  # door a single-document reader came in has to lead somewhere.
+  assert_eq "20y: the review step states a past-the-cap exit" "found" \
+    "$(g20_in "there is still an exit" "$G20_STEP5")"
+
+  assert_eq "20y2: and the completion gate states the same exit" "found" \
+    "$(g20_has "this check cannot be made to pass" "$G20_CT")"
+
+  # 20z: the exemption has to key on whether a critical EXISTED, not on who
+  # found it. Keyed on the discoverer, a critical raised by a Step 5.5
+  # escalation — or one the agent found itself while fixing — belongs to no
+  # round, so the round that clears it is unclassifiable and the gate fails the
+  # agent for doing exactly what Step 5.5 told it to do.
+  assert_eq "20z: the exemption is keyed on the finding existing, not on who found it" "found" \
+    "$(g20_has "keyed on whether such a finding existed, never on who found it" "$G20_CT")"
+
+  # 20aa: an exempt round still emits the whole block. Step 5.5's remedy says
+  # the re-review "regenerates" a clean result, and the gate exempts a round run
+  # "solely to verify" — read as a claim about output size those two conflict,
+  # and the conflict sits on the highest-stakes path in the contract.
+  assert_eq "20aa: regenerating the full block does not disqualify an exempt round" "found" \
+    "$(g20_has "regenerating the full block never disqualifies a round" "$G20_CT")"
+
+  # 20ab: the resumed-session rule must fail closed on BOTH axes. Counting the
+  # next round as two resolves the doubt toward the ceiling; withholding the
+  # narrowing is what stops that same doubt resolving into no review at all. On
+  # a session whose true count is zero, counting alone spends the cap on a round
+  # the reviewer contract forbids to hunt anywhere.
+  assert_eq "20ab: a resumed session withholds the narrowing as well as counting the round" "found" \
+    "$(g20_in "send it **no** \`review_round\` at all" "$G20_STEP5")"
+
+  assert_eq "20ab2: and the reviewer reviews unnarrowed when fixes[] is empty" "found" \
+    "$(g20_has "there is nothing to verify, so **do not narrow**" "$G20_REV")"
+
+  # 20ac: "costs no round" is not a licence to loop. The fallback section is the
+  # bound, and the cap block previously cited it while attributing to it a
+  # disposition it does not carry — two mutually exclusive instructions for one
+  # observable state, in one file.
+  assert_eq "20ac: re-invocation on an unparsable block is bounded by the fallback" "found" \
+    "$(g20_in "Re-invoke once, not indefinitely" "$G20_STEP5")"
+
+  # 20ad: the carve-out has to sit on the OPTIONALITY clause, not only on the
+  # recording clause. 20u pins the recording half; a {minor, security} finding
+  # deferred under "optional but recommended" reaches the ceiling in the one
+  # disposition the contract forbids. Pinned at both carriers.
+  assert_eq "20ad: a security finding is never optional, at either carrier" "found" \
+    "$(g20_in 'which is never optional at any severity' "$G20_STEP5")"
+
+  assert_eq "20ad2: and the subagent-workflow minor bullet says so too" "found" \
+    "$(g20_has 'which is never optional at any severity' "$G20_SAW")"
+
+  # 20ae: the past-the-cap exit has to be registered in the gate's PREAMBLE too,
+  # not only in the round-cap bullet. The preamble prescribes re-invoking the
+  # reviewer for any failing check — the one remedy that makes a round-count
+  # failure worse — so an exit stated only in the bullet leaves the stall intact
+  # one level up. The file already carries the idiom for this: the preamble
+  # registers a third exit for a steering or credential-bearing row, on exactly
+  # the same "a re-run never terminates" reasoning.
+  assert_eq "20ae: the gate preamble registers the past-the-cap exit as a fourth exit" "found" \
+    "$(g20_has "Fourth exit — a review loop already past its cap" "$G20_CT")"
+
+  # 20af: `file:line` is the one free-text element of the residual record —
+  # severity and category are closed enums — and an absolute path can carry a
+  # username or home directory into completion_summary, which is persisted and
+  # rendered on the Review queue. The qualifier is pinned at both write sites so
+  # it cannot drift out silently.
+  assert_eq "20af: the residual record's file:line is qualified repository-relative in the review step" "found" \
+    "$(g20_in "a repository-relative \`file:line\`" "$G20_STEP5")"
+
+  assert_eq "20af2: and at the completion gate's write site" "found" \
+    "$(g20_has "a repository-relative \`file:line\`" "$G20_CT")"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
