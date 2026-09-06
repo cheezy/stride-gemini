@@ -4882,6 +4882,269 @@ else
 fi
 
 # ============================================================
+# Test Group 22: dispatch_count review-cost telemetry (W2160)
+# ============================================================
+# NOT mirrored by test-stride-hook.ps1, as with Groups 20 and 21: these assert on
+# contract markdown, which has no per-runtime twin.
+#
+# NOT PORTED from stride Group 38's executable half, deliberately. That half
+# extracts the documented JSON example and runs jq over it. It could be done
+# here — the example is extractable — but what it would prove is that a JSON
+# snippet in a markdown file parses, not that this extension behaves. This port
+# ships no validator for `dispatch_count` (verified: the shared backend's
+# valid_step?/1 checks name, dispatched, duration_ms and reason, and separately
+# the reason_code enum — nothing checks this key), which is limit 6, and the
+# contract assigns the guard obligation to the first consumer rather than
+# pretending otherwise.
+# Asserting the example parses would read as coverage of a validation that does
+# not exist. Text assertions plus the extraction devices below are the honest
+# scope.
+#
+# RUN-TIME EXTRACTION, as in Groups 20 and 21:
+#   (i)  The two limits most likely to be dropped in a reword — the per-round
+#        prohibition and the wall-clock-is-not-tokens rule — are pulled out of
+#        the orchestrator with grep -o and used as the expected value in the
+#        completion skill, so the cross-file cases pin CONSISTENCY rather than
+#        wording.
+#   (ii) An awk slice of the Workflow Telemetry section asserts the limits sit
+#        WITH the schema they qualify, not merely somewhere in a 150 KB file.
+#        The whole point of this task is that the key must not ship without the
+#        limits, so placement is the property worth pinning.
+#
+# Defines its own helper copies, following Groups 20 and 21 rather than reaching
+# into either one's else-branch.
+#
+# WHAT IT CANNOT CATCH: a coordinated reword across both files, and prose
+# present but ignored at run time. The second is this feature's own condition —
+# nothing validates the key — and the contract says so rather than implying a
+# pin.
+echo ""
+echo "=== Test Group 22: dispatch_count review-cost telemetry (W2160) ==="
+
+G22_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G22_CT="$SCRIPT_DIR/../skills/stride-completing-tasks/SKILL.md"
+
+if [ ! -f "$G22_WF" ] || [ ! -f "$G22_CT" ]; then
+  echo "  SKIP: Test Group 22 (contract files not found relative to the hooks directory)"
+else
+  g22_has() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    if grep -qF -- "$1" "$2"; then echo "found"; else echo "missing"; fi
+  }
+  g22_in() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    case "$2" in (*"$1"*) echo "found" ;; (*) echo "missing" ;; esac
+  }
+
+  # Device (i): the two limits a reword is most likely to lose.
+  G22_PERROUND="$(grep -o 'There is no per-round figure in this record' "$G22_WF" | head -1)"
+  G22_TOKENS="$(grep -o 'Wall-clock is not token cost' "$G22_WF" | head -1)"
+
+  # Device (ii): the Workflow Telemetry slice, so the limits are pinned WITH the
+  # schema they qualify rather than anywhere in the file.
+  G22_TEL="$(awk '/^## Workflow Telemetry/{f=1} /^## Explorer and Reviewer Result Rollout/{f=0} f' "$G22_WF")"
+
+  # --- AC1: the reviewer entry carries an optional dispatch count ---
+  assert_eq "22a: the telemetry slice is non-empty (extraction guard)" "found" \
+    "$(g22_in "dispatch_count" "$G22_TEL")"
+
+  assert_eq "22b: dispatch_count is a schema row, documented Optional" "found" \
+    "$(g22_in '| `dispatch_count` | integer | Optional' "$G22_TEL")"
+
+  assert_eq "22c: and scoped to a dispatched entry" "found" \
+    "$(g22_in 'only alongside `dispatched=true`' "$G22_TEL")"
+
+  # --- AC2: it counts dispatches, including a crashed re-dispatch ---
+  assert_eq "22d: the key counts dispatches, not rounds" "found" \
+    "$(g22_in 'It counts dispatches, **not rounds**' "$G22_TEL")"
+
+  assert_eq "22e: and a crashed re-dispatch is explicitly counted" "found" \
+    "$(g22_in 'crashed and was re-dispatched still spent its tokens' "$G22_TEL")"
+
+  # --- AC3: omitting it stays valid ---
+  assert_eq "22f: omitting the key is documented as never an error" "found" \
+    "$(g22_in 'Leaving it off is never an error' "$G22_TEL")"
+
+  assert_eq "22g: and a known 1 is still to be stated, so an omission is not silently ambiguous" "found" \
+    "$(g22_in 'state a `1` you actually know' "$G22_TEL")"
+
+  # --- AC4: no seventh step name, vocabulary unchanged ---
+  assert_eq "22h: the key is declared not to add a step name" "found" \
+    "$(g22_in 'a new key is not a new name' "$G22_TEL")"
+
+  # The invariant is that EVERY worked example carries all six names and no
+  # seventh — not that the file holds some fixed total, which would break the
+  # moment an example is added. So: exactly six distinct names, and each
+  # occurring the same number of times. Written this way after the first draft
+  # hard-coded a total of 12 and found 18; there are three examples in this file,
+  # not two, and a count that has to be corrected to match reality was asserting
+  # the wrong thing rather than finding a defect.
+  assert_eq "22i: exactly six distinct step names appear across the worked examples" "6" \
+    "$(grep -o '{"name": "[a-z_]*"' "$G22_WF" | sort -u | wc -l | tr -d ' ')"
+
+  assert_eq "22i2: and every example carries all six — each name occurs equally often" "1" \
+    "$(grep -o '{"name": "[a-z_]*"' "$G22_WF" | sort | uniq -c | awk '{print $1}' | sort -u | wc -l | tr -d ' ')"
+
+  # --- AC5: the limits ship with the key ---
+  assert_eq "22j: the per-round prohibition is extractable" \
+    "There is no per-round figure in this record" "$G22_PERROUND"
+
+  assert_eq "22k: and it sits INSIDE the telemetry section, with the schema it qualifies" "found" \
+    "$(g22_in "$G22_PERROUND" "$G22_TEL")"
+
+  assert_eq "22l: the wall-clock-is-not-token-cost limit is extractable" \
+    "Wall-clock is not token cost" "$G22_TOKENS"
+
+  assert_eq "22m: and it too sits inside the telemetry section" "found" \
+    "$(g22_in "$G22_TOKENS" "$G22_TEL")"
+
+  # All six limits present, by their numbering.
+  assert_eq "22n: all six limits are present" "6" \
+    "$(grep -o '\*\*([1-6])' "$G22_WF" | wc -l | tr -d ' ')"
+
+  # The measured figures the limits rest on — a limit without its evidence is an
+  # assertion, and these are the numbers that make it checkable.
+  assert_eq "22o: limit 1 keeps the measured variation it rests on" "found" \
+    "$(g22_in "2.1" "$G22_TEL")"
+
+  assert_eq "22o2: and the inverted-ranking case that proves the point" "found" \
+    "$(g22_in "20.3% more expensive when its token cost was in fact 1.4% **cheaper**" "$G22_TEL")"
+
+  assert_eq "22p: limit 2 keeps its overstatement figures" "found" \
+    "$(g22_in "40% and 52%" "$G22_TEL")"
+
+  # --- limit 3: absence of a figure is not absence of cost ---
+  assert_eq "22q: a review-skipped task's absent figure is not evidence of absent cost" "found" \
+    "$(g22_in "not evidence of absent cost" "$G22_TEL")"
+
+  # --- limit 5: a compliant 3 is not a cap breach ---
+  assert_eq "22r: a count above two is not readable as a cap breach" "found" \
+    "$(g22_in "never to read a cap breach out of \`dispatch_count\` alone" "$G22_TEL")"
+
+  # --- limit 6: no validator, and the obligation is assigned rather than left open ---
+  assert_eq "22s: the absent validator is stated" "found" \
+    "$(g22_in "Nothing validates the value on the way in" "$G22_TEL")"
+
+  assert_eq "22t: and the guard obligation is assigned to the first consumer" "found" \
+    "$(g22_in "guards for a non-integer itself" "$G22_TEL")"
+
+  # --- the completion skill mirrors the key and defers for the limits ---
+  assert_eq "22u: the completion skill documents the key" "found" \
+    "$(g22_has '**`dispatch_count` (optional)**' "$G22_CT")"
+
+  assert_eq "22v: and repeats the counts-dispatches-not-rounds rule" "found" \
+    "$(g22_has "counts dispatches, **not rounds**" "$G22_CT")"
+
+  # Cross-file consistency on the two limits most likely to be lost.
+  assert_eq "22w: the per-round prohibition reaches the completion skill too" "found" \
+    "$(g22_has "no per-round figure" "$G22_CT")"
+
+  assert_eq "22x: and so does wall-clock-is-not-token-cost" "found" \
+    "$(g22_has "wall-clock is not token cost" "$G22_CT")"
+
+  # --- the canon anchor, bare, per this port's convention ---
+  assert_eq "22y: the canon anchor sits with the telemetry section" "found" \
+    "$(g22_in "<!-- canon:dispatch-count-telemetry v1 -->" "$G22_TEL")"
+
+  # This port carries anchors without stride's back-reference paragraph; pinned
+  # so a later port-back does not reintroduce a reference to a file this repo
+  # does not have.
+  assert_eq "22y2: and carries no back-reference paragraph, per this port's convention" "0" \
+    "$(grep -c 'Canon-governed' "$G22_WF" || true)"
+
+  # --- the skip form must NOT gain the key ---
+  assert_eq "22z: the skip-form example does not carry a dispatch count" "0" \
+    "$(grep -c '"dispatched": false.*dispatch_count' "$G22_WF" || true)"
+
+  # --- 22aa-22ac: added after review round 1 and a specialist security review.
+
+  # 22aa: limit 5 tells an agent to write free prose into completion_notes. Every
+  # such NEW instruction has to carry the redaction pointer in the same sentence —
+  # the port's blanket rules are scoped to material captured during exploration,
+  # so an unqualified new clause genuinely re-opens the sink. The specialist has
+  # flagged this exact shape four times now, twice on this very sentence.
+  assert_eq "22aa: limit 5's completion_notes instruction carries its redaction pointer inline" "found"     "$(g22_in "redacted on exactly the terms that already govern anything reaching that field" "$G22_TEL")"
+
+  # 22ab: limit 6 assigns the guard obligation, but the assignee works in the
+  # shared backend while this file is the writer's contract. An obligation stated
+  # only where the writer reads it has not been routed, so the limit must name the
+  # function and the moduledoc where the note actually belongs.
+  assert_eq "22ab: the guard obligation names where it is discharged, not only that it exists" "found"     "$(g22_in "Kanban.Tasks.WorkflowSteps.valid_step?/1" "$G22_TEL")"
+
+  assert_eq "22ab2: and says an unrouted obligation is not an assigned one" "found"     "$(g22_in "has not actually been routed to its assignee" "$G22_TEL")"
+
+  # 22ac: ANCHORED AT "^# " ON PURPOSE. This group greps its own file, so an
+  # unanchored needle also matches the assertion line carrying it and the case
+  # could never go green — which is what happened on its first run. A comment
+  # line starts with '#'; an indented assertion line does not.
+  # 22ac: this group's own header asserted that valid_step?/1 checks the
+  # reason_code enum. It does not — a separate valid_reason_code?/1 does, called
+  # as its own branch. The contract prose had it right and only the comment
+  # dropped the qualifier, which is a false statement of fact in a test file about
+  # a rule that a false statement of fact is never cosmetic. Pinned so it stays
+  # fixed, since nothing else in the suite reads its own comments.
+  assert_eq "22ac: the group header attributes the reason_code check correctly" "0"     "$(grep -c '^# valid_step?/1 checks name, dispatched, duration_ms, reason and the reason_code' "$SCRIPT_DIR/test-stride-hook.sh" || true)"
+
+  # --- 22ad-22ai: added after a Step 5.5 session asked whether this port can
+  # --- actually MEASURE the count it is told to record. Its answer was: only if
+  # --- somebody was counting, and nothing told anybody to count. These pin the
+  # --- instrument, not the wording.
+
+  # 22ad: the instruction has to live where the dispatch happens. Before this,
+  # `dispatch_count` appeared ONLY in the telemetry section ~500 lines after
+  # Step 5, so an agent was asked at completion time to reconstruct events it
+  # was never told to tally. `duration_ms` is instrumented at all four of its
+  # sites; this now is too.
+  G22_STEP5="$(awk '/^## Step 5: Code Review/{f=1} /^## Step 5\.5:/{f=0} f' "$G22_WF")"
+
+  assert_eq "22ad: the tally is instructed at the dispatch site, not only at the write site" "found"     "$(g22_in "Keep a running tally of reviewer dispatches" "$G22_STEP5")"
+
+  assert_eq "22ad2: and says why it must be counted live — no artifact to recover it from" "found"     "$(g22_in "keeps no per-invocation artifact to recover it from afterwards" "$G22_STEP5")"
+
+  # 22ae: the crash paragraph is what an agent reads AT the crash, and it used to
+  # say a re-invocation "costs wall clock and nothing besides" — the precise
+  # belief that suppresses the increment for the one population this key exists
+  # to surface. Pinned as a count so the old sentence cannot return.
+  assert_eq "22ae: the crash paragraph no longer says a re-invocation costs nothing besides time" "0"     "$(grep -c 'costs wall clock and nothing besides' "$G22_WF" || true)"
+
+  assert_eq "22ae2: and tells the agent to tick the tally for a crashed dispatch" "found"     "$(g22_in 'it counts for `dispatch_count`' "$G22_STEP5")"
+
+  # 22af: an unknowable count must have a disposition, and it must be OMIT rather
+  # than estimate. The round count already had a resumed-session rule; this had
+  # none, while having strictly less on-disk support.
+  assert_eq "22af: an unreconstructable tally is omitted, never estimated" "found"     "$(g22_in "OMIT \`dispatch_count\` rather than estimating it" "$G22_STEP5")"
+
+  assert_eq "22af2: and the schema row carries the same disposition" "found"     "$(g22_in "omit the key rather than estimate" "$G22_TEL")"
+
+  # 22ag: limit 4's taxonomy of what an absence means was inherited from a port
+  # whose artifacts made honest unknowability rare. Here it is the likeliest
+  # meaning, and reading it as negligence penalises the disciplined outcome.
+  assert_eq "22ag: limit 4 admits the honest could-not-reconstruct absence" "found"     "$(g22_in "correctly declined to invent one" "$G22_TEL")"
+
+  # 22ah: limit 5 enumerated two readings of a `2`; this port's own fallback path
+  # produces a third — two unusable dispatches and no round at all.
+  assert_eq "22ah: limit 5 admits the fallback's two-dispatches-no-round reading" "found"     "$(g22_in "two unusable invocations and no round at all" "$G22_TEL")"
+
+  # 22ai: the second orchestrator surface builds the same reviewer entry and was
+  # never told the key exists, so that whole execution path would have emitted
+  # nothing — indistinguishable, per limit 4, from a version predating the key.
+  assert_eq "22ai: the subagent-workflow surface knows about the key too" "found"     "$(g22_has "\`dispatch_count\` on that entry counts \`task-reviewer\` dispatches" "$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md")"
+
+  # TWO-SIDED ON PURPOSE. The first draft grepped only the subagent-workflow
+  # file, so a one-sided edit — the clause added there while its declared twin
+  # in stride-workflow was left untouched — passed at 606/0 and shipped a
+  # keep-in-sync marker that was false as written. A sync claim asserted on one
+  # side pins nothing.
+  assert_eq "22ai2: and folds wall-clock only, never the count" "found"     "$(g22_has "Fold the wall-clock only, never the count" "$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md")"
+  assert_eq "22ai3: and its declared twin in stride-workflow carries the same clause" "found"     "$(g22_has 'Fold the wall-clock only, never the count' "$G22_WF")"
+
+  # Every site that folds wall-clock into the reviewer entry must say the count
+  # does not tick — the deep-security and Step 5.6 sites fold into the same
+  # entry and were silent, which is the same gap one level out.
+  assert_eq "22ai4: every wall-clock folding site says the count does not tick" "3"     "$(grep -o 'never the count' "$G22_WF" | wc -l | tr -d ' ')"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
