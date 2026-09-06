@@ -21,6 +21,121 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.47.0] - 2026-09-05
+
+### Added — review convergence (G427)
+
+A reviewer asked to look will always find something, so a review loop with no
+ceiling does not converge — it only gets more expensive. Stride measured every
+task taking two rounds and one taking a third fix cycle, at over a hundred
+thousand subagent tokens per round, and nothing in any completion record showed
+it. Three rules, ported together, that bound the loop and make what it cost
+visible.
+
+**A two-round review cap.** Round two verifies round one's fixes rather than
+reviewing again, and is narrowed in what it hunts for, never in what it is
+shown — it still receives the full diff and still emits the whole
+`acceptance_criteria` array, every section verdict and the complete
+`project_checks` list. After two rounds the remaining `important` and `minor`
+findings are recorded rather than fixed, as severity, category and a
+repository-relative `file:line` in `completion_notes` and one line of
+`completion_summary`. A `critical` is exempt and blocks in whatever round it
+surfaces, and recording is closed to a `category: "security"` issue at every
+severity, because `important` is this reviewer's default for a security finding
+and a rule written for wrapping and phrasing must not become the route by which
+a real weakness ships unfixed.
+
+**The round definition had to be re-expressed, and that was the interesting
+part.** Stride defines a round as a dispatch that produced a merged result file.
+This extension's reviewer returns its block inline; there is no such file to
+point at. So a round here is an invocation whose response came back carrying a
+fenced ```json block that parsed — the same line the *Fallback when JSON parsing
+fails* section already draws between a review you can use and one you cannot,
+reused rather than invented. Nothing is written per invocation, so a re-invoked
+one costs no round.
+
+**A `cosmetic` finding class.** `issues[]` entries may carry an optional
+`cosmetic` boolean for findings that are purely presentational, where the claim
+itself is correct and the artifact it points at asserts nothing false and
+misleads no reader. A cosmetic finding is still emitted with its honest severity
+and category, still counted, and still reaches `completion_notes`; the single
+thing it changes is that a round whose findings are all cosmetic buys no further
+round. It is never valid on a `critical`, an `important`, or a
+`category: "security"` finding, and a false statement of fact is never cosmetic
+however small its subject looks — a heading reading "Two limits" over three is
+substantive. `schema_version` moves to `"1.7"` for the added key.
+
+**`dispatch_count` telemetry**, an optional integer on the `reviewer`
+`workflow_steps` entry counting reviewer dispatches including a crashed
+re-dispatch, since a crashed dispatch still spent its tokens. It counts
+dispatches, not rounds. No seventh step name is added and omitting it stays
+valid. All six limits on how the pair may be read ship with it, keeping their
+measured evidence — wall-clock is not token cost and the two disagree about
+which task was dearer, and `duration_ms` aggregates dispatches the count does
+not report, so dividing yields no per-round figure.
+
+### Enforcement is prose here, and the text says so
+
+Stride pins the cap and the cosmetic flag's shape with jq in a sibling file this
+extension does not have, and its self-check emits a boolean object this one does
+not either. Rather than ship prose while implying a pin, all three rules disclose
+their own status: the cap is "stated, not pinned", the cosmetic conditions are
+"refused by you, not by a script", and the contract names the absent
+`cosmetic_shape_ok` outright so a later reader cannot assume one exists. Limit 6
+does the same for `dispatch_count`, which nothing validates on the way in, and
+assigns the guard obligation concretely — to
+`Kanban.Tasks.WorkflowSteps.valid_step?/1` and that module's `@moduledoc`,
+beside the existing passage recording why `name` is deliberately unconstrained.
+
+### Fixed — contradictions the ports had inherited or grown
+
+- `stride-subagent-workflow` said "After fixing, you do NOT need to re-run the
+  reviewer", which made round two unreachable and the critical exemption dead
+  text. Replaced with a bounded-not-forbidden rule that defers to Step 5.
+- The completion gate had **no past-the-cap exit**. A round count only rises, so
+  once a third reviewing round had run the gate could never be made to pass and
+  no documented remedy could lower it — the task would sit claimed until it
+  expired, with no signal to any human. Both carriers now state the exit, and the
+  gate's preamble registers it as a fourth exit beside the three it already had.
+- The exemption was keyed on **who found** a `critical` rather than on whether
+  one existed, so a critical escalated by a Step 5.5 session belonged to no round
+  and the round clearing it was unclassifiable — failing an agent for obeying
+  Step 5.5.
+- The resumed-session rule **failed open**: counting the next round as two spent
+  the ceiling on a round whose empty `fixes[]` told the reviewer to look nowhere.
+  It now withholds `review_round` as well, so the round reviews unnarrowed.
+- An unparsable reviewer block had **two mutually exclusive dispositions** in one
+  file — re-invoke, versus ship degraded. Re-invocation is now bounded to one
+  retry before the fallback.
+- `dispatch_count` was **aspirational as first written**: the writing rule was
+  ported without the instrument that made it measurable. Stride's count is a
+  byproduct of writing a file per dispatch and survives a session loss; this
+  extension writes nothing per invocation, and the key appeared in Step 5 — where
+  every dispatch happens — zero times. An agent was asked at completion time to
+  reconstruct events it was never told to tally. There is now a running tally
+  instructed at the dispatch site, and an unreconstructable count is omitted
+  rather than estimated.
+
+### Tests
+
+Three new groups in `hooks/test-stride-hook.sh` — 20, 21 and 22, 127 assertions
+— asserting on contract markdown, which no other group in this suite had done.
+They avoid merely restating the contract by extracting canonical clauses from the
+file that owns each and using those bytes as the expected value in the files that
+mirror it, so cross-file cases pin consistency rather than wording, and by
+cutting section slices with `awk` so placement is asserted rather than presence.
+Each group's header states what it cannot catch. Suite: 608 passed, 0 failed, and
+each group was demonstrated to red under a falsifiability sweep that reverted
+its rules across every acceptance criterion, and every rule added in response to a
+review or session finding was individually reverted to confirm its own case fails.
+That is short of reverting all 127 one at a time, which was not done.
+
+Three of those cases earned themselves by failing first, which is the argument
+for running that check rather than trusting green: one caught a real byte
+divergence between an owner and its mirrors; one asserted a hard-coded count that
+was simply wrong; and one was written one-sided and passed over a keep-in-sync
+marker that was false as written.
+
 ## [1.46.0] - 2026-09-01
 
 ### Added — the loop gate (G422)
