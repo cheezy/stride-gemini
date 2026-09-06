@@ -333,6 +333,7 @@ The reviewer returns a human-readable prose summary followed by a fenced ```json
 - **Fix all Critical issues** before proceeding — never capped, in any round; see the exemption above
 - **Fix all Important issues** before proceeding — through round two; after that they are recorded per the cap above rather than fixed, and never a `category: "security"` one
 - Minor issues are optional but recommended — **except a `category: "security"` one, which is never optional at any severity** — and after round two they too are recorded rather than fixed, and never a `category: "security"` one
+- **A round whose findings are ALL cosmetic buys no further review round.** A `cosmetic: true` issue is presentational only — the claim is correct and the artifact it points at asserts nothing false and misleads no reader — so it is reported and recorded like any other finding but never spends a round. If every entry in `issues[]` is `cosmetic: true`, fix them or not as you choose and **proceed to completion without re-invoking the reviewer**; a single substantive finding alongside them means the round was not all-cosmetic and the normal path applies. **Scoped to a dispatch that produced a round** — an invocation whose fenced ```json block actually parsed, the same definition the cap above uses rather than a second one. On a self-reported skip (`dispatched: false`), and on the **Fallback when JSON parsing fails** path below, there is no `issues[]` to read at all, so "every entry is cosmetic" would be **vacuously true** while the prose still reports real findings: there the rule is *inapplicable*, not satisfied. **An absent or empty `issues[]` is never an all-cosmetic round.** And note the predicate reads `issues[]` **only**, while `status` has three inputs — issues, `not_met` criteria and `not_met` project checks — so an all-cosmetic round is not by itself a round that found nothing that matters: **if `status` is `changes_requested`, honour that and re-invoke regardless.** **And a `category: "security"` entry is never all-cosmetic material, at any severity** — a `cosmetic: true` sitting on one is a malformed block rather than a shortcut: disregard the shortcut, treat it as the reviewer defect the definition names, and re-invoke. That has to be said separately because the `status` backstop just above **cannot** reach it: `status` is driven by `critical`/`important` issues and by `not_met` criteria and checks, so a `minor` security finding leaves `status: "approved"` and passes it untouched. The bullet above — a security finding is never optional at any severity — governs, and nothing in this bullet overrides it. A conforming reviewer cannot produce that `status` pair (an unmet criterion or check owes a paired `issues[]` entry, which defaults to `important` and so cannot be cosmetic), but the wording invites the mistake, so it is stated rather than left to inference. **This spends nothing against the two-round ceiling and relaxes nothing in it** — the cap is a maximum on rounds you may run, this is a reason not to run one you would otherwise have been entitled to, and the two never disagree because they push the same direction. **Cosmetic is orthogonal to severity, not a fourth level of it**: it only ever sits on a `minor`, and a `minor` can perfectly well be substantive and buy a round. Never `cosmetic` on a `critical`, an `important`, or a `category: "security"` finding — and note that **nothing in this port refuses that mechanically**: there is no `cosmetic_shape_ok` here, the classification is self-certified on the same footing as the round count above, so a mis-flagged finding costs a round that should have run rather than a refused submission. Its definition is owned by `agents/task-reviewer.md`.
 - **Save the reviewer's full response (prose + JSON block)** -- you'll include it verbatim as `review_report` in Step 7
 
 #### Extracting the structured review block
@@ -364,7 +365,7 @@ Approved
 
 ```json
 {
-  "schema_version": "1.6",
+  "schema_version": "1.7",
   "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
@@ -392,7 +393,7 @@ Approved
   "summary": "Reviewed 3 acceptance criteria and 4 pitfalls against the diff; no issues found and all criteria met.",
   "issues_found": 0,
   "acceptance_criteria_checked": 3,
-  "schema_version": "1.6",
+  "schema_version": "1.7",
   "status": "approved",
   "issue_counts": {"critical": 0, "important": 0, "minor": 0},
   "issues": [],

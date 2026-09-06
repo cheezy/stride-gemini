@@ -4499,8 +4499,13 @@ else
   # into the server-hard-rejects claim. Both are false of a self-certified
   # count, and together they read as a mechanical pin backing the cap — the
   # precise impression the disclosure exists to prevent.
-  assert_eq "20w: the completion gate exempts the round-cap check from its machine-checkable claim" "found" \
-    "$(g20_has "The round-cap check is the one exception" "$G20_CT")"
+  # Needle updated by W2159: adding the `cosmetic` check made the gate carry a
+  # SECOND self-certified, non-server-enforced check, so "the one exception"
+  # became a false statement of fact and the sentence now names both. The
+  # property this case pins is unchanged — the machine-checkable claim must not
+  # sweep in a prose-only check.
+  assert_eq "20w: the completion gate exempts its self-certified checks from its machine-checkable claim" "found" \
+    "$(g20_has "checks are the exceptions to everything that follows" "$G20_CT")"
 
   # 20x: the gate must recognise the two exemptions the review step grants, or
   # it punishes the correct behaviour. Step 5 tells an agent to run a further
@@ -4589,6 +4594,291 @@ else
 
   assert_eq "20af2: and at the completion gate's write site" "found" \
     "$(g20_has "a repository-relative \`file:line\`" "$G20_CT")"
+fi
+
+# ============================================================
+# Test Group 21: the cosmetic finding class (W2159)
+# ============================================================
+# NOT mirrored by test-stride-hook.ps1, for the same reason Group 20 is not:
+# these assert on CONTRACT MARKDOWN, which has no per-runtime twin.
+#
+# NOT PORTED from stride/hooks/test-stride-hook.sh Group 37, deliberately:
+#   * 37's executed half runs cosmetic_shape_ok extracted from
+#     review-block-extraction.md against fixtures. This port has no such sibling
+#     and embeds no executable check, so there are no bytes to extract and run —
+#     which is exactly what the contract now DISCLOSES rather than implies. Only
+#     37's markdown-contract half has an analog here.
+#
+# Defines its OWN helper copies rather than reusing Group 20's. g20_has/g20_in
+# are defined inside Group 20's else-branch, so they exist only if that group
+# did not SKIP — a dependency that would turn one group's skip into another
+# group's silent breakage. Every group in this file is self-contained bar one
+# documented exception, and this is not that case.
+#
+# HOW RUN-TIME EXTRACTION IS HONOURED, same two devices as Group 20:
+#   (i)  Four canonical clauses are pulled out of the file that OWNS each with
+#        grep -o, then used as the expected value in the files that mirror it.
+#        Cross-file cases therefore pin CONSISTENCY: reword the definition in
+#        the reviewer contract alone and the mirrors red, rather than three
+#        copies drifting apart in silence.
+#   (ii) Three awk slices assert PLACEMENT rather than presence — the definition
+#        beside the schema field it documents, the bullet inside Step 5, the
+#        checkbox inside the hard gate.
+#
+# WHAT IT CANNOT CATCH: a coordinated reword of all three files, and prose that
+# is present but ignored at run time. That second limit is the classification's
+# own — nothing in this port refuses a mis-flagged finding — and the contract
+# says so rather than implying a pin.
+echo ""
+echo "=== Test Group 21: the cosmetic finding class (W2159) ==="
+
+G21_REV="$SCRIPT_DIR/../agents/task-reviewer.md"
+G21_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G21_CT="$SCRIPT_DIR/../skills/stride-completing-tasks/SKILL.md"
+
+if [ ! -f "$G21_REV" ] || [ ! -f "$G21_WF" ] || [ ! -f "$G21_CT" ]; then
+  echo "  SKIP: Test Group 21 (contract files not found relative to the hooks directory)"
+else
+  g21_has() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    if grep -qF -- "$1" "$2"; then echo "found"; else echo "missing"; fi
+  }
+  g21_in() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    case "$2" in (*"$1"*) echo "found" ;; (*) echo "missing" ;; esac
+  }
+
+  # Device (i): the four canonical clauses, taken from the file that owns each.
+  # Extracted from the clause BODY, deliberately not from its first word: the
+  # reviewer contract states it mid-sentence ("never ...") while both mirrors
+  # open a sentence with it ("Never ..."). Sentence-initial capitalisation is
+  # legitimate variation; the clause itself is what must not drift, so the pin
+  # starts one word in rather than forcing a false byte match. This case caught
+  # that divergence on its first run, which is the pin working, not a mis-write.
+  G21_NEVER="$(grep -o '`cosmetic` on a `critical`, an `important`, or a `category: "security"` finding' "$G21_REV" | head -1)"
+  G21_ORTHO="$(grep -o 'orthogonal to severity, not a fourth level of it' "$G21_REV" | head -1)"
+  G21_ALLCOS="$(grep -o 'A round whose findings are ALL cosmetic buys no further review round' "$G21_WF" | head -1)"
+  G21_PIN="$(grep -o 'prose you apply, not a pin' "$G21_CT" | head -1)"
+
+  # Device (ii): three slices, so placement is asserted rather than presence.
+  G21_ISSUES="$(awk '/^     - `issues`: array/{f=1} /^     - `acceptance_criteria`: array/{f=0} f' "$G21_REV")"
+  G21_STEP5="$(awk '/^## Step 5: Code Review/{f=1} /^## Step 5\.5:/{f=0} f' "$G21_WF")"
+  G21_GATE="$(awk '/^## ⚠️ MANDATORY pre-submission self-check/{f=1} /^## The Complete Completion Process/{f=0} f' "$G21_CT")"
+
+  # --- AC1: the schema carries cosmetic as a documented OPTIONAL boolean ---
+  assert_eq "21a: the issues-schema slice is non-empty (extraction guard)" "found" \
+    "$(g21_in "cosmetic" "$G21_ISSUES")"
+
+  assert_eq "21b: cosmetic is declared on the issues[] entry as an optional boolean" "found" \
+    "$(g21_in '`cosmetic` (boolean, **OPTIONAL**' "$G21_ISSUES")"
+
+  assert_eq "21c: and absence is documented as meaning false" "found" \
+    "$(g21_in 'absent means `false`' "$G21_ISSUES")"
+
+  assert_eq "21d: schema_version was bumped to 1.7 for the added key" "found" \
+    "$(g21_has 'Always `"1.7"` for this prompt version' "$G21_REV")"
+
+  # The W2158 sentence asserted the schema STAYS 1.6. Adding a key made that a
+  # false statement of fact — which this very change defines as never cosmetic —
+  # so it had to move with the bump. Pinned so it cannot regress.
+  assert_eq "21e: the W2158 stays-at-1.6 claim was corrected, not left false" "0" \
+    "$(grep -c 'stays `"1.6"`' "$G21_REV" || true)"
+
+  # Only the two historical references may survive: "added in schema 1.6" in the
+  # reviewer, and "As of schema 1.6 (v1.39.0+)" in the README — both true
+  # statements about when behaviour_test_matrix landed, and both excluded here by
+  # their distinct wording rather than by luck.
+  #
+  # Widened after review round 1: this swept 3 files and one literal form, so it
+  # could stay green while literals stranded in the three it did not scan — and
+  # it would have missed the bare `schema_version: "1.6"` form that exists in a
+  # file it DID scan. A completeness pin that is narrower than the thing it
+  # certifies complete is worse than no pin, because it reads as coverage.
+  assert_eq "21f: no stale current-version 1.6 literal remains in any file the bump touched" "0" \
+    "$(grep -cE 'schema_version[`"]*:? *[`"]*1\.6' \
+        "$G21_REV" "$G21_WF" "$G21_CT" \
+        "$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md" \
+        "$SCRIPT_DIR/../GEMINI.md" "$SCRIPT_DIR/../README.md" \
+       | awk -F: '{t+=$2} END{print t+0}')"
+
+  # --- AC2: cosmetic findings are still reported and still reach the record ---
+  assert_eq "21g: the definition says the flag removes the finding from nothing" "found" \
+    "$(g21_in 'does **not** remove the finding from `issues[]`' "$G21_ISSUES")"
+
+  assert_eq "21h: the completion gate carries the reported-never-suppressed checkbox" "found" \
+    "$(g21_in '**`cosmetic` findings are reported, never suppressed.**' "$G21_GATE")"
+
+  assert_eq "21i: and names completion_notes as a destination it still reaches" "found" \
+    "$(g21_in 'reaches `completion_notes` like any other finding' "$G21_GATE")"
+
+  # --- AC3: an all-cosmetic round triggers no re-review ---
+  assert_eq "21j: the all-cosmetic clause is extractable from the orchestrator" \
+    "A round whose findings are ALL cosmetic buys no further review round" "$G21_ALLCOS"
+
+  assert_eq "21k: and it sits INSIDE Step 5, not merely somewhere in the file" "found" \
+    "$(g21_in "$G21_ALLCOS" "$G21_STEP5")"
+
+  assert_eq "21l: the disposition is to complete without re-invoking" "found" \
+    "$(g21_in "proceed to completion without re-invoking the reviewer" "$G21_STEP5")"
+
+  # The two vacuity traps stride found the hard way.
+  assert_eq "21m: an absent or empty issues[] is never an all-cosmetic round" "found" \
+    "$(g21_in 'An absent or empty `issues[]` is never an all-cosmetic round' "$G21_STEP5")"
+
+  assert_eq "21n: a changes_requested status is honoured regardless" "found" \
+    "$(g21_in "honour that and re-invoke regardless" "$G21_STEP5")"
+
+  # Scoping must reuse this port's OWN round definition, not import stride's.
+  assert_eq "21o: the scoping reuses this port's round definition" "found" \
+    "$(g21_in "block actually parsed" "$G21_STEP5")"
+
+  assert_eq "21p: stride's Source A/B/C carrier split was not pasted in" "0" \
+    "$(grep -c 'Source A' "$G21_WF" || true)"
+
+  # The cap and the cosmetic rule both talk about rounds; the non-conflict is
+  # stated rather than left for a reader to reconcile.
+  assert_eq "21q: the cap/cosmetic non-conflict is stated" "found" \
+    "$(g21_in "relaxes nothing in it" "$G21_STEP5")"
+
+  # --- AC4: cosmetic on a correctness finding is a reviewer defect ---
+  assert_eq "21r: the orthogonality clause is extractable" \
+    "orthogonal to severity, not a fourth level of it" "$G21_ORTHO"
+
+  assert_eq "21r2: and appears byte-for-byte in Step 5" "found" \
+    "$(g21_in "$G21_ORTHO" "$G21_STEP5")"
+
+  assert_eq "21s: mis-flagging a substantive finding is named a reviewer defect" "found" \
+    "$(g21_in 'is a **reviewer defect**, not a judgement call' "$G21_ISSUES")"
+
+  # The location qualifier is load-bearing: the same edit is cosmetic in prose
+  # and substantive inside executable content.
+  assert_eq "21t: the executable-content location qualifier survives" "found" \
+    "$(g21_in 'changes what runs and is **substantive**' "$G21_ISSUES")"
+
+  # --- AC5: a false statement of fact is never cosmetic ---
+  assert_eq "21u: a false statement of fact is documented as never cosmetic" "found" \
+    "$(g21_in '**A false statement of fact is never cosmetic**' "$G21_ISSUES")"
+
+  assert_eq "21v: and the second gate reads on the artifact's claim, not only the finding's" "found" \
+    "$(g21_in 'asserts nothing that is itself false **and misleads no reader**' "$G21_ISSUES")"
+
+  # --- AC6: never on a critical, an important, or a security-category finding ---
+  assert_eq "21w: the prohibition clause is extractable from the reviewer contract" \
+    '`cosmetic` on a `critical`, an `important`, or a `category: "security"` finding' "$G21_NEVER"
+
+  assert_eq "21w2: and appears byte-for-byte in Step 5" "found" \
+    "$(g21_in "$G21_NEVER" "$G21_STEP5")"
+
+  assert_eq "21w3: and byte-for-byte in the completion gate" "found" \
+    "$(g21_in "$G21_NEVER" "$G21_GATE")"
+
+  # "anything other than minor" would leave a reader to derive that important is
+  # covered; important is named outright instead.
+  assert_eq "21x: important is named explicitly, not left implied by non-minor" "found" \
+    "$(g21_in 'covers **`critical` and `important` alike**' "$G21_ISSUES")"
+
+  assert_eq "21y: a non-boolean cosmetic is refused with no coercion" "found" \
+    "$(g21_in "no coercion" "$G21_ISSUES")"
+
+  # The residual the security consideration required be stated rather than left
+  # unsaid: excluding the category does not exclude the subject matter.
+  assert_eq "21z: the category-not-subject-matter residual is disclosed" "found" \
+    "$(g21_in 'a **category, not a subject matter**' "$G21_ISSUES")"
+
+  # --- AC7: prose-vs-pin is stated explicitly at every site ---
+  assert_eq "21aa: the prose-not-a-pin idiom is extractable from the gate" \
+    "prose you apply, not a pin" "$G21_PIN"
+
+  # W2158 introduced that idiom for the round cap; cosmetic reuses it rather than
+  # inventing a second phrasing for the same disclosure.
+  assert_eq "21ab: cosmetic reused W2158's disclosure idiom rather than a second one" "2" \
+    "$(grep -c 'prose you apply, not a pin' "$G21_CT" || true)"
+
+  assert_eq "21ac: Step 5 says the prohibition is not mechanically refused here" "found" \
+    "$(g21_in "nothing in this port refuses that mechanically" "$G21_STEP5")"
+
+  assert_eq "21ad: the reviewer contract says the refusal is yours, not a script's" "found" \
+    "$(g21_in '**Refused by you, not by a script.**' "$G21_ISSUES")"
+
+  # Naming the absent pin is what stops a future reader assuming one exists.
+  assert_eq "21ae: and names the absent pin outright" "found" \
+    "$(g21_in 'This port runs no `cosmetic_shape_ok`' "$G21_ISSUES")"
+
+  # --- the canon anchor sits beside the definition, and only there ---
+  assert_eq "21af: the canon anchor sits beside the schema field it governs" "found" \
+    "$(g21_in "<!-- canon:cosmetic-finding-class v1 -->" "$G21_ISSUES")"
+
+  assert_eq "21af2: and the orchestrator mirror carries no second anchor" "0" \
+    "$(grep -c 'canon:cosmetic-finding-class' "$G21_WF" || true)"
+
+  # --- 21ag/21ah: added after the specialist security review, which returned
+  # --- `partial` on the suppression consideration. Both pin a repair, not wording.
+
+  # 21ag: the bullet named ONE backstop — honour a `changes_requested` status —
+  # and that backstop provably cannot fire for the case the security prohibition
+  # guards: `status` keys on critical/important issues and not_met criteria and
+  # checks, so a MINOR security finding leaves status "approved" and sails past
+  # it. The security exception therefore has to be stated in its own right,
+  # beside the backstop that does not cover it, rather than left to the
+  # prohibition clause at the end of the same very long bullet.
+  assert_eq "21ag: a security entry is never all-cosmetic material, stated beside the status backstop" "found" \
+    "$(g21_in 'never all-cosmetic material, at any severity' "$G21_STEP5")"
+
+  assert_eq "21ag2: and the bullet says why the status backstop cannot reach it" "found" \
+    "$(g21_in 'cannot** reach it' "$G21_STEP5")"
+
+  # 21ah: the completion agent is the only independent second reader of an
+  # emitted cosmetic entry, and it was handed a purely mechanical category
+  # comparison. The residual — category is not subject matter — now reaches it
+  # too, as a pointer to the owning definition rather than a second copy.
+  assert_eq "21ah: the completion gate carries the category-not-subject-matter residual" "found" \
+    "$(g21_in '**category test, not a subject-matter test**' "$G21_GATE")"
+
+  # --- 21ai-21al: added after a Step 5.5 exploratory session walked the contract
+  # --- against ten real findings from this repository and found four ways two
+  # --- careful readers could classify the same finding differently.
+
+  # 21ai: gate 2 was NARROWER than the substantive test three paragraphs below
+  # it, which added the disjunct "or a reader would be misled" with no counterpart
+  # in the gate — and the gate is the one marked "only". An artifact that misleads
+  # without asserting anything false therefore classified cosmetic under the test
+  # and substantive under the restatement. The disjunct now lives in the gate.
+  assert_eq "21ai: gate two covers misleading, not only false" "found" \
+    "$(g21_in 'and misleads no reader' "$G21_ISSUES")"
+
+  assert_eq "21ai2: and the orchestrator gloss carries the same widened gate" "found" \
+    "$(g21_in 'asserts nothing false and misleads no reader' "$G21_STEP5")"
+
+  # 21aj: the executable-content examples were all code, so the qualifier did not
+  # reach a prose sentence a test greps — the exact form this suite depends on,
+  # and the reason a needle in this very file is hand-trimmed to dodge a
+  # capitalisation difference. The category is now what extracts it.
+  assert_eq "21aj: the extraction qualifier reaches a prose needle, not only code" "found" \
+    "$(g21_in 'or a prose sentence a test greps as a needle' "$G21_ISSUES")"
+
+  # 21ak: "minor BECAUSE it is presentational" contradicted "orthogonal to
+  # severity" and supplied a principled-sounding argument for re-rating a finding
+  # downward to keep the flag — the one downgrade the paragraph forbids.
+  assert_eq "21ak: the severity ceiling is a stipulation, not a false implication" "found" \
+    "$(g21_in 'reported **without** it — never re-rated downward to keep it' "$G21_ISSUES")"
+
+  # 21al: three self-referential counts sit inside the definition — "four of
+  # them", "Three conditions", "Two limits". The last is verbatim the doc's own
+  # canonical example of a substantive defect, now living inside the paragraph
+  # that defines it. Adding a fourth limit or a fourth refused condition without
+  # updating the word manufactures the textbook case in the textbook, so the
+  # arithmetic is pinned rather than only the clauses.
+  # grep -o, not grep -c: all four clauses live on ONE markdown line, so a line
+  # count returns 1 and the assertion would have been a false statement of fact
+  # about a false statement of fact. Caught on this case's first run.
+  assert_eq "21al: the definition's self-referential counts still hold — four does-nots" "4" \
+    "$(grep -o 'does \*\*not\*\* change\|does \*\*not\*\* remove the finding' "$G21_REV" | wc -l | tr -d ' ')"
+
+  assert_eq "21al2: three refused conditions, and the word still says three" "found" \
+    "$(g21_in '**Three conditions are refused.**' "$G21_ISSUES")"
+
+  assert_eq "21al3: two limits, and the word still says two" "found" \
+    "$(g21_in 'Two limits follow' "$G21_ISSUES")"
 fi
 
 # ============================================================
