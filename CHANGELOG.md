@@ -21,6 +21,14 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.48.0] - 2026-09-07
+
+### Added — a back-reference beside every anchored rule (W2137)
+
+Canon entry `edit-site-back-reference` requires prose beside every governed-rule statement naming the canon by path and the entry id, and the drift check implements it as a property, so an anchor standing alone no longer passes. This extension carried no back-reference anywhere, so all seven of its anchored statements were uncovered: the cosmetic class and the verdict-note pair in `agents/task-reviewer.md`, and the decision matrix, its ordering, the review ceiling, `dispatch_count` and the `reason_code` vocabulary in `skills/stride-workflow/SKILL.md`. Six paragraphs close them, the matrix pair sharing one.
+
+The voicing is composed for this extension rather than adapted from a sibling, since there was no prior back-reference to follow: a contrast lead separating where a rule is spoken from where it is held. Each names the owning entry and the two version bumps a substance change owes, then stops. None restates the rule, and none quotes the anchor comment's own token, which this repository's suite counts.
+
 ## [1.47.0] - 2026-09-05
 
 ### Added — review convergence (G427)
