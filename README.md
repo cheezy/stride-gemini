@@ -255,6 +255,43 @@ No platform-specific configuration needed — the single `hooks.json` entry hand
 - **JSON-only stdout**: The hook script sends all debug/progress output to stderr; only the final structured JSON result goes to stdout (Gemini requirement)
 - Hooks are visible and manageable via `/hooks panel`, `/hooks enable`, `/hooks disable`
 
+### The stop gate, and how Gemini ends a turn
+
+<!-- canon:stop-hook-capability v1 -->
+
+**Canon-governed — entry `stop-hook-capability` in `stride/docs/port-canon.md`.**
+This section is where this port records how its runtime ends a session and what
+can refuse one here. A change to what that rule obliges moves the canon entry's
+version and the anchor above together, in one change.
+
+`hooks/stride-stop-gate.sh`, with a PowerShell twin beside it, is registered on
+`AfterAgent` in `hooks/hooks.json`. It refuses to end a turn while a completed
+task has gone unclaimed and the Ready column still holds claimable work. Two
+things about this runtime differ from the rest of the fleet, and both are worth
+knowing before changing the gate:
+
+- **The refusal is spelled `deny`.** Gemini reads
+  `{"decision":"deny","reason":"..."}` from stdout at exit 0, and feeds the
+  reason back to the agent as its next prompt. The `block` token used elsewhere
+  in the fleet does nothing here — a gate that emits it never refuses at all.
+  Exit status carries no decision: permit and deny both exit 0, so stdout is the
+  only channel that says anything.
+- **That pairing is confirmed for `BeforeTool`, not for `AfterAgent`** — carried
+  as risk R1 in both gate script headers and as a Known limit in the changelog.
+  `docs/HOOK_RESEARCH.md` documents exit 0 plus a JSON decision only for
+  `BeforeTool`; exit 2 with stderr is documented as also triggering a retry. The
+  fleet rule is to emit the JSON decision so one implementation serves every
+  port, but if `AfterAgent` honours exit 2 alone then **this gate silently never
+  blocks**. Only a live Gemini CLI run settles it — the suite invokes the script
+  directly and cannot.
+- **Nothing in the runtime caps a repeated refusal,** so the gate bounds itself.
+  It refuses at most twice for one unfollowed completion and then yields, and
+  because an uncounted block is an unbounded one, a failure to record the count
+  permits instead of blocking.
+
+Two escape hatches: set `STRIDE_ALLOW_STOP=1`, or delete
+`.stride/.loop-state.json`.
+
 ### The `after_doing` time budget
 
 The two `run_shell_command` hook entries in `hooks/hooks.json` carry a **300000ms (5-minute) timeout** (the `activate_skill` gate stays at 10000ms — it fires on every Skill invocation and must remain fast). The timeout is a **ceiling, not a guarantee**: the entire `after_doing` section — every command in your `.stride.md` quality gate (test suite with coverage, credo, sobelow, auto-commit) plus the plugin's own snapshot work — shares this one budget.

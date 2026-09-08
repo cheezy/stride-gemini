@@ -21,6 +21,25 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Added — the port now states how Gemini ends a turn, and anchors it (D306)
+
+This extension has shipped `hooks/stride-stop-gate.sh` and its PowerShell twin,
+registered on `AfterAgent`, without the README saying so anywhere. Canon entry
+`stop-hook-capability` asks each port to state how its own runtime ends a session,
+and there was nothing here for an anchor to sit beside — so the cell has read
+`MISSING` since the entry was registered.
+
+A new README section supplies the statement and carries the anchor. It records
+three things about this runtime that catch people out: the refusal is spelled
+`deny` rather than the `block` used elsewhere in the fleet; exit status carries no
+decision at all, so stdout is the only channel that refuses; and the pairing is
+confirmed for `BeforeTool` and **not** for `AfterAgent` — risk R1 in both gate
+script headers, and the reason this gate may silently never block. It also notes
+that Gemini caps nothing, which is why the gate carries its own two-refusal
+budget. The gate itself is unchanged.
+
 ## [1.48.0] - 2026-09-07
 
 ### Added — a back-reference beside every anchored rule (W2137)
