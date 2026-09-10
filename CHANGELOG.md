@@ -21,7 +21,7 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.49.0] - 2026-09-10
 
 ### Fixed — the scan ceiling no longer loses endpoint scope (W2184)
 
