@@ -112,6 +112,228 @@ try {
 
 if (-not $Command) { exit 0 }
 
+# =========================================================================
+# The stdout-preservation guard (W2183) — Windows half
+# =========================================================================
+#
+# The bash half carries the full rationale. The short version: this port reads a
+# Stride response off a `run_shell_command` call's stdout and NOWHERE ELSE -- there is no canonical
+# response file here -- so every hiding form is refused, with no target
+# exemption. A file-first sibling permits `--output <its canonical file>`; that
+# reasoning does not transfer and must not be imported.
+#
+# THIS HALF EXISTS BECAUSE THE OTHER ONE CANNOT RUN HERE: stride-hook.sh execs
+# this script on native Windows BEFORE it reads stdin, so a bash-only guard
+# would leave every Windows session unguarded while looking complete.
+#
+# The four refusal messages are BYTE-IDENTICAL to the bash half's, and the suite
+# asserts that. They are fixed literals selected by a switch: the command text
+# carries a Bearer token and nothing derived from it may reach a message.
+#
+# The token is `deny` -- not `block`, which belongs to other runtimes in this
+# fleet. Both documented BeforeTool forms are emitted (stdout document and exit
+# 2), because neither has been measured against a live CLI from this repository.
+
+$GeminiGuardMaxScan = 65536
+
+function Get-GeminiGuardCmdWord {
+    param([string]$Stage)
+    foreach ($w in ($Stage -split '\s+')) {
+        if ($w -eq '') { continue }
+        if ($w -match '=') { continue }
+        if ($w -in @('env','command','builtin','exec','nohup','time')) { continue }
+        # Compound-command keywords, so a curl inside `if`/`while`/`( )`/`{ }`
+        # is still found. Without these the whole segment was skipped.
+        if ($w -in @('if','then','elif','else','fi','while','until','do','done','!')) { continue }
+        return ($w -split '[\\/]')[-1]
+    }
+    return ''
+}
+
+# Quote blanking with state carried ACROSS NEWLINES, honouring the shell's
+# escape asymmetry. Length-preserving, so the raw and blanked views can be cut
+# at shared offsets.
+function Get-GeminiGuardBlanked {
+    param([string]$Text)
+    $sb = New-Object System.Text.StringBuilder
+    $q = ''; $i = 0; $n = $Text.Length
+    while ($i -lt $n) {
+        $c = $Text[$i]
+        if ($q -eq '') {
+            if ($c -eq '\') {
+                [void]$sb.Append(' ')
+                if ($i + 1 -lt $n) { [void]$sb.Append(' '); $i += 2 } else { $i += 1 }
+                continue
+            }
+            if ($c -eq '"' -or $c -eq "'") { $q = $c; [void]$sb.Append(' '); $i += 1; continue }
+            [void]$sb.Append($c); $i += 1; continue
+        }
+        if ($q -eq '"' -and $c -eq '\') {
+            [void]$sb.Append(' ')
+            if ($i + 1 -lt $n) { [void]$sb.Append(' '); $i += 2 } else { $i += 1 }
+            continue
+        }
+        if ($c -eq $q) { $q = ''; [void]$sb.Append(' '); $i += 1; continue }
+        [void]$sb.Append(' '); $i += 1
+    }
+    return $sb.ToString()
+}
+
+# Raw text with every redirect TARGET blanked, for the scope test only: without
+# it, `curl https://x/y > /tmp/api/tasks/9/complete` is refused because the
+# endpoint appears -- but only where the output was going, never where the
+# request was.
+function Get-GeminiGuardScopeText {
+    param([string]$Raw, [string]$Blanked)
+    $out = [System.Text.StringBuilder]::new($Raw)
+    $n = $Blanked.Length
+    $i = 0
+    while ($i -lt $n) {
+        if ($Blanked[$i] -ne '>') { $i++; continue }
+        $j = $i + 1
+        while ($j -lt $n -and ($Blanked[$j] -eq '>' -or $Blanked[$j] -eq '|' -or $Blanked[$j] -eq '&')) { $j++ }
+        while ($j -lt $n -and ($Blanked[$j] -eq ' ' -or $Blanked[$j] -eq "`t")) { $j++ }
+        while ($j -lt $n -and $Blanked[$j] -notmatch '[\s;|&]') {
+            if ($j -lt $out.Length) { $out[$j] = ' ' }
+            $j++
+        }
+        $i = $j
+    }
+    return $out.ToString()
+}
+
+function Get-GeminiGuardRedirectKind {
+    param([string]$Segment)
+    $n = $Segment.Length
+    for ($i = 0; $i -lt $n; $i++) {
+        if ($Segment[$i] -ne '>') { continue }
+        # The stderr-only exemption is tested FIRST, for the reason given on the
+        # bash half: the other order refuses `2>&2`, which leaves the body on
+        # stdout.
+        $prev = if ($i -gt 0) { $Segment[$i - 1] } else { ' ' }
+        if ($prev -eq '>') { continue }
+        if ($prev -eq '2') {
+            $before = if ($i -gt 1) { $Segment[$i - 2] } else { ' ' }
+            if ($before -eq ' ' -or $before -eq "`t" -or $i -eq 1) { continue }
+        }
+        if ($i + 2 -lt $n -and $Segment.Substring($i, 3) -eq '>&2') { return 'redirect' }
+        if ($prev -eq '&') { return 'redirect' }
+        return 'redirect'
+    }
+    return ''
+}
+
+function Get-GeminiGuardReason {
+    param([string]$Raw)
+    if ($Raw -notmatch '/api/tasks/') { return '' }
+    if ($Raw -notmatch 'curl') { return '' }
+
+    $joined = ($Raw -replace "\\\r?\n", ' ')
+    $whole = $false
+    if ([System.Text.Encoding]::UTF8.GetByteCount($joined) -le $GeminiGuardMaxScan) {
+        $scan = Get-GeminiGuardBlanked -Text $joined
+    } else {
+        # Above the ceiling: stateless AND judged as one unit. Segmenting
+        # unblanked text shatters the command on the `;` inside its own payload.
+        $scan = $joined
+        $whole = $true
+    }
+    # Neutralise the grouping characters, length-preservingly.
+    $scan = ($scan -replace '[()`{}]', ' ')
+    if ($scan.Length -ne $joined.Length) { $scan = $joined; $whole = $true }
+
+    $pairs = @()
+    if ($whole) {
+        $pairs += ,@($joined, $scan)
+    } else {
+        $start = 0; $i = 0; $n = $scan.Length
+        while ($i -lt $n) {
+            $two = if ($i + 1 -lt $n) { $scan.Substring($i, 2) } else { '' }
+            if ($two -eq '&&' -or $two -eq '||') {
+                if ($i -gt $start) { $pairs += ,@($joined.Substring($start, $i - $start), $scan.Substring($start, $i - $start)) }
+                $i += 2; $start = $i; continue
+            }
+            if ($scan[$i] -eq ';' -or $scan[$i] -eq "`n") {
+                if ($i -gt $start) { $pairs += ,@($joined.Substring($start, $i - $start), $scan.Substring($start, $i - $start)) }
+                $i += 1; $start = $i; continue
+            }
+            $i += 1
+        }
+        if ($n -gt $start) { $pairs += ,@($joined.Substring($start, $n - $start), $scan.Substring($start, $n - $start)) }
+    }
+
+    foreach ($pair in $pairs) {
+        $segRaw = $pair[0]
+        $seg    = $pair[1]
+        $scopeText = Get-GeminiGuardScopeText -Raw $segRaw -Blanked $seg
+        if ($scopeText -notmatch '/api/tasks/') { continue }
+
+        $sawCurl = $false
+        $first = $true
+        foreach ($stage in ($seg -split '\|')) {
+            $word = Get-GeminiGuardCmdWord -Stage $stage
+            $isCurl = ($word -eq 'curl') -or ($whole -and ($stage -match '(^|\s)curl(\s|$)'))
+            if ($isCurl) {
+                $sawCurl = $true
+                $tokens = @($stage -split '\s+' | Where-Object { $_ -ne '' })
+                foreach ($tok in $tokens) {
+                    # -ceq / -cmatch throughout: PowerShell's default matching is
+                    # case-insensitive, and -o versus -O is the whole of this
+                    # rule's two kinds.
+                    if ($tok -ceq '-O' -or $tok -ceq '--remote-name') { return 'remote' }
+                    # Named before the generic --* skip below, for the reason
+                    # given on the bash half.
+                    if ($tok -ceq '--remote-name-all') { return 'remote' }
+                    if ($tok -ceq '-o' -or $tok -ceq '--output') { return 'flag' }
+                    if ($tok.StartsWith('--output=')) { return 'flag' }
+                    if ($tok.StartsWith('--')) { continue }
+                    if ($tok.StartsWith('-')) {
+                        if ($tok -cmatch 'O') { return 'remote' }
+                        if ($tok -cmatch 'o') { return 'flag' }
+                    }
+                }
+                $first = $false
+                continue
+            }
+            # An ALLOWLIST: anything downstream of curl that is not `tee`
+            # consumes the body, and a fixed list silently permits every
+            # consumer nobody named. `tee` earns no follow-on exemption here,
+            # because nothing reads the file it writes.
+            if (-not $first -and $sawCurl -and $word -ne '' -and $word -ne 'tee') {
+                return 'pipe'
+            }
+            $first = $false
+        }
+        if (-not $sawCurl) { continue }
+        $kind = Get-GeminiGuardRedirectKind -Segment $seg
+        if ($kind -ne '') { return $kind }
+    }
+    return ''
+}
+
+function Deny-GeminiGuard {
+    param([string]$Kind)
+    # BYTE-IDENTICAL to the bash half. Fixed strings; the command is never
+    # interpolated, because it carries a Bearer token.
+    switch ($Kind) {
+        'flag'     { $msg = 'Refused by Gemini BeforeTool deny: this writes the Stride response to a file with -o/--output, so it never reaches stdout. This port reads a response off the tool stdout and nowhere else -- there is no canonical response file here to fall back to -- so hiding it means no loop state is recorded, the AfterAgent gate cannot see that the task was completed, and changed_files lands empty, none of it with an error. Let the body print.' }
+        'remote'   { $msg = 'Refused by Gemini BeforeTool deny: -O/--remote-name writes the Stride response to a local file named after the URL, so it never reaches stdout. This port reads a response off the tool stdout and nowhere else -- there is no canonical response file here to fall back to -- so hiding it means no loop state is recorded, the AfterAgent gate cannot see that the task was completed, and changed_files lands empty, none of it with an error. Let the body print.' }
+        'pipe'     { $msg = 'Refused by Gemini BeforeTool deny: piping the Stride response into another command consumes it before this hook reads it. This port reads a response off the tool stdout and nowhere else, so a consumer leaves nothing behind: no loop state is recorded, the AfterAgent gate cannot see that the task was completed, and changed_files lands empty, silently. tee is the only pipe permitted here, because it passes stdout through unchanged; every other command is refused rather than matched against a list of known ones. To inspect a field, let the body print and read it from the response you already have.' }
+        'redirect' { $msg = 'Refused by Gemini BeforeTool deny: this redirect takes the Stride response off stdout. This port reads a response off the tool stdout and nowhere else, so redirecting it means no loop state is recorded, the AfterAgent gate cannot see that the task was completed, and changed_files lands empty, with no error anywhere. A stderr-only redirect (2>, 2>>, 2>&1) is fine and is NOT refused, because it leaves the body where this hook reads it. Let the body print.' }
+        default    { return }
+    }
+    $doc = [ordered]@{ decision = 'deny'; reason = $msg } | ConvertTo-Json -Compress -Depth 3
+    [Console]::Out.Write($doc + "`n")
+    [Console]::Error.Write($msg + "`n")
+    exit 2
+}
+
+if ($Phase -eq 'pre') {
+    $GeminiGuardHit = Get-GeminiGuardReason -Raw $Command
+    if ($GeminiGuardHit -ne '') { Deny-GeminiGuard -Kind $GeminiGuardHit }
+}
+
+
 # --- Determine which Stride hook to run ---
 # Routing:
 #   post + /api/tasks/claim        → before_doing
@@ -1213,6 +1435,15 @@ function Write-LoopStateForCompletion {
             if (-not $parsedOk) {
                 [Console]::Error.WriteLine('stride-hook: completion response was unparsable; no loop state recorded')
             }
+        } else {
+            # W2183 overturns the silence here, on the bash half's reasoning: the
+            # 422 excuse does not cover an ABSENT body. A 422 arrives WITH a
+            # well-formed body that parses and correctly records nothing. An
+            # absent body means the response never reached this hook, so the
+            # completion may have landed while no loop state exists -- and the
+            # AfterAgent gate reads a missing file as "nothing to gate on" and
+            # PERMITS. Byte-identical to the bash line.
+            [Console]::Error.WriteLine('stride-hook: no completion response reached this hook; no loop state recorded, so the AfterAgent gate cannot tell this task was completed -- send the completion curl with its stdout intact')
         }
         return
     }

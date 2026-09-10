@@ -265,10 +265,22 @@ can refuse one here. A change to what that rule obliges moves the canon entry's
 version and the anchor above together, in one change.
 
 `hooks/stride-stop-gate.sh`, with a PowerShell twin beside it, is registered on
-`AfterAgent` in `hooks/hooks.json`. It refuses to end a turn while a completed
-task has gone unclaimed and the Ready column still holds claimable work. Two
-things about this runtime differ from the rest of the fleet, and both are worth
-knowing before changing the gate:
+`AfterAgent` in `hooks/hooks.json`. It refuses to end a turn in **two**
+situations, which are mutually exclusive because they are the two sides of one
+file test — so at most one applies, and the gate makes at most one API call
+either way:
+
+- a completed task has gone unclaimed and the Ready column still holds
+  claimable work; or
+- **a claim is still open and was never completed** (W2183). This is the turn
+  that ends mid-task: with no completion recorded there is no loop-state file,
+  so the first condition structurally cannot see it. The gate reads the claim
+  identifier from `.stride-env-cache`, which this extension's hook already
+  writes, and confirms with one projected request that the task is still
+  `in_progress`, uncompleted, and inside its claim window.
+
+Two things about this runtime differ from the rest of the fleet, and both are
+worth knowing before changing the gate:
 
 - **The refusal is spelled `deny`.** Gemini reads
   `{"decision":"deny","reason":"..."}` from stdout at exit 0, and feeds the
@@ -285,12 +297,17 @@ knowing before changing the gate:
   blocks**. Only a live Gemini CLI run settles it — the suite invokes the script
   directly and cannot.
 - **Nothing in the runtime caps a repeated refusal,** so the gate bounds itself.
-  It refuses at most twice for one unfollowed completion and then yields, and
-  because an uncounted block is an unbounded one, a failure to record the count
-  permits instead of blocking.
+  It refuses at most twice per condition and then yields — the two budgets are
+  keyed separately, so neither can spend the other's — and because an uncounted
+  block is an unbounded one, a failure to record the count permits instead of
+  blocking.
 
-Two escape hatches: set `STRIDE_ALLOW_STOP=1`, or delete
-`.stride/.loop-state.json`.
+**The escape hatches are not interchangeable between the two conditions.**
+`STRIDE_ALLOW_STOP=1` clears either. Deleting `.stride/.loop-state.json` clears
+only the *unfollowed completion*; it is **inert** against a held claim, which
+fires precisely because that file is absent. The ways out of a held-claim refusal
+are to complete the task, to release it with `POST /api/tasks/<ident>/unclaim`,
+or to remove `.stride-env-cache`.
 
 ### The `after_doing` time budget
 

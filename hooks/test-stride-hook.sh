@@ -5145,6 +5145,482 @@ else
 fi
 
 # ============================================================
+# Test Group 23: the stdout-preservation guard (W2183)
+# ============================================================
+#
+# This port reads a Stride response off the tool stdout and NOWHERE ELSE -- it
+# has no canonical response file -- so every hiding form is refused, with no
+# target exemption. A file-first sibling permits `--output <its canonical file>`;
+# that exemption does not exist here, and these cases pin its absence.
+#
+# The permits matter as much as the refusals: a refused command here is the
+# operator's own completion or claim call.
+
+echo ""
+echo "=== Test Group 23: the stdout-preservation guard (W2183) ==="
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "  SKIP: Test Group 23 (jq not available)"
+else
+  g23_dir=$(mktemp -d)
+  printf '## after_doing\n\n```bash\n```\n' > "$g23_dir/.stride.md"
+  # A curl stub on PATH, so a PERMITTED fixture that falls through into routing
+  # cannot make a network call. Group 18 established this shape.
+  g23_stub=$(mktemp -d)
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$g23_stub/curl"; chmod +x "$g23_stub/curl"
+  G23_OUT="$g23_dir/out"; G23_ERR="$g23_dir/err"
+
+  g23_run() {
+    jq -n --arg c "$1" '{tool_input:{command:$c},cwd:"'"$g23_dir"'"}' \
+      | GEMINI_PROJECT_DIR="$g23_dir" PATH="$g23_stub:$PATH" \
+        bash "$HOOK_SCRIPT" pre > "$G23_OUT" 2> "$G23_ERR"
+    G23_RC=$?
+  }
+  g23_case() {  # $1 label  $2 command  $3 deny|permit
+    g23_run "$2"
+    assert_eq "$1" "$3" "$([ "$G23_RC" = "2" ] && echo deny || echo permit)"
+  }
+
+  G23_U='"$STRIDE_API_URL/api/tasks/$TASK_ID/complete"'
+  G23_C='"$STRIDE_API_URL/api/tasks/claim"'
+
+  # --- 23a-23l: every way of hiding the response ---------------------------
+  g23_case "23a: -o is refused"              "curl -X PATCH $G23_U -o r.json"   deny
+  g23_case "23b: an attached -o is refused"  "curl -X PATCH $G23_U -or.json"    deny
+  g23_case "23c: a clustered -sSo is refused" "curl -sSo r.json $G23_U"         deny
+  g23_case "23d: --output is refused"        "curl --output r.json $G23_U"      deny
+  g23_case "23e: --output= is refused"       "curl --output=r.json $G23_U"      deny
+  g23_case "23f: -o /dev/null is refused"    "curl -X PATCH $G23_U -o /dev/null" deny
+  g23_case "23g: -O is refused"              "curl -O $G23_U"                   deny
+  g23_case "23h: --remote-name is refused"   "curl --remote-name $G23_U"        deny
+  g23_case "23i: a pipe into jq is refused"  "curl $G23_U | jq ."               deny
+  g23_case "23j: a pipe into head is refused" "curl $G23_U | head -1"           deny
+  # THE ALLOWLIST: a closed list of known transformers silently permits every
+  # consumer nobody thought to name. Only tee passes.
+  g23_case "23k: a pipe into python3 is refused" "curl $G23_U | python3 -m json.tool" deny
+  g23_case "23k: a pipe into xargs is refused"   "curl $G23_U | xargs echo"     deny
+  g23_case "23k: a pipe into cat is refused"     "curl $G23_U | cat"            deny
+  # tee earns no follow-on exemption here, because nothing reads the file it
+  # writes -- unlike a file-first sibling, where it fills a tier the hook reads.
+  g23_case "23l: a transformer after tee is still refused" \
+    "curl $G23_U | tee r.json | jq ." deny
+
+  # --- 23m-23r: redirects --------------------------------------------------
+  g23_case "23m: > is refused"   "curl $G23_U > r.json"   deny
+  g23_case "23n: >> is refused"  "curl $G23_U >> r.json"  deny
+  g23_case "23o: 1> is refused"  "curl $G23_U 1> r.json"  deny
+  g23_case "23p: >| is refused"  "curl $G23_U >| r.json"  deny
+  g23_case "23q: &> is refused"  "curl $G23_U &> r.json"  deny
+  g23_case "23r: >&2 is refused" "curl $G23_U >&2"        deny
+
+  # --- 23s-23w: THE PERMITS ------------------------------------------------
+  g23_case "23s: a bare completion call is permitted"  "curl -X PATCH $G23_U"   permit
+  g23_case "23s: and a bare claim call"                "curl -X POST $G23_C"    permit
+  g23_case "23t: tee is permitted"       "curl -X PATCH $G23_U | tee resp.json" permit
+  # The explicit don't-refuse: stderr-only leaves the body where the hook reads it.
+  g23_case "23u: 2> is permitted"        "curl $G23_U 2> err.log"               permit
+  g23_case "23u: 2>> is permitted"       "curl $G23_U 2>> err.log"              permit
+  g23_case "23u: 2>&1 is permitted"      "curl $G23_U 2>&1"                     permit
+  # Quote blanking: payload bytes are not shell operators.
+  g23_case "23v: a > inside a quoted payload is permitted" \
+    "curl $G23_U -d '{\"n\":\"a > b\"}'" permit
+  g23_case "23v: a -o inside a quoted payload is permitted" \
+    "curl $G23_U -d '{\"n\":\"use -o here\"}'" permit
+  g23_case "23w: a non-Stride curl is out of scope" \
+    "curl https://example.invalid/x -o /tmp/r" permit
+  g23_case "23w: gcc -o is not a curl"   "gcc -o app main.c"                    permit
+  g23_case "23w: rustc -O is not a curl" "rustc -O main.rs"                     permit
+  g23_case "23w: merely mentioning curl is not a call" \
+    "grep -rn \"/api/tasks/\" skills/ | grep curl" permit
+
+  # --- 23x: SCOPE. The endpoint must appear where a request could go, not
+  # merely in a redirect target; and the creation POST carries no trailing
+  # slash, is not routed, and is deliberately out of scope.
+  g23_case "23x: an endpoint only in a redirect target is out of scope" \
+    "curl https://example.invalid/x > /tmp/api/tasks/9/complete" permit
+  g23_case "23x: the unrouted creation endpoint is out of scope" \
+    "curl -o x \$STRIDE_API_URL/api/tasks" permit
+
+  # --- 23y: SHELL WRAPPERS. Each puts something other than curl in command
+  # position, which skipped the whole segment -- the redirect rule included.
+  g23_case "23y: a command substitution does not hide -o" \
+    "RESP=\$(curl -X PATCH $G23_U -o x)" deny
+  g23_case "23y: nor a backtick substitution" \
+    "RESP=\`curl -X PATCH $G23_U -o x\`" deny
+  g23_case "23y: a subshell does not hide a redirect" \
+    "( curl -X PATCH $G23_U > f )" deny
+  g23_case "23y: a brace group does not hide -o" \
+    "{ curl -X PATCH $G23_U -o f; }" deny
+  g23_case "23y: an if-guarded curl does not hide -o" \
+    "if curl -sf $G23_U -o f; then echo ok; fi" deny
+  g23_case "23y: nor a while-guarded one" \
+    "while curl -sf $G23_U > f; do break; done" deny
+  g23_case "23y: and a wrapped safe call is still permitted" \
+    "if curl -sf $G23_U; then echo ok; fi" permit
+
+  # --- 23z: MULTI-LINE payload. Quote state must carry across newlines: this
+  # port's documented completion call embeds a multi-line jq -n program, and a
+  # per-line pass reads that payload as shell syntax and refuses an ordinary
+  # completion whose review prose contains a `>`. The em dash additionally
+  # pins the LC_ALL=C byte/character agreement.
+  G23_ML="curl -sS -X PATCH $G23_U \\
+  -H 'Content-Type: application/json' \\
+  -d '{
+  \"completion_notes\": \"done — and > and | and ;\",
+  \"actual_complexity\": \"medium\"
+}'"
+  g23_case "23z: the documented multi-line call is permitted" "$G23_ML"         permit
+  g23_case "23z: with tee it is permitted"     "$G23_ML | tee r.json"           permit
+  g23_case "23z: with -o it is refused"        "$G23_ML -o r.json"              deny
+  g23_case "23z: with a redirect it is refused" "$G23_ML > r.json"              deny
+
+  # --- 23aa: the scan ceiling, from both sides ----------------------------
+  # A ceiling a real completion can cross is not a safety margin -- it refuses
+  # the operator's correct command. Above it the command is judged WHOLE:
+  # segmenting unblanked text shatters it on the payload's own `;` and drops a
+  # hiding flag into a fragment with no endpoint, which is a false PERMIT.
+  G23_PROSE='All checks pass and the writer was rebuilt from scratch this afternoon. '
+  G23_BIG=""; G23_I=0
+  while [ "$G23_I" -lt 60 ]; do G23_BIG="$G23_BIG$G23_PROSE"; G23_I=$((G23_I + 1)); done
+  G23_HUGE=""; G23_I=0
+  while [ "$G23_I" -lt 1100 ]; do G23_HUGE="$G23_HUGE$G23_PROSE"; G23_I=$((G23_I + 1)); done
+  g23_case "23aa: a large legitimate completion is permitted" \
+    "curl $G23_U -d '{\"n\":\"$G23_BIG\"}'" permit
+  g23_case "23aa: the same call hiding the response is refused" \
+    "curl $G23_U -d '{\"n\":\"$G23_BIG\"}' -o r.json" deny
+  g23_case "23aa: past the ceiling it still fails closed" \
+    "curl $G23_U -d '{\"n\":\"$G23_HUGE\"}' -o r.json" deny
+  g23_case "23aa: and a leading command does not hide it there" \
+    "cd /tmp && curl $G23_U -d '{\"n\":\"$G23_HUGE\"}' -o r.json" deny
+
+  # --- 23af: option and fd forms found in review --------------------------
+  # --remote-name-all writes bodies to local files exactly as -O does, and it
+  # slipped through: a long option was skipped wholesale by the generic `--*`
+  # arm before the `-*O*` cluster arm could see it.
+  g23_case "23af: --remote-name-all is refused" "curl --remote-name-all $G23_U" deny
+  # And the converse: `2>&2` is a stderr-to-stderr redirect, so the body still
+  # prints. Refusing it is exactly the false positive the pitfall names, and it
+  # was refused because the `>&2` rule was tested before the stderr exemption.
+  g23_case "23af: 2>&2 is permitted"            "curl $G23_U 2>&2"              permit
+  g23_case "23af: but >&2 is still refused"     "curl $G23_U >&2"               deny
+
+  # --- 23ag: no awk, no judgement -- and it fails CLOSED -------------------
+  # awk does the blanking, the pairing and the redirect walk, so without it the
+  # guard cannot judge anything. The blanking fallback would have returned its
+  # input verbatim and quietly permitted; on a Stride call the guard refuses
+  # instead, because a loud refusal is recoverable and a missed hide is not.
+  g23_awk_dir=$(mktemp -d)
+  for g23_t in jq printf bash tr wc grep sed date cat mktemp; do
+    g23_bin=$(command -v "$g23_t" 2>/dev/null) && ln -sf "$g23_bin" "$g23_awk_dir/$g23_t"
+  done
+  jq -n --arg c "curl -X PATCH $G23_U" '{tool_input:{command:$c},cwd:"'"$g23_dir"'"}' \
+    | GEMINI_PROJECT_DIR="$g23_dir" PATH="$g23_awk_dir" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  assert_exit "23ag: with no awk, a Stride call is refused rather than guessed" 2 "$?"
+  rm -rf "$g23_awk_dir"
+
+  # --- 23ab: the refusal document and its contract ------------------------
+  g23_run "curl -X PATCH $G23_U -H \"Authorization: Bearer SECRETVALUE\" -o x"
+  assert_exit "23ab: a refusal exits 2" 2 "$G23_RC"
+  assert_eq "23ab: it emits exactly one JSON document" "1" \
+    "$(jq -s 'length' < "$G23_OUT" 2>/dev/null)"
+  # THE TOKEN. `deny`, not `block` -- that belongs to other runtimes in this
+  # fleet, and the wrong token would mean no refusal at all.
+  assert_eq "23ab: the decision token is deny" "deny" \
+    "$(jq -r '.decision // "MISSING"' < "$G23_OUT" 2>/dev/null)"
+  assert_eq "23ab: and is not block" "false" \
+    "$(jq -r 'if .decision == "block" then "true" else "false" end' < "$G23_OUT" 2>/dev/null)"
+  assert_eq "23ab: with a non-empty reason" "yes" \
+    "$(jq -r 'if (.reason | length) > 0 then "yes" else "no" end' < "$G23_OUT" 2>/dev/null)"
+  # THE security case: the command carries a Bearer token on every match.
+  assert_eq "23ab: the token never reaches stdout" "0" \
+    "$(grep -c 'SECRETVALUE\|Bearer' "$G23_OUT" || true)"
+  assert_eq "23ab: nor stderr" "0" \
+    "$(grep -c 'SECRETVALUE\|Bearer' "$G23_ERR" || true)"
+  # Both documented BeforeTool forms are emitted, because neither is measured.
+  assert_eq "23ab: the refusal also reaches stderr for the exit-2 form" "yes" \
+    "$(grep -qF 'Refused by Gemini BeforeTool deny' "$G23_ERR" && echo yes || echo no)"
+  # The message must name THIS port's reading, which is the clearest proof the
+  # prose was written here rather than pasted from a sibling.
+  assert_eq "23ab: and names this port's stdout-only reading" "yes" \
+    "$(grep -qF 'off the tool stdout and nowhere else' "$G23_ERR" && echo yes || echo no)"
+  # It must NOT name a file this port never reads -- the sibling's message does.
+  assert_eq "23ab: and names no canonical response file" "0" \
+    "$(grep -c 'last-api-response' "$G23_ERR" || true)"
+
+  # A permit must be SILENT on fd 1: Gemini parses this phase's stdout as one
+  # control document.
+  g23_run "curl -X PATCH $G23_U"
+  assert_eq "23ac: a permitted call writes nothing to stdout" "0" \
+    "$(wc -c < "$G23_OUT" | tr -d ' ')"
+
+  # Structural: no message may interpolate the command.
+  G23_FN=$(awk '/^gemini_guard_refuse\(\) \{/,/^\}/' "$HOOK_SCRIPT")
+  assert_eq "23ad: no refusal message interpolates the command" "0" \
+    "$(printf '%s' "$G23_FN" | grep -c '\$COMMAND\|\$_raw\|\$_scan' || true)"
+
+  # --- 23ae: CROSS-HALF PARITY. stride-hook.sh execs the .ps1 on native
+  # Windows BEFORE it reads stdin, so the twin is the only guard that exists
+  # there. SKIP, never PASS, when pwsh is absent.
+  if ! command -v pwsh > /dev/null 2>&1; then
+    echo "  SKIP: 23ae: cross-half parity (pwsh not available)"
+  else
+    G23_PS="$(cd "$(dirname "$HOOK_SCRIPT")" && pwd)/stride-hook.ps1"
+    g23_ps_run() {
+      jq -n --arg c "$1" '{tool_input:{command:$c},cwd:"'"$g23_dir"'"}' \
+        | GEMINI_PROJECT_DIR="$g23_dir" PATH="$g23_stub:$PATH" \
+          pwsh -NoProfile -File "$G23_PS" pre > "$g23_dir/ps.out" 2> "$g23_dir/ps.err"
+      G23_PS_RC=$?
+    }
+    g23_parity() {  # $1 label  $2 cmd  $3 expect
+      g23_run "$2";    local a; a=$([ "$G23_RC" = "2" ] && echo deny || echo permit)
+      g23_ps_run "$2"; local b; b=$([ "$G23_PS_RC" = "2" ] && echo deny || echo permit)
+      assert_eq "23ae: $1 — bash" "$3" "$a"
+      assert_eq "23ae: $1 — pwsh" "$3" "$b"
+      if [ "$3" = "deny" ] && [ "$a" = "deny" ] && [ "$b" = "deny" ]; then
+        assert_eq "23ae: $1 — same refusal bytes" "same" \
+          "$(if [ "$(jq -r '.reason' < "$G23_OUT" 2>/dev/null)" = \
+                  "$(jq -r '.reason' < "$g23_dir/ps.out" 2>/dev/null)" ]; \
+             then echo same; else echo differs; fi)"
+      fi
+    }
+    g23_parity "-o"                 "curl -X PATCH $G23_U -o r.json"     deny
+    g23_parity "-O"                 "curl -O $G23_U"                     deny
+    g23_parity "a transformer pipe" "curl $G23_U | jq ."                 deny
+    g23_parity "a redirect"         "curl $G23_U > r.json"               deny
+    g23_parity "a wrapped -o"       "RESP=\$(curl -X PATCH $G23_U -o x)" deny
+    g23_parity "a bare call"        "curl -X PATCH $G23_C"               permit
+    g23_parity "tee"                "curl -X PATCH $G23_C | tee r.json"  permit
+    g23_parity "stderr only"        "curl $G23_C 2> err.log"             permit
+    g23_parity "a quoted payload"   "curl $G23_C -d '{\"n\":\"a > b\"}'" permit
+    g23_parity "the multi-line call" "$G23_ML"                           permit
+    # The twin must use this port's token, not a sibling's.
+    g23_ps_run "curl -X PATCH $G23_U -o r.json"
+    assert_eq "23ae: the twin emits decision=deny" "deny" \
+      "$(jq -r '.decision // "MISSING"' < "$g23_dir/ps.out" 2>/dev/null)"
+    assert_eq "23ae: and exactly one document" "1" \
+      "$(jq -s 'length' < "$g23_dir/ps.out" 2>/dev/null)"
+  fi
+
+  rm -rf "$g23_dir" "$g23_stub"
+fi
+
+# ============================================================
+# Test Group 24: held claim and unrecordable-state announcement (W2183)
+# ============================================================
+#
+# Group 23 covers the guard. This group covers the other two acceptance
+# criteria, which review found had no assertions at all: the gate's NEW refusal
+# (a held uncompleted claim), every condition that releases it, and the
+# recorder's absent-body announcement.
+#
+# Its own fixtures, deliberately: Group 19 owns fixtures that dozens of cases
+# share, and reshaping one of those is the cheapest way to break a suite.
+
+echo ""
+echo "=== Test Group 24: held claim and announcement (W2183) ==="
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "  SKIP: Test Group 24 (jq not available)"
+else
+  unset STRIDE_ALLOW_STOP STRIDE_STOP_GATE_MAX_BLOCKS GEMINI_PROJECT_DIR CLAUDE_PROJECT_DIR
+  G24_GATE="$(cd "$(dirname "$HOOK_SCRIPT")" && pwd)/stride-stop-gate.sh"
+  G24_BASH=$(command -v bash)
+  G24_T=$(mktemp -d)
+  G24_TOKEN='NOT-A-REAL-TOKEN-g24'
+
+  g24_stub() {  # body code -> stub dir
+    local d; d=$(mktemp -d "$G24_T/stub.XXXXXX")
+    { printf '#!/usr/bin/env bash\n'
+      # Only the http* argument is recorded. The gate passes the bearer token in
+      # an -H argument, and a recorder that logged "$*" would write a live token
+      # to disk the moment anyone ran this suite against a real auth file.
+      printf 'for _a in "$@"; do case "$_a" in http*) printf "ARGS: %%s\\n" "$_a" >> "%s/curl.log" ;; esac; done\n' "$d"
+      printf 'printf "%%s\\n%%s" %s %s\n' "$(printf '%q' "$1")" "$(printf '%q' "$2")"
+    } > "$d/curl"; chmod +x "$d/curl"; printf '%s' "$d"
+  }
+  g24_proj() {
+    local d; d=$(mktemp -d "$G24_T/proj.XXXXXX"); mkdir -p "$d/.stride"
+    printf '# auth\n\n- **API URL:** `https://api.example.invalid`\n- **API Token:** `%s`\n' \
+      "$G24_TOKEN" > "$d/.stride_auth.md"
+    printf '%s' "$d"
+  }
+  g24_cache() { printf "TASK_IDENTIFIER='%s'\nTASK_STATUS='%s'\n" "$2" "$3" > "$1/.stride-env-cache"; }
+  g24_body() {
+    printf '{"data":{"identifier":"%s","status":"%s","completed_by_id":%s,"claim_expires_at":"%s"}}' \
+      "$1" "$2" "$3" "$4"
+  }
+  g24_run() {
+    printf '{"cwd":"%s","session_id":"g24","hook_event_name":"AfterAgent"}' "$1" \
+      | PATH="$2:$PATH" "$G24_BASH" "$G24_GATE" > "$G24_T/out" 2> "$G24_T/err"
+    G24_RC=$?; G24_OUT=$(cat "$G24_T/out"); G24_ERR=$(cat "$G24_T/err")
+  }
+  # Empty stdout IS the permit signal: deny and permit share exit 0, so stdout is
+  # the only thing that distinguishes them.
+  g24_verdict() {
+    if [ -z "$G24_OUT" ]; then printf 'permit'
+    else printf '%s' "$(printf '%s' "$G24_OUT" | jq -r '.decision // "permit"' 2>/dev/null || printf 'permit')"
+    fi
+  }
+  G24_FUT='2099-01-01T00:00:00Z'; G24_PAST='2000-01-01T00:00:00Z'
+
+  # --- 24a: THE REFUSAL. A live claim and no completion on record. ---------
+  D=$(g24_proj); g24_cache "$D" W2183 in_progress
+  S=$(g24_stub "$(g24_body W2183 in_progress null "$G24_FUT")" 200); g24_run "$D" "$S"
+  assert_eq "24a: a held uncompleted claim refuses the turn end" "deny" "$(g24_verdict)"
+  # The token is this port's, not a sibling's.
+  assert_eq "24a: and not with the block token" "false" \
+    "$(printf '%s' "$G24_OUT" | jq -r 'if .decision == "block" then "true" else "false" end' 2>/dev/null)"
+  assert_exit "24a: exit is always 0, per the contract" 0 "$G24_RC"
+  assert_eq "24a: the reason names the held task" "yes" \
+    "$(printf '%s' "$G24_OUT" | jq -r '.reason' | grep -qF 'W2183' && echo yes || echo no)"
+  assert_eq "24a: the reason is non-blank" "yes" \
+    "$(printf '%s' "$G24_OUT" | jq -r 'if (.reason | length) > 0 then "yes" else "no" end')"
+  assert_eq "24a: exactly one document on stdout" "1" \
+    "$(printf '%s' "$G24_OUT" | jq -s 'length' 2>/dev/null)"
+  assert_eq "24a: the token never reaches stdout" "0" \
+    "$(printf '%s' "$G24_OUT" | grep -c "$G24_TOKEN" || true)"
+  assert_eq "24a: nor stderr" "0" \
+    "$(printf '%s' "$G24_ERR" | grep -c "$G24_TOKEN" || true)"
+  # Threading a mode through the existing network leg is what keeps this at one
+  # request: the gate must never cost two.
+  assert_eq "24a: it costs exactly one API call" "1" \
+    "$(grep -c '^ARGS:' "$S/curl.log" 2>/dev/null || echo 0)"
+  assert_eq "24a: and asks about the held task, not the queue" "yes" \
+    "$(grep -qF 'api/tasks/W2183?fields=' "$S/curl.log" && echo yes || echo no)"
+  assert_eq "24a: the budget is namespaced held:<IDENT>" "held:W2183" \
+    "$(cut -d' ' -f1 "$D/.stride/.stop-gate-blocks" 2>/dev/null)"
+  # It must not tell a session still holding a task to go claim another, and must
+  # not repeat the loop-state hatch, which is inert against this condition.
+  assert_eq "24a: it does not tell the session to claim the next task" "no" \
+    "$(printf '%s' "$G24_OUT" | jq -r '.reason' | grep -qF 'Ready column' && echo yes || echo no)"
+  assert_eq "24a: and says the loop-state hatch will not clear it" "yes" \
+    "$(printf '%s' "$G24_OUT" | jq -r '.reason' | grep -qF 'will NOT clear it' && echo yes || echo no)"
+
+  # --- 24b-24f: every condition that releases the claim -------------------
+  D=$(g24_proj); g24_cache "$D" W2183 in_progress
+  S=$(g24_stub "$(g24_body W2183 completed null "$G24_FUT")" 200); g24_run "$D" "$S"
+  assert_eq "24b: a task no longer in progress permits" "permit" "$(g24_verdict)"
+  assert_eq "24b: and says why" "yes" \
+    "$(printf '%s' "$G24_ERR" | grep -qF 'no longer in progress' && echo yes || echo no)"
+  # THE sanctioned terminal state, and the discriminator that makes the
+  # surviving env cache safe: completed and awaiting review is not held.
+  D=$(g24_proj); g24_cache "$D" W2183 in_progress
+  S=$(g24_stub "$(g24_body W2183 in_progress 7 "$G24_FUT")" 200); g24_run "$D" "$S"
+  assert_eq "24c: an already-completed task permits" "permit" "$(g24_verdict)"
+  assert_eq "24c: and says why" "yes" \
+    "$(printf '%s' "$G24_ERR" | grep -qF 'already been completed' && echo yes || echo no)"
+  D=$(g24_proj); g24_cache "$D" W2183 in_progress
+  S=$(g24_stub "$(g24_body W2183 in_progress null "$G24_PAST")" 200); g24_run "$D" "$S"
+  assert_eq "24d: an expired claim permits" "permit" "$(g24_verdict)"
+  assert_eq "24d: and says why" "yes" \
+    "$(printf '%s' "$G24_ERR" | grep -qF 'has expired' && echo yes || echo no)"
+  D=$(g24_proj); g24_cache "$D" W2183 in_progress
+  S=$(g24_stub "$(g24_body W2183 in_progress null '2099-01-01')" 200); g24_run "$D" "$S"
+  assert_eq "24e: an unshaped expiry permits" "permit" "$(g24_verdict)"
+  D=$(g24_proj); g24_cache "$D" W2183 in_progress
+  S=$(g24_stub "$(g24_body W9999 in_progress null "$G24_FUT")" 200); g24_run "$D" "$S"
+  assert_eq "24f: an answer about a different task permits" "permit" "$(g24_verdict)"
+
+  # --- 24g: 404 means something different on this endpoint ----------------
+  D=$(g24_proj); g24_cache "$D" W2183 in_progress
+  S=$(g24_stub '{"error":"not found"}' 404); g24_run "$D" "$S"
+  assert_eq "24g: a 404 on the held task permits" "permit" "$(g24_verdict)"
+  assert_eq "24g: and not as an empty queue" "yes" \
+    "$(printf '%s' "$G24_ERR" | grep -qF 'claimed task could not be found' && echo yes || echo no)"
+
+  # --- 24h-24j: no evidence means no refusal, silently and with no call ----
+  D=$(g24_proj); S=$(g24_stub "$(g24_body W2183 in_progress null "$G24_FUT")" 200); g24_run "$D" "$S"
+  assert_eq "24h: no env cache permits" "permit" "$(g24_verdict)"
+  assert_eq "24h: silently" "" "$G24_ERR"
+  assert_eq "24h: and makes no API call at all" "0" "$(grep -c '^ARGS:' "$S/curl.log" 2>/dev/null || echo 0)"
+  D=$(g24_proj); g24_cache "$D" W2183 completed
+  S=$(g24_stub "$(g24_body W2183 in_progress null "$G24_FUT")" 200); g24_run "$D" "$S"
+  assert_eq "24i: a cache not in_progress permits" "permit" "$(g24_verdict)"
+  assert_eq "24i: with no API call" "0" "$(grep -c '^ARGS:' "$S/curl.log" 2>/dev/null || echo 0)"
+  # Refused, never sanitised: this value would be interpolated into a URL, and a
+  # dot segment would be normalised into a different path.
+  D=$(g24_proj); printf "TASK_IDENTIFIER='../../etc/x'\nTASK_STATUS='in_progress'\n" > "$D/.stride-env-cache"
+  S=$(g24_stub "$(g24_body W2183 in_progress null "$G24_FUT")" 200); g24_run "$D" "$S"
+  assert_eq "24j: a non-identifier-shaped cache value permits" "permit" "$(g24_verdict)"
+  assert_eq "24j: with no API call" "0" "$(grep -c '^ARGS:' "$S/curl.log" 2>/dev/null || echo 0)"
+
+  # --- 24k: MUTUAL EXCLUSION, which is what bounds the gate to one call ---
+  D=$(g24_proj); g24_cache "$D" W2183 in_progress
+  printf '{"identifier":"W2182","needs_review":true,"completed_at":"2026-01-01T00:00:00Z","session_id":"g24"}\n' \
+    > "$D/.stride/.loop-state.json"
+  S=$(g24_stub "$(g24_body W2183 in_progress null "$G24_FUT")" 200); g24_run "$D" "$S"
+  assert_eq "24k: a recorded completion takes precedence over the cache" "yes" \
+    "$(printf '%s' "$G24_ERR" | grep -qi 'review' && echo yes || echo no)"
+  assert_eq "24k: so the two conditions never both run" "0" \
+    "$(grep -c '^ARGS:' "$S/curl.log" 2>/dev/null || echo 0)"
+  # State 1 must still permit on the /next path, unshadowed by a held claim.
+  D=$(g24_proj)
+  printf '{"identifier":"W2182","needs_review":false,"completed_at":"2026-01-01T00:00:00Z","session_id":"g24"}\n' \
+    > "$D/.stride/.loop-state.json"
+  S=$(g24_stub '{"error":"not found"}' 404); g24_run "$D" "$S"
+  assert_eq "24k: an empty Ready queue still permits" "permit" "$(g24_verdict)"
+  assert_eq "24k: and still reports the empty queue" "yes" \
+    "$(printf '%s' "$G24_ERR" | grep -qF 'no claimable task remains' && echo yes || echo no)"
+
+  # --- 24l: the budget is bounded, so it cannot wedge a session -----------
+  D=$(g24_proj); g24_cache "$D" W2183 in_progress
+  S=$(g24_stub "$(g24_body W2183 in_progress null "$G24_FUT")" 200)
+  g24_run "$D" "$S"; g24_run "$D" "$S"; g24_run "$D" "$S"
+  assert_eq "24l: the held-claim budget is bounded" "permit" "$(g24_verdict)"
+  assert_eq "24l: and names the held-claim budget, not the completion one" "yes" \
+    "$(printf '%s' "$G24_ERR" | grep -qF 'this held claim is spent' && echo yes || echo no)"
+  # --- 24m: the escape hatch still wins -----------------------------------
+  D=$(g24_proj); g24_cache "$D" W2183 in_progress
+  S=$(g24_stub "$(g24_body W2183 in_progress null "$G24_FUT")" 200)
+  printf '{"cwd":"%s","hook_event_name":"AfterAgent"}' "$D" \
+    | PATH="$S:$PATH" STRIDE_ALLOW_STOP=1 "$G24_BASH" "$G24_GATE" > "$G24_T/out" 2>/dev/null
+  G24_OUT=$(cat "$G24_T/out")
+  assert_eq "24m: STRIDE_ALLOW_STOP=1 permits a held claim too" "permit" "$(g24_verdict)"
+
+  # --- 24n-24q: the unrecordable-state announcement -----------------------
+  G24_HD=$(mktemp -d "$G24_T/hook.XXXXXX")
+  printf '## after_doing\n\n```bash\n```\n' > "$G24_HD/.stride.md"
+  G24_HSTUB=$(mktemp -d "$G24_T/hstub.XXXXXX")
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$G24_HSTUB/curl"; chmod +x "$G24_HSTUB/curl"
+  g24_hook() {  # $1 command  $2 raw tool_response
+    jq -n --arg c "$1" --arg r "$2" \
+      '{tool_input:{command:$c},tool_response:$r,cwd:"'"$G24_HD"'"}' \
+      | GEMINI_PROJECT_DIR="$G24_HD" PATH="$G24_HSTUB:$PATH" \
+        bash "$HOOK_SCRIPT" post > "$G24_T/hout" 2> "$G24_T/herr"
+    G24_HERR=$(cat "$G24_T/herr")
+  }
+  G24_DONE='curl -X PATCH https://x.invalid/api/tasks/9/complete'
+  # An ABSENT body is the loudest case: the completion may have landed and the
+  # evidence is simply gone, so the gate reads a missing file and permits.
+  rm -f "$G24_HD/.stride/.loop-state.json"
+  g24_hook "$G24_DONE" ''
+  assert_eq "24n: an absent completion body announces" "yes" \
+    "$(printf '%s' "$G24_HERR" | grep -qF 'no completion response reached this hook' && echo yes || echo no)"
+  assert_eq "24n: and names the consequence for the gate" "yes" \
+    "$(printf '%s' "$G24_HERR" | grep -qF 'AfterAgent gate cannot tell' && echo yes || echo no)"
+  assert_eq "24n: on stderr, never stdout" "0" "$(wc -c < "$G24_T/hout" | tr -d ' ')"
+  # An unparsable body keeps its own distinct line.
+  rm -f "$G24_HD/.stride/.loop-state.json"
+  g24_hook "$G24_DONE" '{"data":{"identifier":"W2 TRUNCA'
+  assert_eq "24o: an unparsable body keeps its own line" "yes" \
+    "$(printf '%s' "$G24_HERR" | grep -qF 'was unparsable' && echo yes || echo no)"
+  # THE ONE SILENCE WORTH KEEPING: a 422 parses and correctly records nothing.
+  rm -f "$G24_HD/.stride/.loop-state.json"
+  g24_hook "$G24_DONE" '{"errors":{"base":["completion is invalid"]}}'
+  assert_eq "24p: a well-formed 422 stays silent" "0" \
+    "$(printf '%s' "$G24_HERR" | grep -c 'no completion response\|was unparsable' || true)"
+  # A successful completion records and announces nothing.
+  rm -f "$G24_HD/.stride/.loop-state.json"
+  g24_hook "$G24_DONE" '{"data":{"identifier":"W2183","needs_review":false}}'
+  assert_eq "24q: a successful completion still records" "W2183" \
+    "$(jq -r '.identifier' "$G24_HD/.stride/.loop-state.json" 2>/dev/null)"
+  assert_eq "24q: and announces nothing" "0" \
+    "$(printf '%s' "$G24_HERR" | grep -c 'no completion response\|was unparsable' || true)"
+
+  rm -rf "$G24_T"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

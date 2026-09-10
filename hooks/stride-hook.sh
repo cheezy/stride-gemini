@@ -1172,7 +1172,26 @@ record_loop_state_for_completion() {
     # be announced as a parse failure that never happened. `empty` fails only
     # on a genuine parse error, and the -n guard keeps "no body at all" out of
     # a channel that claims a body failed to parse.
-    if [ -n "$_payload" ] && ! printf '%s' "$_payload" | jq empty > /dev/null 2>&1; then
+    if [ -z "$_payload" ]; then
+      # W2183 OVERTURNS THE SILENCE HERE, and the comment above is what makes
+      # the case: the 422 excuse does not cover an ABSENT body. A 422 arrives
+      # WITH a well-formed body that parses and correctly records nothing --
+      # nothing failed, so nothing is said. An absent body is the opposite: the
+      # response never reached this hook at all, so the completion may well have
+      # landed server-side while no loop state exists, and the AfterAgent gate
+      # reads a missing file as "nothing to gate on" and PERMITS. A session can
+      # then end with claimable work still in Ready and not one line saying why.
+      #
+      # Order matters: this arm sits BEFORE the `jq empty` test for the reason
+      # that test's own comment gives -- `jq empty` exits 4 on no input, so an
+      # absent body would otherwise be announced as a parse failure that never
+      # happened. Absent and empty are treated alike because they are the same
+      # condition reached by two routes, and the operator's fix is identical.
+      #
+      # The advice is deliberately "let the body print": this port has no tee
+      # shape of its own to name, and inventing one would be worse than silence.
+      printf 'stride-hook: no completion response reached this hook; no loop state recorded, so the AfterAgent gate cannot tell this task was completed -- send the completion curl with its stdout intact\n' >&2
+    elif ! printf '%s' "$_payload" | jq empty > /dev/null 2>&1; then
       printf 'stride-hook: completion response was unparsable; no loop state recorded\n' >&2
     fi
     return 0
@@ -1300,6 +1319,398 @@ ${_key}=''"
   fi
 }
 
+# =========================================================================
+# The stdout-preservation guard (W2183)
+# =========================================================================
+#
+# WHY, IN THIS PORT'S TERMS. `extract_response_payload` above reads
+# `.tool_response` and NOTHING ELSE -- this port has no canonical response file
+# and no route-id fallback, and says so in as many words. So the stdout of a
+# `run_shell_command` call -- this runtime's tool, and the literal matcher the
+# BeforeTool entry in hooks.json carries -- is the ONE channel a Stride response
+# can arrive on. A command that
+# takes it anywhere else leaves the recorder with nothing: no loop state is
+# written, the AfterAgent gate cannot see that the task was completed, and
+# `changed_files` lands empty. Every part of that is silent.
+#
+# SO THE RULE HERE IS THE STRICT ONE: every hiding form is refused, with no
+# exemption for any target. A sibling port (stride-copilot) is FILE-FIRST and
+# therefore permits `--output <its canonical response file>`, and allows a
+# transformer after a `tee` into that file. NEITHER EXEMPTION TRANSFERS HERE,
+# because there is no such file to read back -- do not import that reasoning,
+# and do not copy that port's messages, which name a path this port never
+# touches.
+#
+# SCOPE. The routing case further down routes exactly three endpoints:
+# /api/tasks/claim, /api/tasks/<id>/complete and /api/tasks/<id>/mark_reviewed.
+# All three carry the literal `/api/tasks/`, which is the prefilter. The
+# creation POST to `$STRIDE_API_URL/api/tasks` -- no trailing slash, and written
+# unquoted in skills/stride-enriching-tasks -- is DELIBERATELY out of scope: it
+# is not routed and not recorded, so hiding its response costs this port
+# nothing, while widening the prefilter to a bare `/api/tasks` would refuse the
+# enrichment calls our own skills document, for no benefit.
+#
+# THE CONTRACT, stated as honestly as it is known. docs/HOOK_RESEARCH.md
+# documents TWO equivalent forms for `BeforeTool`: exit 2 with the message on
+# stderr (its "preferred system-block form"), and a stdout document carrying
+# `{"decision":"deny",...}`. This handler emits BOTH, because neither has been
+# measured against a live Gemini CLI from this repository -- emitting both is
+# the hedge, not a claim that either is settled. The token is `deny`; `block`
+# belongs to other runtimes in this fleet and would mean no refusal at all here.
+# Note the stop gate's own R1 caveat is about `AfterAgent`, a DIFFERENT event,
+# and is not restated as though it governed this one.
+#
+# The command text carries a Bearer token on every call this guard matches, so
+# nothing derived from it may reach a message, a log or a file: all four
+# messages are fixed literals selected by a `case`.
+
+GEMINI_GUARD_MAX_SCAN=65536
+
+# awk does the quote blanking, the pairing and the redirect walk, so without it
+# the guard cannot judge anything. The port's own convention elsewhere is to name
+# a missing dependency and take the safe direction (HAS_JQ below, and the stop
+# gate's explicit "curl is not available" permit), so this is named rather than
+# left to a fallback that would return its input verbatim and quietly permit.
+#
+# It fails CLOSED: on a Stride call that matches the cheap prefilter, no awk
+# means the guard refuses rather than guesses. A refusal is loud and recoverable;
+# a guess in the other direction loses the task silently, which is the whole
+# failure this guard exists to prevent.
+GEMINI_GUARD_HAS_AWK=false
+command -v awk > /dev/null 2>&1 && GEMINI_GUARD_HAS_AWK=true
+
+# Join backslash-newline continuations so a command split across lines is read
+# as the one command it is. The documented completion call is multi-line.
+gemini_guard_join_continuations() {
+  printf '%s' "$1" | awk 'BEGIN{RS="\036"} {gsub(/\\\n/, " "); printf "%s", $0}'
+}
+
+# Blank quoted spans to spaces, carrying quote state ACROSS NEWLINES.
+#
+# The whole text is one record deliberately: this port's documented completion
+# payload is a multi-line `jq -n` program, and a per-line pass would reset the
+# quote state at every newline and read that payload as live shell syntax --
+# refusing an ordinary completion whose review prose contains a `>`. A newline
+# INSIDE quotes is payload; outside, it is a separator and is preserved as one.
+#
+# Backslash escapes follow the shell's asymmetry: inside double quotes `\"` does
+# not close the run; inside single quotes a backslash is literal.
+#
+# Length-preserving by construction -- one byte out per byte in -- so the caller
+# may cut this view and the raw view at shared offsets. LC_ALL=C on both sides
+# keeps awk and bash counting the same units, which matters because the
+# documented payload carries em dashes.
+gemini_guard_blank() {
+  LC_ALL=C printf '%s' "$1" | LC_ALL=C awk '
+    BEGIN { RS = "\036" }
+    {
+      n = length($0); out = ""; q = ""; i = 1
+      while (i <= n) {
+        c = substr($0, i, 1)
+        if (q == "") {
+          if (c == "\\") { out = out " "; if (i + 1 <= n) { out = out " "; i += 2 } else { i += 1 }; continue }
+          if (c == "\"" || c == "'"'"'") { q = c; out = out " "; i += 1; continue }
+          out = out c; i += 1; continue
+        }
+        if (q == "\"" && c == "\\") { out = out " "; if (i + 1 <= n) { out = out " "; i += 2 } else { i += 1 }; continue }
+        if (c == q) { q = ""; out = out " "; i += 1; continue }
+        out = out " "; i += 1
+      }
+      printf "%s", out
+    }
+  ' 2>/dev/null || printf '%s' "$1"
+}
+
+# The command word of a pipeline stage: the first word that is not a leading
+# assignment, a wrapper, or a compound-command keyword.
+#
+# The keyword skips are not decoration. `RESP=$(curl ... -o x)` fuses the
+# assignment and the command into one word; `( curl ... > f )` and
+# `if curl ... -o f; then ...; fi` put `(` or `if` in command position. Each made
+# the stage's command word something other than curl, which skipped the segment
+# entirely -- the redirect rule included. The caller additionally neutralises
+# the grouping characters.
+gemini_guard_cmd_word() {
+  local _w
+  for _w in $1; do
+    case "$_w" in
+      '') continue ;;
+      *=*) continue ;;
+      env|command|builtin|exec|nohup|time) continue ;;
+      if|then|elif|else|fi|while|until|do|done|'!') continue ;;
+      *) printf '%s' "${_w##*/}"; return 0 ;;
+    esac
+  done
+  return 0
+}
+
+# Is this text a Stride API call at all? Judged on RAW text, never the blanked
+# copy: the documented calls QUOTE their URL, so asking this of the blanked view
+# answers "no" for every real Stride call and the guard would permit exactly
+# what it exists to refuse.
+gemini_guard_is_stride_call() {
+  case "$1" in
+    *"/api/tasks/"*) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *curl*) return 0 ;;
+  esac
+  return 1
+}
+
+# Stdout redirects. Emits `redirect` or nothing.
+#
+#   refused  : >  >>  1>  1>>  >|  &>  &>>  >&2
+#   permitted: 2>  2>>  2>&1   -- stderr only, so the body still prints, and
+#              refusing one would be a false positive
+#
+# No target exemption and so no `append` kind: unlike a file-first sibling,
+# this port has no file to write to in the first place.
+gemini_guard_redirect_kind() {
+  printf '%s' "$1" | LC_ALL=C awk '
+    {
+      n = length($0)
+      for (i = 1; i <= n; i++) {
+        if (substr($0, i, 1) != ">") continue
+        # The stderr-only exemption is tested FIRST, before the `>&2` rule. The
+        # other order refuses `2>&2` -- a stderr-to-stderr redirect that leaves
+        # the body on stdout, so refusing it is exactly the false positive the
+        # pitfall names. `>&2` with no fd word before it still moves stdout TO
+        # stderr and is still refused.
+        prev = (i > 1) ? substr($0, i - 1, 1) : " "
+        if (prev == ">") continue
+        if (prev == "2") {
+          before = (i > 2) ? substr($0, i - 2, 1) : " "
+          if (before ~ /[ \t]/ || i == 2) continue
+        }
+        if (substr($0, i, 3) == ">&2") { print "redirect"; exit }
+        if (prev == "&") { print "redirect"; exit }
+        print "redirect"; exit
+      }
+    }
+  ' 2>/dev/null
+}
+
+# Raw text with every REDIRECT TARGET blanked out, for the scope test only.
+#
+# Without this, `curl https://example.test/x > /tmp/api/tasks/9/complete` is
+# refused: the segment carries curl and a redirect, and `/api/tasks/` appears --
+# but only inside the redirect's own target, which says nothing about the
+# endpoint being called. The endpoint has to appear somewhere a request could
+# actually go.
+#
+# Target spans are located in the BLANKED view (so a path inside a quoted
+# payload is not mistaken for one) and blanked in the RAW view at the same
+# offsets, which stays sound because every substitution is a space for a byte.
+gemini_guard_scope_text() {
+  GEMINI_SC_RAW="$1" GEMINI_SC_BL="$2" LC_ALL=C awk '
+    BEGIN {
+      raw = ENVIRON["GEMINI_SC_RAW"]; bl = ENVIRON["GEMINI_SC_BL"]
+      n = length(bl); out = raw
+      i = 1
+      while (i <= n) {
+        if (substr(bl, i, 1) != ">") { i++; continue }
+        j = i + 1
+        # step over the rest of the operator
+        while (j <= n && (substr(bl, j, 1) == ">" || substr(bl, j, 1) == "|" || substr(bl, j, 1) == "&")) j++
+        # step over separating blanks
+        while (j <= n && substr(bl, j, 1) ~ /[ \t]/) j++
+        # blank the target word in the RAW copy
+        while (j <= n && substr(bl, j, 1) !~ /[ \t\n;|&]/) {
+          out = substr(out, 1, j - 1) " " substr(out, j + 1)
+          j++
+        }
+        i = j
+      }
+      printf "%s", out
+    }
+  ' 2>/dev/null || printf '%s' "$1"
+}
+
+# Cut both views into segments at ONE set of offsets and emit them paired as
+# `<raw>\037<blanked>\036`.
+#
+# Boundaries are located in the BLANKED view so a separator inside a quoted
+# payload cannot split a command; the same offsets then cut the raw view, which
+# is sound only because blanking is length-preserving (the caller checks).
+#
+# Both strings reach awk through the ENVIRONMENT, never `awk -v`, which
+# processes backslash escapes in its value -- a command containing `\n` would
+# arrive transformed and the offsets would stop lining up.
+gemini_guard_split_pairs() {
+  GEMINI_SP_RAW="$1" GEMINI_SP_BL="$2" LC_ALL=C awk '
+    function emit(s, e,   r, b) {
+      if (e < s) return
+      r = substr(raw, s, e - s + 1)
+      b = substr(bl,  s, e - s + 1)
+      printf "%s\037%s\036", r, b
+    }
+    BEGIN {
+      raw = ENVIRON["GEMINI_SP_RAW"]; bl = ENVIRON["GEMINI_SP_BL"]
+      n = length(bl); start = 1; i = 1
+      while (i <= n) {
+        c  = substr(bl, i, 1)
+        c2 = substr(bl, i, 2)
+        if (c2 == "&&" || c2 == "||") { emit(start, i - 1); i += 2; start = i; continue }
+        if (c == ";" || c == "\n")    { emit(start, i - 1); i += 1; start = i; continue }
+        i++
+      }
+      emit(start, n)
+    }
+  ' 2>/dev/null
+}
+
+# The decider. Prints one of flag|remote|pipe|redirect, or nothing.
+gemini_guard_reason() {
+  local _raw="$1" _joined _scan _seg _seg_raw _pair _stage _rest _word _first _sawcurl _target _next
+  local _whole=0
+
+  gemini_guard_is_stride_call "$_raw" || return 0
+
+  # No awk, no judgement. Fail CLOSED rather than let the blanking fallback
+  # return its input verbatim and quietly permit -- see GEMINI_GUARD_HAS_AWK.
+  if [ "${GEMINI_GUARD_HAS_AWK:-false}" != "true" ]; then
+    printf 'flag'
+    return 0
+  fi
+
+  _joined=$(gemini_guard_join_continuations "$_raw")
+
+  if [ "$(LC_ALL=C printf '%s' "$_joined" | LC_ALL=C wc -c | tr -d ' ')" -le "$GEMINI_GUARD_MAX_SCAN" ]; then
+    _scan=$(gemini_guard_blank "$_joined")
+  else
+    # Above the ceiling: stateless, AND judged as one unit. Segmenting unblanked
+    # text shatters the command on the `;` inside its own payload and drops a
+    # hiding flag into a fragment carrying no endpoint -- a false PERMIT, which
+    # is the one direction this path must not fail in.
+    _scan="$_joined"
+    _whole=1
+  fi
+
+  # Neutralise the shell's grouping characters in the OPERATOR view only, each
+  # replaced by a space so the substitution is length-preserving and the pairing
+  # offsets still hold. Quoted spans are already blanked, so a `(` surviving
+  # here is real syntax rather than payload. The raw view is untouched, so
+  # endpoint scoping is unaffected.
+  _scan=$(printf '%s' "$_scan" | LC_ALL=C tr '()`{}' '     ')
+
+  # FAIL CLOSED on any length drift: scan the raw text as its own operator view.
+  # Never pad or truncate to "repair" it -- that shifts the very offsets the
+  # pairing depends on, turning a loud over-refusal into a silent bypass.
+  if [ "$(LC_ALL=C printf '%s' "$_scan" | LC_ALL=C wc -c)" -ne "$(LC_ALL=C printf '%s' "$_joined" | LC_ALL=C wc -c)" ]; then
+    _scan="$_joined"
+    _whole=1
+  fi
+
+  local _segs
+  if [ "$_whole" = "1" ]; then
+    _segs=$(printf '%s\037%s\036' "$_joined" "$_scan")
+  else
+    _segs=$(gemini_guard_split_pairs "$_joined" "$_scan")
+  fi
+
+  while IFS= read -r -d $'\036' _pair; do
+    _seg_raw="${_pair%%$'\037'*}"
+    _seg="${_pair#*$'\037'}"
+    [ -n "$_seg_raw" ] || continue
+    # Raw half decides whether the segment is OURS; the blanked half decides
+    # what it does. The scope text is the raw half with redirect targets blanked,
+    # which is why `curl https://x/y > /tmp/api/tasks/9/complete` stays
+    # permitted: the endpoint appears only where the output was going, never
+    # where the request was.
+    case "$(gemini_guard_scope_text "$_seg_raw" "$_seg")" in
+      *"/api/tasks/"*) ;;
+      *) continue ;;
+    esac
+
+    _sawcurl=0
+    _first=1
+    _rest="$_seg"
+    while [ -n "$_rest" ]; do
+      case "$_rest" in
+        *"|"*) _stage="${_rest%%|*}"; _rest="${_rest#*|}" ;;
+        *)     _stage="$_rest";       _rest="" ;;
+      esac
+      _word=$(gemini_guard_cmd_word "$_stage")
+      if [ "$_word" = "curl" ] || { [ "$_whole" = "1" ] && case " $_stage " in *" curl "*) true ;; *) false ;; esac; }; then
+        _sawcurl=1
+        # Rule 1 -- the response is written to a file instead of printed. No
+        # target is acceptable here, because no file is read back.
+        _next=""
+        for _word in $_stage; do
+          if [ -n "$_next" ]; then _next=""; printf 'flag'; return 0; fi
+          case "$_word" in
+            -O|--remote-name) printf 'remote'; return 0 ;;
+            # --remote-name-all writes bodies to local files exactly as -O does.
+            # It has to be named BEFORE the generic `--*) continue` arm, which is
+            # what let it through: a long option is skipped wholesale there, so
+            # the `-*O*` cluster arm below never sees it.
+            --remote-name-all) printf 'remote'; return 0 ;;
+            -o|--output)      _next=1 ;;
+            --output=*)       printf 'flag';  return 0 ;;
+            --)               break ;;
+            --*)              continue ;;
+            -*O*)             printf 'remote'; return 0 ;;
+            -*o*)             printf 'flag';   return 0 ;;
+          esac
+        done
+        [ -z "$_next" ] || { printf 'flag'; return 0; }
+        _first=0
+        continue
+      fi
+      # Rule 2 -- an ALLOWLIST, not a denylist. Anything downstream of curl
+      # that is not `tee` consumes the body before the recorder sees it, and a
+      # fixed list of known transformers silently permits every consumer nobody
+      # thought to name (`python3 -m json.tool`, `xargs`, `cat`). `tee` is the
+      # one pass-through, and -- unlike a file-first sibling -- it earns no
+      # follow-on exemption here, because nothing reads the file it writes.
+      if [ "$_first" = "0" ] && [ "$_sawcurl" = "1" ] && [ -n "$_word" ] && [ "$_word" != "tee" ]; then
+        printf 'pipe'; return 0
+      fi
+      [ "$_first" = "1" ] && _first=0
+    done
+
+    [ "$_sawcurl" = "1" ] || continue
+    _target=$(gemini_guard_redirect_kind "$_seg")
+    [ -n "$_target" ] && { printf '%s' "$_target"; return 0; }
+  done < <(printf '%s' "$_segs")
+
+  return 0
+}
+
+# Emit the refusal and stop the call. Both documented BeforeTool forms, for the
+# reason given in the header: the stdout document AND exit 2 with the same text
+# on stderr.
+gemini_guard_refuse() {
+  local _kind="$1" _msg _doc
+  case "$_kind" in
+    flag)
+      _msg='Refused by Gemini BeforeTool deny: this writes the Stride response to a file with -o/--output, so it never reaches stdout. This port reads a response off the tool stdout and nowhere else -- there is no canonical response file here to fall back to -- so hiding it means no loop state is recorded, the AfterAgent gate cannot see that the task was completed, and changed_files lands empty, none of it with an error. Let the body print.'
+      ;;
+    remote)
+      _msg='Refused by Gemini BeforeTool deny: -O/--remote-name writes the Stride response to a local file named after the URL, so it never reaches stdout. This port reads a response off the tool stdout and nowhere else -- there is no canonical response file here to fall back to -- so hiding it means no loop state is recorded, the AfterAgent gate cannot see that the task was completed, and changed_files lands empty, none of it with an error. Let the body print.'
+      ;;
+    pipe)
+      _msg='Refused by Gemini BeforeTool deny: piping the Stride response into another command consumes it before this hook reads it. This port reads a response off the tool stdout and nowhere else, so a consumer leaves nothing behind: no loop state is recorded, the AfterAgent gate cannot see that the task was completed, and changed_files lands empty, silently. tee is the only pipe permitted here, because it passes stdout through unchanged; every other command is refused rather than matched against a list of known ones. To inspect a field, let the body print and read it from the response you already have.'
+      ;;
+    redirect)
+      _msg='Refused by Gemini BeforeTool deny: this redirect takes the Stride response off stdout. This port reads a response off the tool stdout and nowhere else, so redirecting it means no loop state is recorded, the AfterAgent gate cannot see that the task was completed, and changed_files lands empty, with no error anywhere. A stderr-only redirect (2>, 2>>, 2>&1) is fine and is NOT refused, because it leaves the body where this hook reads it. Let the body print.'
+      ;;
+    *) return 0 ;;
+  esac
+
+  if [ "${HAS_JQ:-false}" = "true" ]; then
+    _doc=$(printf '%s' "$_msg" | jq -Rsc '{decision:"deny",reason:.}' 2>/dev/null) || _doc=""
+  fi
+  if [ -z "${_doc:-}" ]; then
+    _doc="{\"decision\":\"deny\",\"reason\":\"${_msg//\"/\\\"}\"}"
+  fi
+  printf '%s\n' "$_doc"
+  printf '%s\n' "$_msg" >&2
+  exit 2
+}
+
 # Exit early if no phase argument or no .stride.md. Placed AFTER the
 # capture_changed_files, finalize_after_doing, run_stride_section,
 # response_has_after_goal, and hook-env forwarding definitions so tests can
@@ -1336,6 +1747,27 @@ else
 fi
 
 [ -n "$COMMAND" ] || exit 0
+
+# --- The stdout-preservation guard (W2183) --------------------------------
+# BEFORE the routing case, deliberately: routing maps only `pre` + /complete to
+# a hook name, so a claim or mark_reviewed curl exits at the `[ -n "$HOOK_NAME" ]`
+# gate below and would escape a guard placed after it -- yet both of those
+# responses are exactly what the recorder needs.
+#
+# STDOUT DISCIPLINE: Gemini parses this phase's stdout as one control document.
+# The guard writes to fd 1 exactly once, inside the refusal branch, and exits
+# immediately -- control never reaches routing, so it cannot collide with
+# anything the `pre` path emits later. On the permit path it writes NOTHING.
+if [ "$PHASE" = "pre" ]; then
+  # Pathname expansion off for the whole scan: word splitting is wanted, but a
+  # glob surviving quote blanking must not be expanded against whatever
+  # directory the hook happens to run in. A guard's verdict may not depend on
+  # the contents of a directory.
+  set -f
+  _gemini_guard_hit=$(gemini_guard_reason "$COMMAND")
+  set +f
+  [ -n "$_gemini_guard_hit" ] && gemini_guard_refuse "$_gemini_guard_hit"
+fi
 
 # --- Determine which Stride hook to run ---
 # Routing:

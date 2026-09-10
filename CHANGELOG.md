@@ -23,6 +23,159 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Added — the response has to reach stdout, because that is all this port reads (W2183)
+
+`extract_response_payload` reads the tool response and nothing else: this
+extension has no canonical response file and no route-id fallback, so the Bash
+tool's stdout is the ONE channel a Stride response can arrive on. A command that
+sent it anywhere else left nothing behind — no loop state recorded, the
+`AfterAgent` gate unable to see that the task was completed, `changed_files`
+empty — and every part of that was silent.
+
+A `BeforeTool` guard now refuses every such form. Refused: `-o`, `-oX`, `-sSo`,
+`--output`, `--output=` to **any** target including `/dev/null`;
+`-O`/`--remote-name`; **any** pipe whose next stage is not `tee`; and `>`, `>>`,
+`1>`, `>|`, `&>`, `>&2`. Permitted, with cases pinning each: a bare call, `tee`,
+every stderr-only redirect (`2>`, `2>>`, `2>&1`), and a `>` or `-o` sitting
+inside a quoted JSON payload.
+
+**The strictness is this port's own, not a copy.** A file-first sibling
+(`stride-copilot`) permits `--output <its canonical response file>` and allows a
+transformer after a `tee` into it, because its resolver reads that file back.
+Neither exemption exists here — there is no such file — so neither was imported,
+and the refusal messages deliberately name no path this port never touches. The
+`tee` allowance is pass-through only, and earns no follow-on exemption.
+
+The pipe rule is an **allowlist**: only `tee` passes. A fixed list of known
+transformers silently permits every consumer nobody thought to name, and
+`| python3 -m json.tool` or `| xargs echo` take the body away exactly as `| jq`
+does.
+
+### Scope, decided rather than assumed
+
+The routing below maps exactly three endpoints — `/api/tasks/claim`,
+`/api/tasks/<id>/complete`, `/api/tasks/<id>/mark_reviewed` — and all three carry
+the literal `/api/tasks/`, which is the prefilter. Two deliberate consequences:
+the creation POST to `$STRIDE_API_URL/api/tasks` has no trailing slash, is not
+routed and is not recorded, so hiding its response costs this port nothing and it
+stays out of scope; and the endpoint has to appear somewhere a request could
+actually go, so `curl https://example.test/x > /tmp/api/tasks/9/complete` is
+permitted — there the path is only where the output was going.
+
+### The contract, stated as honestly as it is known
+
+`docs/HOOK_RESEARCH.md` documents two equivalent forms for `BeforeTool`: exit 2
+with the message on stderr, and a stdout document carrying
+`{"decision":"deny",...}`. The guard emits **both**, because neither has been
+measured against a live Gemini CLI from this repository. That is a hedge, not a
+claim that either is settled. The token is `deny`; `block` belongs to other
+runtimes in this fleet and would mean no refusal at all here. Note the stop
+gate's own R1 caveat concerns `AfterAgent`, a different event, and is not
+restated as though it governed this one.
+
+### Added — the gate refuses a turn end while a claim is open
+
+The gate blocked on one condition: a recorded completion never followed up. A
+turn ending **mid-task** produced no completion, so no loop state, so a silent
+permit — invisible to the only condition it had.
+
+It now blocks on two, and they are the two sides of one file test, so they are
+mutually exclusive by construction and the gate still costs at most one API call.
+The new condition reads the **existing** `.stride-env-cache` — this extension
+already writes `TASK_IDENTIFIER` and `TASK_STATUS` there, so nothing new was
+invented — then confirms with a single projected request that the task is still
+`in_progress`, uncompleted, and inside its claim window. The budget is keyed
+`held:<IDENT>` so neither condition can spend the other's.
+
+**One hazard is written into the code rather than left to be inferred:** that
+cache is cleared only at `after_review`, so it survives a completion, and the
+local pre-filter alone cannot tell "claim open" from "completed, awaiting
+review". Mutual exclusion covers the ordinary case; `completed_by_id` is the real
+discriminator for the residual one — a completion whose loop state could not be
+written, which is exactly the case the recorder now announces.
+
+Measured while building this: the server does **not** flip a task's status when
+its claim expires. One was observed still answering `in_progress` with
+`completed_by_id` null twelve minutes past `claim_expires_at`; reaping is lazy.
+That is why expiry is checked as its own condition rather than inferred from
+status — status alone would refuse a turn end over a task another agent is now
+free to take.
+
+### Fixed — an absent completion body announces
+
+The recorder announced an unparsable response but returned in **silence** on an
+absent one, which is the wrong silence: unlike a 422, which arrives with a
+well-formed body that parses and correctly records nothing, an absent body means
+the response never reached the hook at all — so the completion may have landed
+while no loop state exists, and the gate reads a missing file as "nothing to gate
+on". It now says so, and names the consequence. The one silence kept is the
+parseable non-success body: there, nothing failed.
+
+### Both halves
+
+`hooks/stride-hook.sh` execs the PowerShell twin on native Windows **before** it
+reads stdin, so a bash-only guard would have left every Windows session
+unguarded while looking complete. The twin carries the guard, the announcement
+and the held-claim condition, with refusal and deny messages **byte-identical**
+to the bash half. `-ceq`/`-cmatch` throughout its option scan, because
+PowerShell's default matching is case-insensitive and `-o` versus `-O` is the
+whole of that rule's two kinds; and `InvariantCulture` on the expiry timestamp,
+because `:` is the culture-sensitive time-separator placeholder in a .NET custom
+format string and an ordinal comparison would otherwise read an expired claim as
+unexpired.
+
+### Fixed in review
+
+Four things review caught, each recorded because each is a shape an operator
+actually types:
+
+- **`--remote-name-all` was permitted.** It writes response bodies to local
+  files exactly as `-O` does, but a long option was skipped wholesale by the
+  generic `--*` arm before the cluster arm could see it. Named explicitly now,
+  on both halves.
+- **`2>&2` was refused.** That is a stderr-to-stderr redirect, so the body still
+  prints — refusing it is precisely the false positive the task's own pitfall
+  names. The cause was ordering: the `>&2` rule ran before the stderr-only
+  exemption. `>&2` with no fd word before it still moves stdout to stderr and is
+  still refused.
+- **The guard failed OPEN with no `awk`.** The blanking fallback returned its
+  input verbatim, which quietly permits. It now fails **closed** on a Stride
+  call, matching the convention these scripts already use for a missing
+  dependency — a loud refusal is recoverable; a missed hide loses the task.
+- **The twin's deny message was not byte-identical** after all: an ASCII hyphen
+  where the bash half has an em dash. The comment claiming byte-identity is what
+  made that worth finding.
+
+`README.md`'s stop-gate section also described only the first refusal condition,
+and one of its statements had become false: it offered "delete
+`.stride/.loop-state.json`" as an escape hatch, which is **inert** against a held
+claim — that condition fires precisely because the file is absent. The section now
+describes both conditions and says which hatch clears which.
+
+### Tests
+
+136 new assertions across a new Group 23 (the guard) and a new Group 24 (the
+held claim and the announcement), including a pwsh-gated cross-half parity block
+that SKIPs rather than passes when pwsh is absent. Group 24 exists because review
+found the gate's new refusal, its terminal-state permits and the announcement had
+no assertions at all — the first pass tested the guard thoroughly and left the
+other two acceptance criteria to a throwaway script.
+
+Group 23 covers including a pwsh-gated cross-half parity
+block that SKIPs rather than passes when pwsh is absent: every refusal and every
+permit, the near-misses, the `deny` token asserted as *not* `block`, the token
+never reaching either stream, the message naming this port's stdout-only reading
+and naming no canonical file, and the four trap classes a sibling port learned
+the hard way — a quoted URL, a multi-line payload, multi-byte prose, and the
+scan ceiling from both sides. **744 assertions pass** in about 60 seconds, and the PowerShell suite's 400 pass unchanged.
+
+The ceiling is 65,536 bytes: a completion call carries `completion_summary` and
+`completion_notes`, so an ordinary one is several KB, and a sibling measured a
+4,000-byte ceiling refusing the operator's own correct command. Above the
+ceiling the command is judged **whole** rather than segmented, because segmenting
+unblanked text shatters it on the `;` inside its own payload and drops a hiding
+flag into a fragment with no endpoint beside it.
+
 ### Added — the port now states how Gemini ends a turn, and anchors it (D306)
 
 This extension has shipped `hooks/stride-stop-gate.sh` and its PowerShell twin,
