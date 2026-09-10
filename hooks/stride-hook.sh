@@ -1360,6 +1360,17 @@ ${_key}=''"
 # Note the stop gate's own R1 caveat is about `AfterAgent`, a DIFFERENT event,
 # and is not restated as though it governed this one.
 #
+# CROSS-PORT AGREEMENT (W2184, which drove the three hardened guards over one
+# corpus rather than trusting three green suites). The three refuse and permit
+# the same set of shapes, with SIX deliberate exceptions -- all of them the
+# file-first exemption named two paragraphs up, and its mirror: `tee -a` onto
+# that canonical file is refused in stride-copilot, because appending corrupts
+# the single JSON document its Tier 1 parses, and permitted here, because `tee -a`
+# still passes the body through on the stdout this port reads. Those six are
+# contract differences, not drift, and stride-codex's guard header carries the
+# same record. Everything else agrees on both sides of the scan ceiling, which
+# is why the whole-mode scope cut below is written the way the siblings write it.
+#
 # The command text carries a Bearer token on every call this guard matches, so
 # nothing derived from it may reach a message, a log or a file: all four
 # messages are fixed literals selected by a `case`.
@@ -1624,10 +1635,24 @@ gemini_guard_reason() {
     # which is why `curl https://x/y > /tmp/api/tasks/9/complete` stays
     # permitted: the endpoint appears only where the output was going, never
     # where the request was.
-    case "$(gemini_guard_scope_text "$_seg_raw" "$_seg")" in
-      *"/api/tasks/"*) ;;
-      *) continue ;;
-    esac
+    # ...but only on the SEGMENTED path. In whole mode `$_seg` is the unblanked
+    # command, so a `>` inside a live payload reads as a real operator and the
+    # token after it -- possibly the URL carrying the only endpoint -- is blanked
+    # out of the scope view, which PERMITS the call on the one branch built to
+    # over-refuse. Above the ceiling the raw text is the scope text. W2184: all
+    # three hardened ports cut here, so an above-ceiling shape cannot be refused
+    # in one and permitted in another.
+    if [ "$_whole" = "1" ]; then
+      case "$_seg_raw" in
+        *"/api/tasks/"*) ;;
+        *) continue ;;
+      esac
+    else
+      case "$(gemini_guard_scope_text "$_seg_raw" "$_seg")" in
+        *"/api/tasks/"*) ;;
+        *) continue ;;
+      esac
+    fi
 
     _sawcurl=0
     _first=1

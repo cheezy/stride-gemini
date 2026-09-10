@@ -265,7 +265,12 @@ function Get-GeminiGuardReason {
     foreach ($pair in $pairs) {
         $segRaw = $pair[0]
         $seg    = $pair[1]
-        $scopeText = Get-GeminiGuardScopeText -Raw $segRaw -Blanked $seg
+        # In WHOLE mode $seg is the unblanked command, so a `>` in a live payload
+        # reads as an operator and the token after it -- possibly the URL -- would
+        # be blanked out of the scope view, permitting the call on the branch that
+        # exists to over-refuse. There the raw text is the scope text. The bash
+        # half cuts at the same place, as do both sibling ports (W2184).
+        $scopeText = if ($whole) { $segRaw } else { Get-GeminiGuardScopeText -Raw $segRaw -Blanked $seg }
         if ($scopeText -notmatch '/api/tasks/') { continue }
 
         $sawCurl = $false

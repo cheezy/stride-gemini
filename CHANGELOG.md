@@ -23,6 +23,35 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+### Fixed — the scan ceiling no longer loses endpoint scope (W2184)
+
+W2184 drove the three hardened guards over ONE corpus — the thing three green
+per-port suites structurally cannot do. This port's refusal set came back
+matching its siblings on every shape in that corpus, with one exception that the
+corpus itself could not reach and the comparison found anyway.
+
+Above `GEMINI_GUARD_MAX_SCAN` the guard goes stateless: there is no blanked
+operator view, so the raw text stands in for one. The scope test was still
+walking that view to blank redirect **targets** before asking whether the command
+names a routed endpoint — correct below the ceiling, wrong above it, because a
+`>` inside a live JSON payload is there indistinguishable from a real operator.
+The token after it got blanked out of the scope view, and when that token was the
+URL carrying the only `/api/tasks/` occurrence, the segment fell out of scope
+entirely and the call was **permitted** — a false permit on the one branch whose
+whole purpose is to over-refuse. Reachable with a padded payload containing an
+escaped `>`, which an ordinary large completion will not produce but nothing
+prevents.
+
+Whole mode now judges scope on the raw text entire. Both halves changed, and both
+sibling ports cut at the same place, so the verdict above the ceiling is a refusal
+in all three rather than a refusal in one and a permit in the others.
+
+The guard header also now records the cross-port comparison's outcome: six
+deliberate divergences remain across the fleet, every one of them the file-first
+exemption a sibling port owes its own resolver, or its mirror. They are contract
+differences, not drift, and recording them where the next reader of this guard
+will see them is what keeps a later "fix" from quietly normalising one away.
+
 ### Added — the response has to reach stdout, because that is all this port reads (W2183)
 
 `extract_response_payload` reads the tool response and nothing else: this

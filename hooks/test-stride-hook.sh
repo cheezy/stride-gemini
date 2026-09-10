@@ -5366,6 +5366,21 @@ else
   assert_eq "23ad: no refusal message interpolates the command" "0" \
     "$(printf '%s' "$G23_FN" | grep -c '\$COMMAND\|\$_raw\|\$_scan' || true)"
 
+  # --- 23ag: the scan ceiling must not lose endpoint SCOPE (W2184) ---------
+  # Above the ceiling there is no blanked operator view, so the raw text stands
+  # in for one -- and every `>` in the command then reads as a real redirect
+  # operator. The scope pass blanks the token after one, so a `>` ending an
+  # unquoted word blanks the URL itself: the segment falls out of scope and the
+  # call is PERMITTED, on the one branch whose whole purpose is to over-refuse.
+  # Whole mode now judges scope on the raw text entire, as both sibling ports do,
+  # so no above-ceiling shape is refused in one port and permitted in another.
+  g23_case "23ag: past the ceiling a bare > cannot blank the URL out of scope" \
+    "curl --data-urlencode n=a\\> $G23_U -d '{\"n\":\"$G23_HUGE\"}' -o r.json" deny
+  # Below the ceiling the same shape is permitted, identically in all three
+  # ports: the walk cannot tell a literal `>` in an unquoted word from an
+  # operator. A uniform limitation, recorded rather than pinned -- pinning the
+  # permit would cement a hole as a contract.
+
   # --- 23ae: CROSS-HALF PARITY. stride-hook.sh execs the .ps1 on native
   # Windows BEFORE it reads stdin, so the twin is the only guard that exists
   # there. SKIP, never PASS, when pwsh is absent.
@@ -5400,6 +5415,8 @@ else
     g23_parity "tee"                "curl -X PATCH $G23_C | tee r.json"  permit
     g23_parity "stderr only"        "curl $G23_C 2> err.log"             permit
     g23_parity "a quoted payload"   "curl $G23_C -d '{\"n\":\"a > b\"}'" permit
+    g23_parity "above-ceiling scope" \
+      "curl --data-urlencode n=a\\> $G23_U -d '{\"n\":\"$G23_HUGE\"}' -o r.json" deny
     g23_parity "the multi-line call" "$G23_ML"                           permit
     # The twin must use this port's token, not a sibling's.
     g23_ps_run "curl -X PATCH $G23_U -o r.json"
