@@ -5314,8 +5314,16 @@ else
     g23_bin=$(command -v "$g23_t" 2>/dev/null) && ln -sf "$g23_bin" "$g23_awk_dir/$g23_t"
   done
   jq -n --arg c "curl -X PATCH $G23_U" '{tool_input:{command:$c},cwd:"'"$g23_dir"'"}' \
-    | GEMINI_PROJECT_DIR="$g23_dir" PATH="$g23_awk_dir" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+    | GEMINI_PROJECT_DIR="$g23_dir" PATH="$g23_awk_dir" bash "$HOOK_SCRIPT" pre \
+      > "$g23_dir/na.out" 2> "$g23_dir/na.err"
   assert_exit "23ag: with no awk, a Stride call is refused rather than guessed" 2 "$?"
+  # And the reason must be TRUE. Reusing the -o kind told the operator the
+  # command wrote to a file when it may not have, and offered a remedy that
+  # could not clear the refusal.
+  assert_eq "23ag: and the reason names the missing dependency, not a flag" "yes" \
+    "$(grep -qF 'needs awk' "$g23_dir/na.err" && echo yes || echo no)"
+  assert_eq "23ag: and does not blame -o/--output" "0" \
+    "$(grep -c 'with -o/--output' "$g23_dir/na.err" || true)"
   rm -rf "$g23_awk_dir"
 
   # --- 23ab: the refusal document and its contract ------------------------

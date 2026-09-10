@@ -26,8 +26,9 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 ### Added — the response has to reach stdout, because that is all this port reads (W2183)
 
 `extract_response_payload` reads the tool response and nothing else: this
-extension has no canonical response file and no route-id fallback, so the Bash
-tool's stdout is the ONE channel a Stride response can arrive on. A command that
+extension has no canonical response file and no route-id fallback, so the stdout
+of a `run_shell_command` call -- this runtime's tool, and the literal matcher the
+`BeforeTool` entry carries -- is the ONE channel a Stride response can arrive on. A command that
 sent it anywhere else left nothing behind — no loop state recorded, the
 `AfterAgent` gate unable to see that the task was completed, `changed_files`
 empty — and every part of that was silent.
@@ -154,7 +155,7 @@ describes both conditions and says which hatch clears which.
 
 ### Tests
 
-136 new assertions across a new Group 23 (the guard) and a new Group 24 (the
+138 new assertions across a new Group 23 (the guard) and a new Group 24 (the
 held claim and the announcement), including a pwsh-gated cross-half parity block
 that SKIPs rather than passes when pwsh is absent. Group 24 exists because review
 found the gate's new refusal, its terminal-state permits and the announcement had
@@ -167,7 +168,7 @@ permit, the near-misses, the `deny` token asserted as *not* `block`, the token
 never reaching either stream, the message naming this port's stdout-only reading
 and naming no canonical file, and the four trap classes a sibling port learned
 the hard way — a quoted URL, a multi-line payload, multi-byte prose, and the
-scan ceiling from both sides. **744 assertions pass** in about 60 seconds, and the PowerShell suite's 400 pass unchanged.
+scan ceiling from both sides. **746 assertions pass** in about 60 seconds, and the PowerShell suite's 400 pass unchanged.
 
 The ceiling is 65,536 bytes: a completion call carries `completion_summary` and
 `completion_notes`, so an ordinary one is several KB, and a sibling measured a

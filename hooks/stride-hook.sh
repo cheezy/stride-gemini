@@ -1570,8 +1570,13 @@ gemini_guard_reason() {
 
   # No awk, no judgement. Fail CLOSED rather than let the blanking fallback
   # return its input verbatim and quietly permit -- see GEMINI_GUARD_HAS_AWK.
+  #
+  # Its OWN kind, not `flag`: reusing that one told the operator the command
+  # "writes the Stride response to a file with -o/--output" when it may have done
+  # no such thing, and offered a remedy that cannot clear the refusal. A refusal
+  # an operator cannot act on is barely better than a silent permit.
   if [ "${GEMINI_GUARD_HAS_AWK:-false}" != "true" ]; then
-    printf 'flag'
+    printf 'noawk'
     return 0
   fi
 
@@ -1696,6 +1701,9 @@ gemini_guard_refuse() {
       ;;
     redirect)
       _msg='Refused by Gemini BeforeTool deny: this redirect takes the Stride response off stdout. This port reads a response off the tool stdout and nowhere else, so redirecting it means no loop state is recorded, the AfterAgent gate cannot see that the task was completed, and changed_files lands empty, with no error anywhere. A stderr-only redirect (2>, 2>>, 2>&1) is fine and is NOT refused, because it leaves the body where this hook reads it. Let the body print.'
+      ;;
+    noawk)
+      _msg='Refused by Gemini BeforeTool deny: this hook needs awk to tell a Stride API call that hides its response from one that does not, and awk is not available here, so it cannot judge this command either way. It refuses rather than guesses, because this port reads a response off a run_shell_command call'"'"'s stdout and nowhere else -- a wrong guess in the other direction records no loop state and loses the task silently. Install awk, or set the command aside until it is available; nothing about the command itself is wrong.'
       ;;
     *) return 0 ;;
   esac
