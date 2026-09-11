@@ -202,6 +202,37 @@ function Get-GeminiGuardScopeText {
     return $out.ToString()
 }
 
+function Get-GeminiGuardEscapedGtBlanked {
+    # A `>` the shell never reads as an operator, neutralised so no walk reads it
+    # as one either. `--data-urlencode n=a\>` hands curl a LITERAL `>` and
+    # redirects nothing; the scope walk used to blank the word after it (the URL,
+    # when it stands there) and the redirect rule used to call it a redirect.
+    #
+    # ODD/EVEN is the distinction a `-replace` cannot make: `\>` is a literal
+    # `>`, while `\\>` is an escaped BACKSLASH followed by a real operator. Only
+    # an odd run of backslashes escapes the `>`, so the run has to be counted.
+    #
+    # Length-preserving, like every other pass over this view: the escaping
+    # backslash and the `>` become two spaces, so the raw/blanked pairing offsets
+    # still line up. Quote state is untouched -- a backslash is blanked only when
+    # a `>` follows it, never when a quote does.
+    param([string]$Text)
+    $out = [System.Text.StringBuilder]::new($Text)
+    $n = $Text.Length
+    $i = 0
+    while ($i -lt $n) {
+        if ($Text[$i] -ne '\') { $i++; continue }
+        $k = 0
+        while ($i + $k -lt $n -and $Text[$i + $k] -eq '\') { $k++ }
+        if (($k % 2) -eq 1 -and $i + $k -lt $n -and $Text[$i + $k] -eq '>') {
+            $out[$i + $k - 1] = ' '
+            $out[$i + $k]     = ' '
+        }
+        $i = $i + $k
+    }
+    return $out.ToString()
+}
+
 function Get-GeminiGuardRedirectKind {
     param([string]$Segment)
     $n = $Segment.Length
@@ -240,6 +271,9 @@ function Get-GeminiGuardReason {
     }
     # Neutralise the grouping characters, length-preservingly.
     $scan = ($scan -replace '[()`{}]', ' ')
+    # An escaped `>` goes the same way, but it needs a backslash-run count to
+    # tell `\>` from `\\>`, so it cannot ride on the -replace above.
+    $scan = Get-GeminiGuardEscapedGtBlanked -Text $scan
     if ($scan.Length -ne $joined.Length) { $scan = $joined; $whole = $true }
 
     $pairs = @()

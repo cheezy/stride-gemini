@@ -5366,6 +5366,23 @@ else
   assert_eq "23ad: no refusal message interpolates the command" "0" \
     "$(printf '%s' "$G23_FN" | grep -c '\$COMMAND\|\$_raw\|\$_scan' || true)"
 
+  # --- 23ah: an escaped `>` is not an operator -----------------------------
+  # `--data-urlencode n=a\>` passes a literal `>` to curl. Both walks over the
+  # operator view took it for syntax and erred in OPPOSITE directions -- the
+  # scope pass blanked the word after it, the redirect rule called it a redirect
+  # -- so the two cancelled. No verdict below changed when the neutralisation
+  # landed here; they are pinned because a cancellation is not a property to
+  # rely on, and because the sibling `stride` port had the same pair NOT cancel,
+  # where it was a measured false permit.
+  g23_case "23ah: an escaped > cannot hide a real redirect" \
+    "curl --data-urlencode n=a\\> $G23_U > r.json" deny
+  g23_case "23ah: an escaped > alone is not a redirect" \
+    "curl --data-urlencode n=a\\> $G23_C | tee r.json" permit
+  g23_case "23ah: and does not cost the call its scope" \
+    "curl --data-urlencode n=a\\> $G23_U -o r.json" deny
+  g23_case "23ah: an escaped BACKSLASH leaves the > an operator" \
+    "curl $G23_U --data-urlencode n=a\\\\> r.json" deny
+
   # --- 23ag: the scan ceiling must not lose endpoint SCOPE (W2184) ---------
   # Above the ceiling there is no blanked operator view, so the raw text stands
   # in for one -- and every `>` in the command then reads as a real redirect

@@ -21,6 +21,25 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Fixed — an escaped `>` is no longer read as an operator
+
+`--data-urlencode n=a\>` gives curl a literal `>` and redirects nothing. Both
+walks over the operator view read it as syntax and erred in opposite directions —
+the scope pass blanked the word after it, the redirect rule called it a redirect
+— so the two cancelled and neither reached a verdict.
+
+**No verdict in this port changed.** The new 23ah cases pin the shapes as they
+already behaved. The fix is still worth landing: a cancellation between two bugs
+is not a property to rely on, this port's guard is the strict one and has no
+file-first exemption to fall back on, and the sibling `stride` port had the same
+pair **not** cancel, where it was a measured false permit of a real redirect.
+
+One pass upstream of both walks, in both halves, counting the backslash run so
+`\>` (literal) is distinguished from `\\>` (an escaped backslash before a real
+operator). Length-preserving, so the raw/blanked offsets still hold.
+
 ## [1.49.0] - 2026-09-10
 
 ### Fixed — the scan ceiling no longer loses endpoint scope (W2184)

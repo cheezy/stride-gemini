@@ -1503,6 +1503,52 @@ gemini_guard_redirect_kind() {
   ' 2>/dev/null
 }
 
+# A `>` the shell never reads as an operator, neutralised so no rule reads it as
+# one either. `--data-urlencode n=a\>` carries a BACKSLASH-ESCAPED `>`: the shell
+# passes it to curl as a literal character and redirects nothing. Both walks over
+# the operator view used to take it for syntax, and the two failures point in
+# opposite directions:
+#
+#   * the scope pass blanks the word AFTER a redirect operator, so an escaped `>`
+#     standing just before the URL blanked the URL out of the scope view. With
+#     the only endpoint gone the segment fell out of scope and the call was
+#     PERMITTED -- on the one branch this port builds to over-refuse
+#   * the redirect rule read the same character as a stdout redirect and REFUSED
+#     a command that redirects nothing at all, which is the false positive that
+#     teaches an agent to route around the guard.
+#
+# Both are fixed here rather than in either walk, because one neutralisation
+# upstream cannot disagree with itself the way two independent escape tests can.
+# ODD/EVEN MATTERS: `\>` is a literal `>`, but `\\>` is an escaped BACKSLASH
+# followed by a real operator, so only an odd run of backslashes escapes the `>`.
+# Counting the run is the whole difference between this and a `tr`.
+#
+# Length-preserving like every other pass over this view: the escaping backslash
+# and the `>` become two spaces, so the raw/blanked pairing offsets still line up.
+# Quote state is untouched -- a backslash is only ever blanked when a `>` follows
+# it, never when a quote does.
+#
+# Fails OPEN to the unchanged text if awk is unavailable, matching the scope
+# helper beside it: that restores the previous behaviour rather than inventing a
+# new failure mode on a host the guard already could not fully serve.
+gemini_guard_blank_escaped_gt() {
+  GEMINI_EGT="$1" LC_ALL=C awk '
+    BEGIN {
+      s = ENVIRON["GEMINI_EGT"]; n = length(s); out = s; i = 1
+      while (i <= n) {
+        if (substr(s, i, 1) != "\\") { i++; continue }
+        k = 0
+        while (i + k <= n && substr(s, i + k, 1) == "\\") k++
+        if ((k % 2) == 1 && i + k <= n && substr(s, i + k, 1) == ">") {
+          out = substr(out, 1, i + k - 2) "  " substr(out, i + k + 1)
+        }
+        i = i + k
+      }
+      printf "%s", out
+    }
+  ' 2>/dev/null || printf '%s' "$1"
+}
+
 # Raw text with every REDIRECT TARGET blanked out, for the scope test only.
 #
 # Without this, `curl https://example.test/x > /tmp/api/tasks/9/complete` is
@@ -1610,6 +1656,11 @@ gemini_guard_reason() {
   # here is real syntax rather than payload. The raw view is untouched, so
   # endpoint scoping is unaffected.
   _scan=$(printf '%s' "$_scan" | LC_ALL=C tr '()`{}' '     ')
+
+  # An escaped `>` goes the same way, but it needs a backslash-run count to tell
+  # `\>` from `\\>`, so it cannot ride on the `tr` above. One pass, and both the
+  # scope test and the redirect rule inherit it.
+  _scan=$(gemini_guard_blank_escaped_gt "$_scan")
 
   # FAIL CLOSED on any length drift: scan the raw text as its own operator view.
   # Never pad or truncate to "repair" it -- that shifts the very offsets the
