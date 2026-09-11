@@ -440,6 +440,42 @@ match the `--arg` / `--argjson` substitutions above):
 }
 ```
 
+<!-- canon:stdout-preservation-guard v1 -->
+
+**Leave the response on stdout — this extension reads nothing else.**
+`extract_response_payload` in `hooks/stride-hook.sh` takes the reply from the
+`run_shell_command` tool response and from no other source. This port has no
+canonical response file and no route-id fallback, so the tool's stdout is the
+ONE channel a Stride response can arrive on. A command that sends it elsewhere
+leaves the recorder with nothing: no loop state is written, the `AfterAgent`
+gate cannot see that the task was completed, and `changed_files` lands empty.
+Every part of that is silent — there is no non-zero exit and no message to
+notice.
+
+The `BeforeTool` guard (`gemini_guard_reason`) therefore refuses **every** hiding
+form on a `/api/tasks/` call, with no exemption for any target: `-o` and
+`--output` wherever they point, `--output=`, `-O`, `--remote-name` and
+`--remote-name-all` — that last one named explicitly, because it writes bodies
+to local files exactly as `-O` does and once slipped through the generic
+long-option skip — and every stdout redirect. `tee` is the
+only pipe permitted, because it passes stdout through unchanged; any other
+consumer is refused outright rather than matched against a list of known-safe
+commands. Redirects of stderr alone are untouched — they leave the body where
+this extension reads it.
+
+**The strictness is this port's own, not a copy.** A file-first sibling permits
+`--output` to the canonical response file its resolver reads back, and allows a
+transformer after a `tee` into that file. Neither exemption transfers here,
+because there is no such file to read back — so do not import that reasoning,
+and do not reuse that port's messages, which name a path this port never
+touches.
+
+**Stated here, owned there — entry `stdout-preservation-guard` of
+`stride/docs/port-canon.md`.** The paragraphs above are a place the rule is
+spoken; the canon is where it lives. Move its substance and the bump is owed
+twice before anything ships: once in that entry, once on the
+`<!-- canon:stdout-preservation-guard ... -->` anchor overhead.
+
 When the `task-reviewer` custom agent was dispatched, `reviewer_result` carries the
 reviewer agent's **structured JSON block** (`schema_version`, `status`,
 `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]`, and the
