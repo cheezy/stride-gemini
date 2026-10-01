@@ -21,7 +21,7 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.50.0] - 2026-10-01
 
 ### Fixed — an escaped `>` is no longer read as an operator
 
@@ -39,6 +39,14 @@ pair **not** cancel, where it was a measured false permit of a real redirect.
 One pass upstream of both walks, in both halves, counting the backslash run so
 `\>` (literal) is distinguished from `\\>` (an escaped backslash before a real
 operator). Length-preserving, so the raw/blanked offsets still hold.
+
+### Added — the stdout-preservation rule stated here, with its anchor (W2187)
+
+This extension implements the guard but described it only in this changelog, which the canon does not treat as an edit site. It now has a markdown statement, written from its own machinery: `extract_response_payload` reads `.tool_response` and nothing else, so with no canonical response file and no route-id fallback the tool's stdout is the one channel a response can arrive on. That is why the refusal here is the strict one, with no exemption for any target. The statement and its canon anchor landed together.
+
+### Added — a release runbook for this repository (W2173)
+
+`RELEASE.md` records how this repository is released, as its own history shows it: which file holds the version, how the changelog is shaped (with any ambiguity in that history stated rather than resolved), whether a catalog must be synced afterwards, and the one-line check for whether the changelog's top heading is already tagged — the check that would have caught entries appended under a released heading. Documentation only; no behaviour changes.
 
 ## [1.49.0] - 2026-09-10
 
