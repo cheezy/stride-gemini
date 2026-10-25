@@ -1137,6 +1137,118 @@ write_loop_state() {
   return 0
 }
 
+# --- The claimed task file (W2463, the port of stride W2248) ----------------
+# A successful claim leaves the task's `data` object in
+# .stride/.task-<stem>.json, so the workflow can hand subagents a path instead
+# of retyping the task's fields into every dispatch prompt. A retyped copy
+# drifts; a file the hook wrote from the response cannot.
+#
+# Everything in the file is task free text. Readers treat it as data. Nothing
+# here evaluates it, and the file NAME is never taken from free text without
+# passing the anchored charset test below.
+
+# The file name stem for a task object: its identifier when that is 1-64
+# characters of [A-Za-z0-9_-] (a whole-string \A...\z test - `^...$` in jq lets
+# a trailing newline through), otherwise its non-negative integer id, otherwise
+# nothing at all.
+task_file_stem() { # $1 = task object JSON -> stem on stdout, or empty
+  printf '%s' "${1:-}" | jq -r '
+    if (.identifier | type) == "string"
+       and (.identifier | test("\\A[A-Za-z0-9_-]{1,64}\\z")) then .identifier
+    elif (.id | type) == "number" and .id >= 0 and (.id | floor) == .id
+       then (.id | tostring)
+    elif (.id | type) == "string" and (.id | test("\\A[0-9]{1,20}\\z")) then .id
+    else empty end' 2>/dev/null
+}
+
+# Does the claim response belong to the claim this command asked for?
+#
+# The command text arrives on STDIN, never as an argument: it carries the
+# Authorization header, and argv is visible to every local process (and is
+# length-capped). $1 is the task object; $2 is "require" when the command MUST
+# name the identifier it asked for.
+#
+# The requested identifier is read from the claim body in the command. Two
+# spellings are recognised, in order: the plain `"identifier":"W1"` of a
+# single-quoted -d body, and the backslash-escaped `\"identifier\":\"W1\"` of a
+# double-quoted one. The escaped spelling is consulted only when the plain one
+# is absent, because inside a plain body an escaped key is just text inside
+# some other string value (a before_doing_result output, say) and must not
+# count as a second request. Within the spelling in use, EVERY occurrence of
+# the key has to carry a clean string value equal to the response's
+# identifier; a null, a number or a value that cannot be read cleanly leaves
+# the claim unproven rather than letting it slip through.
+#
+# When the command names no identifier at all (a next-available claim, or a
+# body sent with -d @file) the response itself is the proof, and that holds by
+# construction in this port: TASK_JSON is only ever parsed from THIS call's own
+# tool_response, and there is no response file that outlives a call. The one
+# exception is the persisted-output path, whose file path is read out of
+# response text; there the caller passes "require".
+claim_identity_proven() {
+  local _rid _need="${2:-}"
+  _rid=$(printf '%s' "${1:-}" | jq -c '.identifier' 2>/dev/null) || return 1
+  [ -n "$_rid" ] || return 1
+  jq -Rse --argjson rid "$_rid" --arg need "$_need" '
+    def tier(key; val):
+      ([scan(key)] | length) as $k
+      | if $k == 0 then null
+        else ([scan(val) | .[0]]) as $v
+          | (($v | length) == $k and ($v | all(. == $rid)))
+        end;
+    tier("\"identifier\"[ \t\r\n]*:";
+         "\"identifier\"[ \t\r\n]*:[ \t\r\n]*\"([^\"\\\\]*)\"") as $plain
+    | if $plain != null then $plain
+      else
+        tier("\\\\\"identifier\\\\\"[ \t\r\n]*:";
+             "\\\\\"identifier\\\\\"[ \t\r\n]*:[ \t\r\n]*\\\\\"([^\"\\\\]*)\\\\\"") as $esc
+        | if $esc != null then $esc
+          else ($need != "require")
+          end
+      end' > /dev/null 2>&1
+}
+
+# Write the task object to .stride/.task-<stem>.json. Same mechanics as
+# write_loop_state above - staged beside the destination so the rename stays on
+# one filesystem, no temp survives any failure, a destination that is not a
+# regular file is refused, and nothing here can fail the claim. Writes nothing
+# to stdout: Gemini parses that stream as the hook's control document.
+write_task_file() {
+  local _json _stem _dest _tmp
+  # Compact it. The data-wrapped shapes are already `jq -c`, but a bare task
+  # object arrives as the response text exactly as the server sent it.
+  _json=$(printf '%s' "${1:-}" | jq -c '.' 2>/dev/null)
+  [ -n "$_json" ] || return 0
+  _stem=$(task_file_stem "$_json")
+  if [ -z "$_stem" ]; then
+    printf 'stride-hook: the claimed task has no usable identifier or id; not writing the task file\n' >&2
+    return 0
+  fi
+  _dest="$PROJECT_DIR/.stride/.task-$_stem.json"
+  if [ -e "$_dest" ] && [ ! -f "$_dest" ]; then
+    printf 'stride-hook: task-file path is not a regular file; not writing the task file\n' >&2
+    return 0
+  fi
+  mkdir -p "$PROJECT_DIR/.stride" 2>/dev/null || {
+    printf 'stride-hook: could not create .stride/ for the task file; continuing\n' >&2
+    return 0
+  }
+  _tmp=$(mktemp "$PROJECT_DIR/.stride/task-file.XXXXXX" 2>/dev/null) || {
+    printf 'stride-hook: could not stage the task file; continuing\n' >&2
+    return 0
+  }
+  if printf '%s\n' "$_json" > "$_tmp" 2>/dev/null; then
+    mv -f "$_tmp" "$_dest" 2>/dev/null || {
+      printf 'stride-hook: could not move the task file into place; continuing\n' >&2
+      rm -f "$_tmp" 2>/dev/null
+    }
+  else
+    printf 'stride-hook: could not write the task file; continuing\n' >&2
+    rm -f "$_tmp" 2>/dev/null
+  fi
+  return 0
+}
+
 # Self-gates on before_review - the hook that fires AFTER a /complete succeeds
 # (the routing below maps post + /api/tasks/:id/complete to it). Never writes
 # to stdout: Gemini CLI parses this script's stdout as one JSON document, so
@@ -1895,6 +2007,8 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
   RESPONSE=""
   TASK_JSON=""
   INNER=""
+  # (W2463) Set when TASK_JSON came from the persisted-output file (Shape 4).
+  _task_from_persisted=""
 
   if [ "$HAS_JQ" = "true" ]; then
   RESPONSE=$(echo "$INPUT" | jq -r '.tool_response // ""' 2>/dev/null || echo "")
@@ -1946,6 +2060,7 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
           elif [ -n "$_persist_json" ] && echo "$_persist_json" | jq -e '.id' > /dev/null 2>&1; then
             TASK_JSON="$_persist_json"
           fi
+          [ -n "$TASK_JSON" ] && _task_from_persisted=1
         fi
       fi
     fi
@@ -1954,6 +2069,19 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
   fi
 
   if [ -n "$TASK_JSON" ]; then
+    # (W2463) The claimed task file, written only when this response is proven
+    # to belong to the claim this command made (see claim_identity_proven). A
+    # persisted-output response must also match an identifier the command
+    # named, because that file's path was read out of response text. The
+    # identity check is this port's counterpart of stride's D226 gate.
+    _task_file_need=""
+    [ -n "$_task_from_persisted" ] && _task_file_need="require"
+    if printf '%s' "$COMMAND" | claim_identity_proven "$TASK_JSON" "$_task_file_need"; then
+      write_task_file "$TASK_JSON" > /dev/null
+    else
+      printf 'stride-hook: the claim response is not proven to be the task this claim asked for; not writing the task file\n' >&2
+    fi
+
     # Identity lines ONLY — no TASK_BASE_REF / TASK_BASE_REF_TRUSTED
     # (finalize_before_doing writes those post-section); overwriting the whole
     # cache here also strips any inherited base/trust marker.

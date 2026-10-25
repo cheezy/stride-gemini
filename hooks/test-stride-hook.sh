@@ -5663,6 +5663,274 @@ else
 fi
 
 # ============================================================
+# Test Group 34: the claimed task file (W2463)
+# ============================================================
+# A successful claim leaves the response's `data` object in
+# .stride/.task-<stem>.json. Group number 34 is the one the goal reserved for
+# this task when it was filed; the PowerShell mirror is Group 20.
+echo ""
+echo "=== Test Group 34: the claimed task file (W2463) ==="
+
+# The Step 7 doc assertion needs no jq, so it runs even when the rest skips.
+G34_SKILL="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G34_STEP7=$(sed -n '/^## Step 7: Complete the Task/,/^## Step 8:/p' "$G34_SKILL" 2>/dev/null)
+assert_contains "34l: Step 7 says to delete the task file" 'Once the completion returns a 2xx, delete the claimed task file' "$G34_STEP7"
+assert_contains "34l: Step 7 deletes it with rm -f" 'rm -f "$PROJECT_DIR/.stride/.task-$IDENTIFIER.json"' "$G34_STEP7"
+assert_contains "34l: Step 7 deletes it only after a 2xx" 'Only after a 2xx' "$G34_STEP7"
+
+if ! command -v jq > /dev/null 2>&1; then
+  echo "  SKIP: Test Group 34 (jq not available - the write self-gates on HAS_JQ)"
+else
+  G34_STUB=$(mktemp -d "$TMPDIR_TEST/g34stub.XXXXXX")
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$G34_STUB/curl"
+  chmod +x "$G34_STUB/curl"
+  # A second stub directory whose mv always fails, for the rename-failure case.
+  G34_MVSTUB=$(mktemp -d "$TMPDIR_TEST/g34mv.XXXXXX")
+  cp "$G34_STUB/curl" "$G34_MVSTUB/curl"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$G34_MVSTUB/mv"
+  chmod +x "$G34_MVSTUB/mv"
+
+  G34_OUT="$TMPDIR_TEST/g34.out"
+  G34_ERR="$TMPDIR_TEST/g34.err"
+
+  g34_proj() {  # a project with empty sections and NO .stride/ yet
+    local d
+    d=$(mktemp -d "$TMPDIR_TEST/g34.XXXXXX")
+    printf '## before_doing\n```bash\n```\n\n## before_review\n```bash\n```\n' > "$d/.stride.md"
+    printf '%s' "$d"
+  }
+  g34_input() {  # $1=command  $2=raw tool_response.stdout
+    jq -nc --arg c "$1" --arg r "$2" \
+      '{session_id: "s34", tool_input: {command: $c}, tool_response: {stdout: $r}}'
+  }
+  g34_run() {  # $1=project  $2=input  [$3=stub dir]; stdout -> $G34_OUT, stderr -> $G34_ERR
+    printf '%s' "$2" | GEMINI_PROJECT_DIR="$1" PATH="${3:-$G34_STUB}:$PATH" \
+      bash "$HOOK_SCRIPT" post > "$G34_OUT" 2> "$G34_ERR"
+  }
+  g34_tasks() {  # the .task-* names in $1/.stride, one line
+    ls -A "$1/.stride" 2>/dev/null | grep '^\.task-' | tr '\n' ' ' | sed 's/ $//'
+  }
+  g34_temps() {
+    find "$1/.stride" -name 'task-file.*' 2>/dev/null | wc -l | tr -d ' '
+  }
+  g34_seed() {  # an earlier task file that a no-write path must leave alone
+    mkdir -p "$1/.stride"
+    printf 'EARLIER\n' > "$1/.stride/.task-W123.json"
+  }
+
+  G34_AUTH='-H "Authorization: Bearer SECRETVALUE"'
+  G34_URL='https://stride.invalid/api/tasks/claim'
+  G34_INLINE="curl -sS -X POST $G34_URL $G34_AUTH -H 'Content-Type: application/json' -d '{\"identifier\":\"W123\",\"agent_name\":\"Gemini CLI\",\"before_doing_result\":{\"exit_code\":0,\"output\":\"ok\",\"duration_ms\":0}}'"
+  G34_FILE="curl -sS -X POST $G34_URL $G34_AUTH -d @claim.json"
+  g34_cmd() {  # an inline claim asking for $1
+    printf "curl -sS -X POST %s %s -d '{\"identifier\":\"%s\"}'" "$G34_URL" "$G34_AUTH" "$1"
+  }
+  g34_dq() {  # a double-quoted body, so the key arrives backslash-escaped
+    printf 'curl -sS -X POST %s %s -d "{\\"identifier\\":\\"%s\\"}"' "$G34_URL" "$G34_AUTH" "$1"
+  }
+  G34_OK=$(jq -nc '{data: {id: 123, identifier: "W123",
+    title: "Say \"hi\"\nthen café — ok", acceptance_criteria: "one\ntwo",
+    key_files: [{file_path: "a/b.ex", position: 0}], needs_review: false,
+    inserted_at: "2026-10-02T14:20:41", claim_expires_at: "2026-10-02T17:00:33Z"},
+    hook: {name: "before_doing"}}')
+  G34_WANT="$TMPDIR_TEST/g34.want"
+  printf '%s\n' "$(printf '%s' "$G34_OK" | jq -c '.data')" > "$G34_WANT"
+  g34_task() {  # a response for identifier $1 and id $2 (id is raw JSON)
+    jq -nc --arg i "$1" --argjson n "$2" '{data: {id: $n, identifier: $i, title: "t"}}'
+  }
+
+  # 34a: the happy path - the file is the data object, byte for byte
+  D=$(g34_proj); g34_run "$D" "$(g34_input "$G34_INLINE" "$G34_OK")"; RC=$?
+  F="$D/.stride/.task-W123.json"
+  assert_exit "34a: the claim hook exits 0" 0 "$RC"
+  assert_eq "34a: the task file is written" "present" "$([ -f "$F" ] && echo present || echo absent)"
+  assert_eq "34a: its bytes are the compact data object plus a newline" "same" \
+    "$(cmp -s "$G34_WANT" "$F" && echo same || echo differ)"
+  assert_eq "34a: it parses to the response's data object" \
+    "$(printf '%s' "$G34_OK" | jq -S '.data')" "$(jq -S '.' "$F" 2>/dev/null)"
+  assert_eq "34a: multi-line acceptance criteria survive" "one
+two" "$(jq -r '.acceptance_criteria' "$F" 2>/dev/null)"
+  assert_eq "34a: no staging temp is left" "0" "$(g34_temps "$D")"
+  assert_eq "34a: the hook wrote nothing to stdout" "0" "$(wc -c < "$G34_OUT" | tr -d ' ')"
+  assert_eq "34a: no credential reaches the file" "0" \
+    "$(grep -c 'Authorization\|SECRETVALUE' "$F" || true)"
+  assert_contains "34a: the env cache is still written" "TASK_IDENTIFIER='W123'" \
+    "$(cat "$D/.stride-env-cache" 2>/dev/null)"
+
+  # 34b: an identifier failing the anchored rule falls back to the integer id
+  for G34_BAD in '../../x' '.' 'a.b' 'a/b' 'W1
+' "$(printf '%065d' 0 | tr 0 A)" ''; do
+    D=$(g34_proj); g34_run "$D" "$(g34_input "$G34_FILE" "$(g34_task "$G34_BAD" 123)")"
+    assert_eq "34b: identifier $(printf '%q' "$G34_BAD" | cut -c1-20) falls back to the id" ".task-123.json" "$(g34_tasks "$D")"
+    assert_eq "34b: and nothing lands outside .stride/" "0" \
+      "$(find "$D" -name 'x.json' -o -name '.task-*' -not -path "$D/.stride/*" | wc -l | tr -d ' ')"
+  done
+  G34_64=$(printf '%064d' 0 | tr 0 A)
+  D=$(g34_proj); g34_run "$D" "$(g34_input "$G34_FILE" "$(g34_task "$G34_64" 123)")"
+  assert_eq "34b2: a 64-character identifier is used as-is" ".task-$G34_64.json" "$(g34_tasks "$D")"
+  D=$(g34_proj); g34_run "$D" "$(g34_input "$G34_FILE" '{"data":{"id":"123","identifier":"x/y"}}')"
+  assert_eq "34b3: a digit-string id is a valid fallback" ".task-123.json" "$(g34_tasks "$D")"
+  for G34_ID in '"7a"' '-1' '1.5'; do
+    # Built with jq, not an escaped string: a quoted {a,b} inside $( ) inside
+    # double quotes is brace-expanded by bash, which silently splits the body.
+    G34_BODY=$(jq -nc --argjson n "$G34_ID" '{data: {id: $n, identifier: "x/y"}}')
+    D=$(g34_proj); g34_run "$D" "$(g34_input "$G34_FILE" "$G34_BODY")"
+    assert_eq "34b4: id $G34_ID with a bad identifier writes nothing" "" "$(g34_tasks "$D")"
+    assert_contains "34b4: and says so on stderr" "no usable identifier or id" "$(cat "$G34_ERR")"
+  done
+
+  # 34c/34d: non-2xx, unparsable and truncated bodies write nothing, and an
+  # existing file is left exactly as it was
+  for G34_BODY in "{\"error\":\"Task 'W123' is not available\"}" '{"error":"Task not found"}' \
+                  '{"errors":{"identifier":["already claimed"]}}' 'not json' \
+                  '{"data":{"id":123,"identifier":"W123","title":"tru'; do
+    D=$(g34_proj); g34_seed "$D"
+    g34_run "$D" "$(g34_input "$G34_INLINE" "$G34_BODY")"; RC=$?
+    assert_exit "34c: body $(printf '%s' "$G34_BODY" | cut -c1-24) still exits 0" 0 "$RC"
+    assert_eq "34c: and leaves the earlier file untouched" "EARLIER" "$(cat "$D/.stride/.task-W123.json")"
+    assert_eq "34c: and adds no other task file" ".task-W123.json" "$(g34_tasks "$D")"
+  done
+
+  # 34e: a response that does not prove the identity the command asked for
+  D=$(g34_proj); g34_seed "$D"; g34_run "$D" "$(g34_input "$(g34_cmd W999)" "$G34_OK")"
+  assert_eq "34e: a W999 claim answered with W123 writes nothing" "EARLIER" "$(cat "$D/.stride/.task-W123.json")"
+  assert_contains "34e: and says so on stderr" "not proven to be the task this claim asked for" "$(cat "$G34_ERR")"
+  assert_eq "34e: and writes nothing to stdout" "0" "$(wc -c < "$G34_OUT" | tr -d ' ')"
+  G34_CMD="curl -X POST $G34_URL -d '{\"identifier\":\"W123\",\"identifier\":\"W999\"}'"
+  D=$(g34_proj); g34_run "$D" "$(g34_input "$G34_CMD" "$G34_OK")"
+  assert_eq "34e: two different requested identifiers write nothing" "" "$(g34_tasks "$D")"
+  D=$(g34_proj); g34_run "$D" "$(g34_input "curl -X POST $G34_URL -d '{\"identifier\":null}'" "$G34_OK")"
+  assert_eq "34e: a null requested identifier writes nothing" "" "$(g34_tasks "$D")"
+  D=$(g34_proj); g34_run "$D" "$(g34_input "curl -X POST $G34_URL -d '{\"identifier\":\"w123\"}'" "$G34_OK")"
+  assert_eq "34e: the comparison is case-sensitive" "" "$(g34_tasks "$D")"
+  D=$(g34_proj); g34_run "$D" "$(g34_input "$(g34_dq W999)" "$G34_OK")"
+  assert_eq "34e: an escaped W999 request writes nothing" "" "$(g34_tasks "$D")"
+  D=$(g34_proj); g34_run "$D" "$(g34_input "$(g34_dq W123)" "$G34_OK")"
+  assert_eq "34e: an escaped W123 request writes the file" ".task-W123.json" "$(g34_tasks "$D")"
+  G34_CMD="curl -X POST $G34_URL -d '{\"identifier\":\"W123\",\"before_doing_result\":{\"output\":\"{\\\"identifier\\\":\\\"W999\\\"}\"}}'"
+  D=$(g34_proj); g34_run "$D" "$(g34_input "$G34_CMD" "$G34_OK")"
+  assert_eq "34e: an escaped key inside a plain body's string value is not a request" ".task-W123.json" "$(g34_tasks "$D")"
+  D=$(g34_proj); g34_run "$D" "$(g34_input "$(g34_cmd W123)" '{"data":{"id":123,"title":"no identifier"}}')"
+  assert_eq "34e: a response with no identifier cannot match a named request" "" "$(g34_tasks "$D")"
+
+  # 34f: a body sent from a file names no identifier; the response is the proof
+  D=$(g34_proj); g34_run "$D" "$(g34_input "$G34_FILE" "$G34_OK")"
+  assert_eq "34f: a -d @file claim writes the file" "same" \
+    "$(cmp -s "$G34_WANT" "$D/.stride/.task-W123.json" && echo same || echo differ)"
+
+  # 34g: rename and staging failures never fail the claim and leave no temp
+  D=$(g34_proj); g34_run "$D" "$(g34_input "$G34_INLINE" "$G34_OK")" "$G34_MVSTUB"; RC=$?
+  assert_exit "34g1: a failing mv still exits 0" 0 "$RC"
+  assert_eq "34g1: no task file is written" "" "$(g34_tasks "$D")"
+  assert_eq "34g1: no staging temp is left" "0" "$(g34_temps "$D")"
+  assert_contains "34g1: the failure is on stderr" "could not move the task file into place; continuing" "$(cat "$G34_ERR")"
+  assert_eq "34g1: and nothing is on stdout" "0" "$(wc -c < "$G34_OUT" | tr -d ' ')"
+  D=$(g34_proj); mkdir -p "$D/.stride/.task-W123.json"
+  g34_run "$D" "$(g34_input "$G34_INLINE" "$G34_OK")"
+  assert_contains "34g2: a directory at the destination is refused" "not a regular file" "$(cat "$G34_ERR")"
+  assert_eq "34g2: the directory is left empty" "dir-empty" \
+    "$([ -d "$D/.stride/.task-W123.json" ] && [ -z "$(ls -A "$D/.stride/.task-W123.json")" ] && echo dir-empty || echo changed)"
+  assert_eq "34g2: no staging temp is left" "0" "$(g34_temps "$D")"
+  if [ "$(id -u)" != "0" ]; then
+    D=$(g34_proj); mkdir -p "$D/.stride"; chmod 500 "$D/.stride"
+    g34_run "$D" "$(g34_input "$G34_INLINE" "$G34_OK")"; RC=$?
+    chmod 755 "$D/.stride"
+    assert_exit "34g3: a read-only .stride/ still exits 0" 0 "$RC"
+    assert_eq "34g3: nothing is written" "" "$(g34_tasks "$D")"
+    assert_eq "34g3: no staging temp is left" "0" "$(g34_temps "$D")"
+  else
+    echo "  SKIP: 34g3 (running as root - permissions are not enforced)"
+  fi
+  if command -v chflags > /dev/null 2>&1; then
+    # A real rename failure: an immutable destination refuses the replace.
+    D=$(g34_proj); g34_seed "$D"; chflags uchg "$D/.stride/.task-W123.json"
+    g34_run "$D" "$(g34_input "$G34_INLINE" "$G34_OK")"; RC=$?
+    chflags nouchg "$D/.stride/.task-W123.json"
+    assert_exit "34g4: an immutable destination still exits 0" 0 "$RC"
+    assert_eq "34g4: the earlier file is intact" "EARLIER" "$(cat "$D/.stride/.task-W123.json")"
+    assert_eq "34g4: no staging temp is left" "0" "$(g34_temps "$D")"
+  fi
+
+  # 34h: .stride/ missing at claim time is created
+  D=$(g34_proj); g34_run "$D" "$(g34_input "$G34_INLINE" "$G34_OK")"
+  assert_eq "34h: .stride/ is created for the file" ".task-W123.json" "$(g34_tasks "$D")"
+
+  # 34i: two claims in a row each write their own file; a re-claim replaces
+  D=$(g34_proj)
+  g34_run "$D" "$(g34_input "$G34_INLINE" "$G34_OK")"
+  g34_run "$D" "$(g34_input "$(g34_cmd W124)" "$(g34_task W124 124)")"
+  assert_eq "34i: both task files exist" ".task-W123.json .task-W124.json" "$(g34_tasks "$D")"
+  assert_eq "34i: the first is untouched by the second" "same" \
+    "$(cmp -s "$G34_WANT" "$D/.stride/.task-W123.json" && echo same || echo differ)"
+  printf 'OLD CONTENT\n' > "$D/.stride/.task-W123.json"
+  g34_run "$D" "$(g34_input "$G34_INLINE" "$G34_OK")"
+  assert_eq "34i2: a re-claim replaces the old file" "same" \
+    "$(cmp -s "$G34_WANT" "$D/.stride/.task-W123.json" && echo same || echo differ)"
+  assert_eq "34i2: no staging temp is left" "0" "$(g34_temps "$D")"
+
+  # 34j: the persisted-output path is the only source of TASK_JSON
+  D=$(g34_proj); P="$D/persisted output.json"
+  printf '%s' "$G34_OK" | jq '.' > "$P"
+  g34_run "$D" "$(g34_input "$G34_INLINE" "Output too large. Full output saved to: $P")"
+  assert_eq "34j: the persisted response writes the compact data object" "same" \
+    "$(cmp -s "$G34_WANT" "$D/.stride/.task-W123.json" && echo same || echo differ)"
+  D=$(g34_proj); P="$D/persisted.json"; printf '%s' "$G34_OK" > "$P"
+  g34_run "$D" "$(g34_input "$G34_FILE" "Output too large. Full output saved to: $P")"
+  assert_eq "34j: a persisted response needs a named identifier to match" "" "$(g34_tasks "$D")"
+  D=$(g34_proj); g34_seed "$D"
+  g34_run "$D" "$(g34_input "$G34_INLINE" "Output too large. Full output saved to: $D/missing.json")"
+  assert_eq "34j: a missing persisted file writes nothing" "EARLIER" "$(cat "$D/.stride/.task-W123.json")"
+
+  # 34k: a bare task object (no data wrapper) is written compact
+  D=$(g34_proj)
+  g34_run "$D" "$(g34_input "$G34_FILE" '{ "id": 79, "identifier": "W5003", "title": "spaced out" }')"
+  assert_eq "34k: a bare object is written compact" '{"id":79,"identifier":"W5003","title":"spaced out"}' \
+    "$(cat "$D/.stride/.task-W5003.json" 2>/dev/null)"
+
+  # 34l: claim then complete through the hook - the file lives between them
+  # (the hook never deletes it; Step 7 does, asserted above)
+  D=$(g34_proj); g34_run "$D" "$(g34_input "$G34_INLINE" "$G34_OK")"
+  assert_eq "34l: the file exists after the claim" ".task-W123.json" "$(g34_tasks "$D")"
+  g34_run "$D" "$(g34_input 'curl -X PATCH https://stride.invalid/api/tasks/123/complete' \
+    '{"data":{"id":123,"identifier":"W123","needs_review":false}}')"; RC=$?
+  assert_exit "34l: the completion hook exits 0" 0 "$RC"
+  assert_eq "34l: the file is still there for Step 7 to delete" "same" \
+    "$(cmp -s "$G34_WANT" "$D/.stride/.task-W123.json" && echo same || echo differ)"
+
+  # 34m: both halves write the same file names and the same bytes
+  if command -v pwsh > /dev/null 2>&1; then
+    G34_PS="$SCRIPT_DIR/stride-hook.ps1"
+    g34_both() {  # $1=label $2=command $3=stdout
+      local in db dp names_b names_p f same=yes
+      in=$(g34_input "$2" "$3")
+      db=$(g34_proj); dp=$(g34_proj)
+      printf '%s' "$in" | GEMINI_PROJECT_DIR="$db" PATH="$G34_STUB:$PATH" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+      printf '%s' "$in" | GEMINI_PROJECT_DIR="$dp" PATH="$G34_STUB:$PATH" pwsh -NoProfile -File "$G34_PS" post > /dev/null 2>&1
+      names_b=$(g34_tasks "$db"); names_p=$(g34_tasks "$dp")
+      assert_eq "34m: $1 - same task-file names in both halves" "$names_b" "$names_p"
+      for f in $names_b; do
+        cmp -s "$db/.stride/$f" "$dp/.stride/$f" || same=no
+      done
+      assert_eq "34m: $1 - same bytes in both halves" "yes" "$same"
+      G34_LAST_PS="$dp"
+    }
+    g34_both "happy path" "$G34_INLINE" "$G34_OK"
+    assert_eq "34m: the PowerShell file has no byte-order mark" "no-bom" \
+      "$([ "$(head -c 3 "$G34_LAST_PS/.stride/.task-W123.json" | od -An -tx1 | tr -d ' ')" = "efbbbf" ] && echo bom || echo no-bom)"
+    g34_both "bad identifier" "$G34_FILE" "$(g34_task '../../x' 123)"
+    g34_both "identity mismatch" "$(g34_cmd W999)" "$G34_OK"
+    g34_both "422 body" "$G34_INLINE" "{\"error\":\"Task 'W123' is not available\"}"
+    g34_both "truncated body" "$G34_INLINE" '{"data":{"id":123,"identifier":"W123","title":"tru'
+    g34_both "-d @file claim" "$G34_FILE" "$G34_OK"
+    g34_both "bare object" "$G34_FILE" '{"id":79,"identifier":"W5003","title":"spaced out"}'
+    D=$(g34_proj); P="$D/persisted.json"; printf '%s' "$G34_OK" | jq '.' > "$P"
+    g34_both "persisted output" "$G34_INLINE" "Output too large. Full output saved to: $P"
+  else
+    echo "  SKIP: 34m (pwsh not available - the cross-half comparison needs it)"
+  fi
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

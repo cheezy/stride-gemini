@@ -3103,6 +3103,292 @@ Stop-G15Listener $job
 Assert-Eq "15q: a 10-digit override also falls back to the default of 2" 2 $q2
 
 # ============================================================
+# Test Group 20: the claimed task file (W2463)
+# ============================================================
+# Mirror of test-stride-hook.sh Test Group 34 (that suite also compares the two
+# halves byte for byte, in 34m). The fixture here is ASCII on purpose: the
+# stdin encoding Invoke-HookScript inherits is not dependable on every
+# platform, and 34m already carries the non-ASCII bytes through both halves.
+Write-Host ""
+Write-Host "=== Test Group 20: the claimed task file (W2463) ==="
+
+$g20IsWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+    [System.Runtime.InteropServices.OSPlatform]::Windows)
+$g20OldPath = $env:PATH
+$g20Stub = Join-Path $TmpDir 'g20stub'
+New-Item -ItemType Directory -Path $g20Stub -Force | Out-Null
+if (-not $g20IsWindows) {
+    [System.IO.File]::WriteAllText((Join-Path $g20Stub 'curl'), "#!/usr/bin/env bash`nexit 0`n")
+    & chmod '+x' (Join-Path $g20Stub 'curl')
+    $env:PATH = $g20Stub + [System.IO.Path]::PathSeparator + $env:PATH
+}
+
+function New-G20Proj {
+    # Empty sections and NO .stride/ yet.
+    $d = Join-Path $TmpDir ("g20-" + [System.Guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $d -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $d '.stride.md'),
+        "## before_doing`n``````bash`n``````n`n## before_review`n``````bash`n``````n")
+    return $d
+}
+function New-G20Input {
+    param([string]$Command, [string]$Payload)
+    $o = [ordered]@{
+        session_id    = 's20'
+        tool_input    = [ordered]@{ command = $Command }
+        tool_response = [ordered]@{ stdout = $Payload }
+    }
+    return ($o | ConvertTo-Json -Compress -Depth 6)
+}
+function Invoke-G20Claim {
+    param([string]$Dir, [string]$Command, [string]$Payload)
+    return (Invoke-HookScript -InputJson (New-G20Input -Command $Command -Payload $Payload) -Phase 'post' -ProjectDir $Dir)
+}
+function Get-G20TaskNames {
+    param([string]$Dir)
+    $s = Join-Path $Dir '.stride'
+    if (-not (Test-Path -LiteralPath $s)) { return '' }
+    return ((@(Get-ChildItem -LiteralPath $s -Force | Where-Object { $_.Name -like '.task-*' } |
+        ForEach-Object { $_.Name }) | Sort-Object) -join ' ')
+}
+function Get-G20TempCount {
+    param([string]$Dir)
+    $s = Join-Path $Dir '.stride'
+    if (-not (Test-Path -LiteralPath $s)) { return '0' }
+    return [string](@(Get-ChildItem -LiteralPath $s -Force -Recurse | Where-Object { $_.Name -like 'task-file.*' }).Count)
+}
+function Get-G20FilePath { param([string]$Dir, [string]$Stem) return (Join-Path (Join-Path $Dir '.stride') ".task-$Stem.json") }
+function Get-G20Base64 { param([string]$Path) return [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($Path)) }
+function Set-G20Earlier {
+    param([string]$Dir)
+    $s = Join-Path $Dir '.stride'
+    New-Item -ItemType Directory -Path $s -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $s '.task-W123.json'), "EARLIER`n")
+}
+function Get-G20Text { param([string]$Dir, [string]$Stem) return [System.IO.File]::ReadAllText((Get-G20FilePath $Dir $Stem)) }
+function New-G20Task {
+    param([string]$Identifier, [int]$Id)
+    return ('{"data":{"id":' + $Id + ',"identifier":' + ($Identifier | ConvertTo-Json -Compress) + ',"title":"t"}}')
+}
+
+$g20Url    = 'https://stride.invalid/api/tasks/claim'
+$g20Auth   = '-H "Authorization: Bearer SECRETVALUE"'
+$g20Inline = "curl -sS -X POST $g20Url $g20Auth -d '{`"identifier`":`"W123`",`"agent_name`":`"Gemini CLI`",`"before_doing_result`":{`"exit_code`":0,`"output`":`"ok`",`"duration_ms`":0}}'"
+$g20File   = "curl -sS -X POST $g20Url $g20Auth -d @claim.json"
+function Get-G20Cmd { param([string]$Ident) return ("curl -sS -X POST $g20Url $g20Auth -d '{`"identifier`":`"" + $Ident + "`"}'") }
+function Get-G20Dq  { param([string]$Ident) return ("curl -sS -X POST $g20Url $g20Auth -d `"{\`"identifier\`":\`"" + $Ident + "\`"}`"") }
+$g20Data = '{"id":123,"identifier":"W123","title":"Say \"hi\"\nthen ok","acceptance_criteria":"one\ntwo","key_files":[{"file_path":"a/b.ex","position":0}],"needs_review":false,"inserted_at":"2026-10-02T14:20:41","claim_expires_at":"2026-10-02T17:00:33Z","note":"caf\u00e9","score":1e2}'
+$g20Ok   = '{"data":' + $g20Data + ',"hook":{"name":"before_doing"}}'
+$g20Want = [Convert]::ToBase64String((New-Object System.Text.UTF8Encoding $false).GetBytes($g20Data + "`n"))
+
+try {
+    # 20a: the happy path - the file holds the data object's own text
+    $d = New-G20Proj
+    $r = Invoke-G20Claim $d $g20Inline $g20Ok
+    $f = Get-G20FilePath $d 'W123'
+    Assert-Exit "20a: the claim hook exits 0" 0 $r.ExitCode
+    Assert-Eq "20a: the task file is written" "True" ([string](Test-Path -LiteralPath $f))
+    if (Test-Path -LiteralPath $f) {
+        Assert-Eq "20a: its bytes are the data object plus a LF" $g20Want (Get-G20Base64 $f)
+        $txt = Get-G20Text $d 'W123'
+        # A ConvertTo-Json round trip would rewrite this timestamp; the raw
+        # text keeps it exactly as the server sent it.
+        Assert-Contains "20a: timestamps are kept verbatim" '"claim_expires_at":"2026-10-02T17:00:33Z"' $txt
+        # Escapes and number spellings are the server's: a re-serialisation
+        # would write the character itself and the number as 100.
+        Assert-Contains "20a: a \u escape is kept as sent" '"note":"caf\u00e9"' $txt
+        Assert-Contains "20a: a number keeps its spelling" '"score":1e2' $txt
+        Assert-NotContains "20a: no credential reaches the file" 'SECRETVALUE' $txt
+        $bytes = [System.IO.File]::ReadAllBytes($f)
+        Assert-Eq "20a: the file has no byte-order mark" "no-bom" `
+            ($(if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { 'bom' } else { 'no-bom' }))
+    }
+    Assert-Eq "20a: no staging temp is left" "0" (Get-G20TempCount $d)
+    Assert-Eq "20a: the hook wrote nothing to stdout" "" $r.Stdout
+
+    # 20b: an identifier failing the anchored rule falls back to the integer id
+    foreach ($bad in @('../../x', '.', 'a.b', 'a/b', "W1`n", ('A' * 65), '')) {
+        $d = New-G20Proj
+        $null = Invoke-G20Claim $d $g20File (New-G20Task $bad 123)
+        Assert-Eq "20b: identifier '$($bad.Replace("`n", '\n'))' falls back to the id" ".task-123.json" (Get-G20TaskNames $d)
+    }
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d $g20File (New-G20Task ('A' * 64) 123)
+    Assert-Eq "20b2: a 64-character identifier is used as-is" (".task-" + ('A' * 64) + ".json") (Get-G20TaskNames $d)
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d $g20File '{"data":{"id":"123","identifier":"x/y"}}'
+    Assert-Eq "20b3: a digit-string id is a valid fallback" ".task-123.json" (Get-G20TaskNames $d)
+    foreach ($id in @('"7a"', '-1', '1.5')) {
+        $d = New-G20Proj
+        $r = Invoke-G20Claim $d $g20File ('{"data":{"id":' + $id + ',"identifier":"x/y"}}')
+        Assert-Eq "20b4: id $id with a bad identifier writes nothing" "" (Get-G20TaskNames $d)
+        Assert-Contains "20b4: and says so on stderr" "no usable identifier or id" $r.Stderr
+    }
+
+    # 20c/20d: non-2xx, unparsable and truncated bodies write nothing, and an
+    # existing file is left exactly as it was
+    foreach ($body in @('{"error":"Task ''W123'' is not available"}', '{"error":"Task not found"}',
+                        '{"errors":{"identifier":["already claimed"]}}', 'not json',
+                        '{"data":{"id":123,"identifier":"W123","title":"tru')) {
+        $d = New-G20Proj
+        Set-G20Earlier $d
+        $r = Invoke-G20Claim $d $g20Inline $body
+        $lbl = $body.Substring(0, [Math]::Min(24, $body.Length))
+        Assert-Exit "20c: body $lbl still exits 0" 0 $r.ExitCode
+        Assert-Eq "20c: and leaves the earlier file untouched" "EARLIER`n" (Get-G20Text $d 'W123')
+        Assert-Eq "20c: and adds no other task file" ".task-W123.json" (Get-G20TaskNames $d)
+    }
+
+    # 20e: a response that does not prove the identity the command asked for
+    $d = New-G20Proj
+    Set-G20Earlier $d
+    $r = Invoke-G20Claim $d (Get-G20Cmd 'W999') $g20Ok
+    Assert-Eq "20e: a W999 claim answered with W123 writes nothing" "EARLIER`n" (Get-G20Text $d 'W123')
+    Assert-Contains "20e: and says so on stderr" "not proven to be the task this claim asked for" $r.Stderr
+    Assert-Eq "20e: and writes nothing to stdout" "" $r.Stdout
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d "curl -X POST $g20Url -d '{`"identifier`":`"W123`",`"identifier`":`"W999`"}'" $g20Ok
+    Assert-Eq "20e: two different requested identifiers write nothing" "" (Get-G20TaskNames $d)
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d "curl -X POST $g20Url -d '{`"identifier`":null}'" $g20Ok
+    Assert-Eq "20e: a null requested identifier writes nothing" "" (Get-G20TaskNames $d)
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d (Get-G20Cmd 'w123') $g20Ok
+    Assert-Eq "20e: the comparison is case-sensitive" "" (Get-G20TaskNames $d)
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d (Get-G20Dq 'W999') $g20Ok
+    Assert-Eq "20e: an escaped W999 request writes nothing" "" (Get-G20TaskNames $d)
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d (Get-G20Dq 'W123') $g20Ok
+    Assert-Eq "20e: an escaped W123 request writes the file" ".task-W123.json" (Get-G20TaskNames $d)
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d ("curl -X POST $g20Url -d '{`"identifier`":`"W123`",`"before_doing_result`":{`"output`":`"{\`"identifier\`":\`"W999\`"}`"}}'") $g20Ok
+    Assert-Eq "20e: an escaped key inside a plain body's string value is not a request" ".task-W123.json" (Get-G20TaskNames $d)
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d (Get-G20Cmd 'W123') '{"data":{"id":123,"title":"no identifier"}}'
+    Assert-Eq "20e: a response with no identifier cannot match a named request" "" (Get-G20TaskNames $d)
+
+    # 20f: a body sent from a file names no identifier; the response is the proof
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d $g20File $g20Ok
+    $f = Get-G20FilePath $d 'W123'
+    Assert-Eq "20f: a -d @file claim writes the file" $g20Want `
+        ($(if (Test-Path -LiteralPath $f) { Get-G20Base64 $f } else { 'absent' }))
+
+    # 20g: a destination that is not a regular file is refused, leaving no temp
+    $d = New-G20Proj
+    New-Item -ItemType Directory -Path (Get-G20FilePath $d 'W123') -Force | Out-Null
+    $r = Invoke-G20Claim $d $g20Inline $g20Ok
+    Assert-Contains "20g2: a directory at the destination is refused" "not a regular file" $r.Stderr
+    Assert-Eq "20g2: the directory is left empty" "0" `
+        ([string](@(Get-ChildItem -LiteralPath (Get-G20FilePath $d 'W123') -Force).Count))
+    Assert-Eq "20g2: no staging temp is left" "0" (Get-G20TempCount $d)
+    if (-not $g20IsWindows -and ((& id -u) -ne '0')) {
+        $d = New-G20Proj
+        $s = Join-Path $d '.stride'
+        New-Item -ItemType Directory -Path $s -Force | Out-Null
+        & chmod 500 $s
+        $r = Invoke-G20Claim $d $g20Inline $g20Ok
+        & chmod 755 $s
+        Assert-Exit "20g3: a read-only .stride/ still exits 0" 0 $r.ExitCode
+        Assert-Eq "20g3: nothing is written" "" (Get-G20TaskNames $d)
+        Assert-Eq "20g3: no staging temp is left" "0" (Get-G20TempCount $d)
+        Assert-Contains "20g3: the failure is on stderr" "could not write the task file; continuing" $r.Stderr
+        Assert-Eq "20g3: and nothing is on stdout" "" $r.Stdout
+    } else {
+        Write-Host "  SKIP: 20g3 (Windows or root - POSIX permissions are not enforced)" -ForegroundColor Yellow
+    }
+    if (-not $g20IsWindows -and (Get-Command chflags -ErrorAction SilentlyContinue)) {
+        # A real rename failure: an immutable destination refuses the replace.
+        $d = New-G20Proj
+        Set-G20Earlier $d
+        & chflags uchg (Get-G20FilePath $d 'W123')
+        $r = Invoke-G20Claim $d $g20Inline $g20Ok
+        & chflags nouchg (Get-G20FilePath $d 'W123')
+        Assert-Exit "20g4: an immutable destination still exits 0" 0 $r.ExitCode
+        Assert-Eq "20g4: the earlier file is intact" "EARLIER`n" (Get-G20Text $d 'W123')
+        Assert-Eq "20g4: no staging temp is left" "0" (Get-G20TempCount $d)
+    }
+
+    # 20h: .stride/ missing at claim time is created
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d $g20Inline $g20Ok
+    Assert-Eq "20h: .stride/ is created for the file" ".task-W123.json" (Get-G20TaskNames $d)
+
+    # 20i: two claims in a row each write their own file; a re-claim replaces
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d $g20Inline $g20Ok
+    $null = Invoke-G20Claim $d (Get-G20Cmd 'W124') (New-G20Task 'W124' 124)
+    Assert-Eq "20i: both task files exist" ".task-W123.json .task-W124.json" (Get-G20TaskNames $d)
+    Assert-Eq "20i: the first is untouched by the second" $g20Want (Get-G20Base64 (Get-G20FilePath $d 'W123'))
+    [System.IO.File]::WriteAllText((Get-G20FilePath $d 'W123'), "OLD CONTENT`n")
+    $null = Invoke-G20Claim $d $g20Inline $g20Ok
+    Assert-Eq "20i2: a re-claim replaces the old file" $g20Want (Get-G20Base64 (Get-G20FilePath $d 'W123'))
+    Assert-Eq "20i2: no staging temp is left" "0" (Get-G20TempCount $d)
+
+    # 20j: the persisted-output path is the only source of the task
+    $d = New-G20Proj
+    $p = Join-Path $d 'persisted output.json'
+    [System.IO.File]::WriteAllText($p, ($g20Ok -replace ',"', ",`n  `""))
+    $null = Invoke-G20Claim $d $g20Inline "Output too large. Full output saved to: $p"
+    $f = Get-G20FilePath $d 'W123'
+    Assert-Eq "20j: the persisted response writes the data object's text" $g20Want `
+        ($(if (Test-Path -LiteralPath $f) { Get-G20Base64 $f } else { 'absent' }))
+    $d = New-G20Proj
+    $p = Join-Path $d 'persisted.json'
+    [System.IO.File]::WriteAllText($p, $g20Ok)
+    $null = Invoke-G20Claim $d $g20File "Output too large. Full output saved to: $p"
+    Assert-Eq "20j: a persisted response needs a named identifier to match" "" (Get-G20TaskNames $d)
+    $d = New-G20Proj
+    Set-G20Earlier $d
+    $null = Invoke-G20Claim $d $g20Inline ("Output too large. Full output saved to: " + (Join-Path $d 'missing.json'))
+    Assert-Eq "20j: a missing persisted file writes nothing" "EARLIER`n" (Get-G20Text $d 'W123')
+
+    # 20k: a bare task object (no data wrapper) - which this half's Shapes 1
+    # and 2 used to drop under StrictMode - is written compact
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d $g20File '{ "id": 79, "identifier": "W5003", "title": "spaced out" }'
+    $f = Get-G20FilePath $d 'W5003'
+    Assert-Eq "20k: a bare object is written compact" "{`"id`":79,`"identifier`":`"W5003`",`"title`":`"spaced out`"}`n" `
+        ($(if (Test-Path -LiteralPath $f) { [System.IO.File]::ReadAllText($f) } else { 'absent' }))
+
+    # 20o: an object-shaped tool_response has no raw text (no bash twin:
+    # the bash half always reads tool_response through jq), so it is the one
+    # path that re-serialises; the file still parses to the same task
+    $d = New-G20Proj
+    $obj = [ordered]@{
+        session_id    = 's20'
+        tool_input    = [ordered]@{ command = $g20Inline }
+        tool_response = [ordered]@{ data = [ordered]@{ id = 123; identifier = 'W123'; title = 'object shaped' } }
+    }
+    $null = Invoke-HookScript -InputJson ($obj | ConvertTo-Json -Compress -Depth 6) -Phase 'post' -ProjectDir $d
+    $f = Get-G20FilePath $d 'W123'
+    if (Test-Path -LiteralPath $f) {
+        $o = [System.IO.File]::ReadAllText($f) | ConvertFrom-Json
+        Assert-Eq "20o: an object tool_response writes the same task" "123 W123 object shaped" "$($o.id) $($o.identifier) $($o.title)"
+    } else {
+        Assert-Eq "20o: an object tool_response writes the same task" "present" "absent"
+    }
+
+    # 20l (integration): claim then complete - the file lives between them; the
+    # hook never deletes it, Step 7 of the workflow skill does
+    $d = New-G20Proj
+    $null = Invoke-G20Claim $d $g20Inline $g20Ok
+    Assert-Eq "20l: the file exists after the claim" ".task-W123.json" (Get-G20TaskNames $d)
+    $r = Invoke-HookScript -InputJson (New-G20Input -Command 'curl -X PATCH https://stride.invalid/api/tasks/123/complete' `
+        -Payload '{"data":{"id":123,"identifier":"W123","needs_review":false}}') -Phase 'post' -ProjectDir $d
+    Assert-Exit "20l: the completion hook exits 0" 0 $r.ExitCode
+    Assert-Eq "20l: the file is still there for Step 7 to delete" $g20Want (Get-G20Base64 (Get-G20FilePath $d 'W123'))
+    $skill = Join-Path (Join-Path (Join-Path (Split-Path -Parent $ScriptDir) 'skills') 'stride-workflow') 'SKILL.md'
+    $skillText = [System.IO.File]::ReadAllText($skill)
+    $s7 = [regex]::Match($skillText, '(?s)## Step 7: Complete the Task.*?## Step 8:').Value
+    Assert-Contains "20l: Step 7 deletes the task file" 'rm -f "$PROJECT_DIR/.stride/.task-$IDENTIFIER.json"' $s7
+    Assert-Contains "20l: only after a 2xx" 'Only after a 2xx' $s7
+} finally {
+    $env:PATH = $g20OldPath
+}
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""

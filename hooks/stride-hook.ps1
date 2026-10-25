@@ -402,6 +402,176 @@ switch ($Phase) {
 # Not a Stride API call — exit cleanly
 if (-not $HookName) { exit 0 }
 
+# --- The claimed task file (W2463, the port of stride W2248) --------------
+# Twin of the bash half's task_file_stem / claim_identity_proven /
+# write_task_file; the comments there explain why the file exists and what
+# proves a response belongs to this claim. Everything below writes to stderr
+# only - Gemini parses this script's stdout as its control document.
+
+# The text of the top-level member $Name of the JSON document $Text, with the
+# whitespace outside strings dropped. The file has to hold the server's own
+# text rather than a ConvertTo-Json re-serialisation: PowerShell 7 turns ISO
+# timestamps into DateTime and rewrites them on the way back out, and 5.1
+# escapes <, > and &. For the compact JSON the API sends, the result equals the
+# bash half's `jq -c '.data'` byte for byte, apart from the letter case of a
+# \u escape (jq writes them in lower case), so compare the two files as JSON.
+# Returns $null when the member is absent or is not an object.
+function Get-TopLevelMemberJson {
+    param([string]$Text, [string]$Name)
+    if (-not $Text) { return $null }
+    $sb = New-Object System.Text.StringBuilder
+    $depth = 0; $inStr = $false; $esc = $false
+    $wantKey = $false; $strIsKey = $false; $strStart = -1; $pendingKey = $null
+    $capturing = $false; $capDepth = 0
+    for ($i = 0; $i -lt $Text.Length; $i++) {
+        $c = $Text[$i]
+        if ($capturing) {
+            if ($inStr) {
+                [void]$sb.Append($c)
+                if ($esc) { $esc = $false }
+                elseif ($c -eq [char]'\') { $esc = $true }
+                elseif ($c -eq [char]'"') { $inStr = $false }
+                continue
+            }
+            if ([char]::IsWhiteSpace($c)) { continue }
+            if ($capDepth -eq 0 -and $c -ne [char]'{') { return $null }
+            [void]$sb.Append($c)
+            if ($c -eq [char]'"') { $inStr = $true }
+            elseif ($c -eq [char]'{' -or $c -eq [char]'[') { $capDepth++ }
+            elseif ($c -eq [char]'}' -or $c -eq [char]']') {
+                $capDepth--
+                if ($capDepth -eq 0) { return $sb.ToString() }
+            }
+            continue
+        }
+        if ($inStr) {
+            if ($esc) { $esc = $false }
+            elseif ($c -eq [char]'\') { $esc = $true }
+            elseif ($c -eq [char]'"') {
+                $inStr = $false
+                if ($strIsKey) { $pendingKey = $Text.Substring($strStart, $i - $strStart); $wantKey = $false }
+            }
+            continue
+        }
+        if ($c -eq [char]'"') {
+            $inStr = $true; $strIsKey = ($depth -eq 1 -and $wantKey); $strStart = $i + 1
+        } elseif ($c -eq [char]'{' -or $c -eq [char]'[') {
+            $depth++
+            if ($depth -eq 1) { $wantKey = ($c -eq [char]'{') }
+        } elseif ($c -eq [char]'}' -or $c -eq [char]']') {
+            $depth--
+        } elseif ($c -eq [char]',' -and $depth -eq 1) {
+            $wantKey = $true
+        } elseif ($c -eq [char]':' -and $depth -eq 1) {
+            if ($pendingKey -ceq $Name) { $capturing = $true }
+            $pendingKey = $null
+        }
+    }
+    return $null
+}
+
+# File-name stem: the identifier when it is 1-64 characters of [A-Za-z0-9_-]
+# (-cmatch with \A...\z: a whole-string, case-sensitive test), else the
+# non-negative integer id, else '' (write nothing).
+function Get-TaskFileStem {
+    param($Task)
+    if ($null -eq $Task) { return '' }
+    $props = $Task.PSObject.Properties.Name
+    if (($props -contains 'identifier') -and ($Task.identifier -is [string]) -and
+        ($Task.identifier -cmatch '\A[A-Za-z0-9_-]{1,64}\z')) {
+        return $Task.identifier
+    }
+    if ($props -contains 'id') {
+        $id = $Task.id
+        if (($id -is [int] -or $id -is [long]) -and $id -ge 0) { return [string]$id }
+        if (($id -is [string]) -and ($id -cmatch '\A[0-9]{1,20}\z')) { return $id }
+    }
+    return ''
+}
+
+# One spelling of the requested-identifier key: $null when the key does not
+# occur, else whether every occurrence carries a clean string value equal to
+# $Rid. [ \t\r\n] rather than \s, so this half and jq agree on whitespace.
+function Get-ClaimIdentityTier {
+    param([string]$Text, [string]$KeyPattern, [string]$ValuePattern, $Rid)
+    $k = [regex]::Matches($Text, $KeyPattern).Count
+    if ($k -eq 0) { return $null }
+    $vals = @([regex]::Matches($Text, $ValuePattern) | ForEach-Object { $_.Groups[1].Value })
+    if ($vals.Count -ne $k) { return $false }
+    if ($Rid -isnot [string]) { return $false }
+    foreach ($v in $vals) { if (-not ($v -ceq $Rid)) { return $false } }
+    return $true
+}
+
+# Twin of claim_identity_proven: the plain spelling first, the escaped one only
+# when the plain one is absent, and with neither the response itself is the
+# proof unless $Require is set (the persisted-output path).
+function Test-ClaimIdentityProven {
+    param($Task, [string]$CommandText, [bool]$Require)
+    if ($null -eq $Task) { return $false }
+    $rid = $null
+    if ($Task.PSObject.Properties.Name -contains 'identifier') { $rid = $Task.identifier }
+    if ($null -eq $CommandText) { $CommandText = '' }
+    $plain = Get-ClaimIdentityTier -Text $CommandText `
+        -KeyPattern '"identifier"[ \t\r\n]*:' `
+        -ValuePattern '"identifier"[ \t\r\n]*:[ \t\r\n]*"([^"\\]*)"' -Rid $rid
+    if ($null -ne $plain) { return $plain }
+    $escaped = Get-ClaimIdentityTier -Text $CommandText `
+        -KeyPattern '\\"identifier\\"[ \t\r\n]*:' `
+        -ValuePattern '\\"identifier\\"[ \t\r\n]*:[ \t\r\n]*\\"([^"\\]*)\\"' -Rid $rid
+    if ($null -ne $escaped) { return $escaped }
+    return (-not $Require)
+}
+
+# Write $Text (the task's raw JSON text) to .stride/.task-<stem>.json, using
+# Write-LoopState's mechanics: staged beside the destination, a BOM-less UTF-8
+# encoder and a literal LF, File::Replace / File::Move for the rename with
+# Move-Item as the fallback, no temp left behind, never fatal.
+function Write-TaskFile {
+    param($Task, [string]$Text)
+    $stem = Get-TaskFileStem $Task
+    if (-not $stem) {
+        [Console]::Error.WriteLine('stride-hook: the claimed task has no usable identifier or id; not writing the task file')
+        return
+    }
+    if (-not $Text) {
+        [Console]::Error.WriteLine('stride-hook: could not isolate the claimed task text; not writing the task file')
+        return
+    }
+    $_dir = Join-Path $ProjectDir '.stride'
+    $dest = Join-Path $_dir (".task-{0}.json" -f $stem)
+    try {
+        if ((Test-Path -LiteralPath $dest) -and -not (Test-Path -LiteralPath $dest -PathType Leaf)) {
+            [Console]::Error.WriteLine('stride-hook: task-file path is not a regular file; not writing the task file')
+            return
+        }
+    } catch { return }
+    # Assigned before the try: StrictMode Latest throws on reading an
+    # unassigned variable in the catch.
+    $_tmp = $null
+    try {
+        if (-not (Test-Path -LiteralPath $_dir)) {
+            New-Item -ItemType Directory -Path $_dir -Force -ErrorAction Stop | Out-Null
+        }
+        $_tmp = Join-Path $_dir ('task-file.{0}.tmp' -f [System.IO.Path]::GetRandomFileName())
+        [System.IO.File]::WriteAllText($_tmp, $Text + "`n", (New-Object System.Text.UTF8Encoding $false))
+        try {
+            if (Test-Path -LiteralPath $dest -PathType Leaf) {
+                [System.IO.File]::Replace($_tmp, $dest, $null)
+            } else {
+                [System.IO.File]::Move($_tmp, $dest)
+            }
+        } catch {
+            Move-Item -LiteralPath $_tmp -Destination $dest -Force -ErrorAction Stop
+        }
+    } catch {
+        [Console]::Error.WriteLine('stride-hook: could not write the task file; continuing')
+        if ($_tmp) {
+            try { Remove-Item -LiteralPath $_tmp -Force -ErrorAction SilentlyContinue } catch { }
+        }
+    }
+}
+
 # --- Environment variable caching ---
 # After a successful claim (before_doing), extract task metadata from the API
 # response and cache it. All subsequent hooks load the cache so .stride.md
@@ -413,15 +583,31 @@ if ($HookName -eq 'before_doing') {
         $response = $json.tool_response
         if ($response) {
             $taskJson = $null
+            # (W2463) The raw text $taskJson was parsed from, for the task
+            # file; $null when tool_response arrived as an object (Shape 3).
+            $taskRawText = $null
+            $taskIsBare = $false
+            $taskFromPersisted = $false
 
             # Shape 1: host wraps API JSON inside tool_response.stdout as a string
             if ($response -is [PSCustomObject] -and $response.PSObject.Properties.Name -contains 'stdout') {
                 try {
                     $innerObj = $response.stdout | ConvertFrom-Json
-                    if ($innerObj.data -and $innerObj.data.id) {
+                    # (W2463) Property reads guarded by name, as Shape 3 does:
+                    # under StrictMode Latest, reading .data on a bare task
+                    # object throws, so a bare object never reached the
+                    # .id branch here although the bash half accepts it.
+                    $innerProps = @()
+                    if ($innerObj -is [PSCustomObject]) { $innerProps = $innerObj.PSObject.Properties.Name }
+                    if (($innerProps -contains 'data') -and $innerObj.data -and
+                        ($innerObj.data -is [PSCustomObject]) -and
+                        ($innerObj.data.PSObject.Properties.Name -contains 'id') -and $innerObj.data.id) {
                         $taskJson = $innerObj.data
-                    } elseif ($innerObj.id) {
+                        $taskRawText = [string]$response.stdout
+                    } elseif (($innerProps -contains 'id') -and $innerObj.id) {
                         $taskJson = $innerObj
+                        $taskRawText = [string]$response.stdout
+                        $taskIsBare = $true
                     }
                 } catch {
                     # stdout not parseable — fall through
@@ -432,10 +618,18 @@ if ($HookName -eq 'before_doing') {
             if (-not $taskJson -and $response -is [string]) {
                 try {
                     $responseObj = $response | ConvertFrom-Json
-                    if ($responseObj.data -and $responseObj.data.id) {
+                    # (W2463) Guarded by name for the same reason as Shape 1.
+                    $responseObjProps = @()
+                    if ($responseObj -is [PSCustomObject]) { $responseObjProps = $responseObj.PSObject.Properties.Name }
+                    if (($responseObjProps -contains 'data') -and $responseObj.data -and
+                        ($responseObj.data -is [PSCustomObject]) -and
+                        ($responseObj.data.PSObject.Properties.Name -contains 'id') -and $responseObj.data.id) {
                         $taskJson = $responseObj.data
-                    } elseif ($responseObj.id) {
+                        $taskRawText = $response
+                    } elseif (($responseObjProps -contains 'id') -and $responseObj.id) {
                         $taskJson = $responseObj
+                        $taskRawText = $response
+                        $taskIsBare = $true
                     }
                 } catch {
                     # Response not parseable JSON — skip caching
@@ -453,6 +647,7 @@ if ($HookName -eq 'before_doing') {
                     $taskJson = $response.data
                 } elseif (($responseProps -contains 'id') -and $response.id) {
                     $taskJson = $response
+                    $taskIsBare = $true
                 }
             }
 
@@ -479,7 +674,8 @@ if ($HookName -eq 'before_doing') {
                         $persistPath = ($persistPath.TrimEnd()) -replace '"$', ''
                         if (Test-Path -LiteralPath $persistPath -PathType Leaf) {
                             try {
-                                $persistObj = (Get-Content -LiteralPath $persistPath -Raw -ErrorAction SilentlyContinue) | ConvertFrom-Json
+                                $persistRaw = [string](Get-Content -LiteralPath $persistPath -Raw -ErrorAction SilentlyContinue)
+                                $persistObj = $persistRaw | ConvertFrom-Json
                                 # Guard property access by name (StrictMode) so an
                                 # id-only persisted payload caches identity lines
                                 # exactly as the bash reference does, rather than
@@ -488,8 +684,13 @@ if ($HookName -eq 'before_doing') {
                                 $persistProps = $persistObj.PSObject.Properties.Name
                                 if (($persistProps -contains 'data') -and $persistObj.data -and $persistObj.data.id) {
                                     $taskJson = $persistObj.data
+                                    $taskRawText = $persistRaw
+                                    $taskFromPersisted = $true
                                 } elseif (($persistProps -contains 'id') -and $persistObj.id) {
                                     $taskJson = $persistObj
+                                    $taskRawText = $persistRaw
+                                    $taskIsBare = $true
+                                    $taskFromPersisted = $true
                                 }
                             } catch {
                                 # persisted file not parseable JSON — fall through
@@ -506,6 +707,47 @@ if ($HookName -eq 'before_doing') {
             # pulled work (D132/W1678). Invoke-FinalizeBeforeDoing writes the
             # base (and the dirty baseline) after the section finishes.
             if ($taskJson) {
+                # (W2463) The claimed task file - see the bash half's call site.
+                # In its own try, ahead of the cache write, so neither failure
+                # can skip the other's work.
+                try {
+                    if (-not (Test-ClaimIdentityProven -Task $taskJson -CommandText $Command -Require $taskFromPersisted)) {
+                        [Console]::Error.WriteLine('stride-hook: the claim response is not proven to be the task this claim asked for; not writing the task file')
+                    } else {
+                        $taskText = $null
+                        if ($taskRawText) {
+                            if ($taskIsBare) {
+                                $taskText = Get-TopLevelMemberJson -Text ('{"data":' + $taskRawText + '}') -Name 'data'
+                            } else {
+                                $taskText = Get-TopLevelMemberJson -Text $taskRawText -Name 'data'
+                            }
+                        } else {
+                            # Shape 3: an object tool_response has no raw text,
+                            # so this is the one path that re-serialises (and
+                            # can therefore differ from the server's bytes).
+                            $taskText = $taskJson | ConvertTo-Json -Depth 100 -Compress
+                        }
+                        # The scanner takes the FIRST top-level `data`, while
+                        # ConvertFrom-Json keeps the last; write only text whose
+                        # own id is the parsed task's id, so a duplicated key
+                        # cannot file one object under another's name.
+                        $textId = ''
+                        if ($taskText) {
+                            try {
+                                $textObj = $taskText | ConvertFrom-Json
+                                if ($textObj -is [PSCustomObject] -and ($textObj.PSObject.Properties.Name -contains 'id')) { $textId = [string]$textObj.id }
+                            } catch { $textId = '' }
+                        }
+                        if ($textId -and ($textId -eq [string]$taskJson.id)) {
+                            $null = Write-TaskFile -Task $taskJson -Text $taskText
+                        } else {
+                            [Console]::Error.WriteLine('stride-hook: the isolated task text does not carry the claimed id; not writing the task file')
+                        }
+                    }
+                } catch {
+                    [Console]::Error.WriteLine('stride-hook: could not record the task file; continuing')
+                }
+
                 # Identity lines ONLY — overwriting the whole cache here also
                 # strips any inherited TASK_BASE_REF / TASK_BASE_REF_TRUSTED.
                 $cacheLines = @(
