@@ -4347,8 +4347,17 @@ fi
 # all four files, and never on prose that is present and ignored at run time.
 # That last limit is the cap's own: the cap is stated, not pinned, and this
 # group inherits exactly that reach.
+#
+# W2466 (review-round-cap v2, "round two must be earned") adds 20ag onward and a
+# fifth file, README.md. The three round-two grounds are pinned the same way the
+# ceiling is: extracted once from the orchestrator, then required byte-identical
+# in completing-tasks, subagent-workflow and README. stride's executed v2 cases
+# (the FIX_CODE_PATHS classifier and its fixtures) are NOT ported: this port has
+# no classifier, the code-path call is self-applied prose, and there are no bytes
+# to run. These cases therefore red on deletion and drift, never on a misjudged
+# path at run time.
 echo ""
-echo "=== Test Group 20: two-round review cap (W2158) ==="
+echo "=== Test Group 20: two-round review cap (W2158; v2 W2466) ==="
 
 G20_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
 G20_CT="$SCRIPT_DIR/../skills/stride-completing-tasks/SKILL.md"
@@ -4367,6 +4376,14 @@ else
 
   # Device (ii): the Step 5 slice, so placement is asserted rather than presence.
   G20_STEP5="$(awk '/^## Step 5: Code Review/{f=1} /^## Step 5\.5:/{f=0} f' "$G20_WF")"
+
+  # v2 (W2466): the grounds clause and the disposition, taken from the
+  # orchestrator so the mirrors are compared against its bytes, plus the
+  # "Stated, not pinned" paragraph on its own so a claim can be placed in it.
+  G20_README="$SCRIPT_DIR/../README.md"
+  G20_GROUNDS="$(grep -oF -- 'a fix made in answer to round one touched a code path, the block round one returned carries a `critical`, or that block carries a `category: "security"` entry of any severity' "$G20_WF" | head -1)"
+  G20_RNR="$(grep -o 'recorded, not re-reviewed' "$G20_WF" | head -1)"
+  G20_STATED="$(printf '%s\n' "$G20_STEP5" | grep -F '**Stated, not pinned' | head -1)"
 
   # Whole-file cases match against the FILE, never against "$(cat file)" fed to
   # assert_contains. That shape is unsafe here and the reason is worth recording
@@ -4594,6 +4611,105 @@ else
 
   assert_eq "20af2: and at the completion gate's write site" "found" \
     "$(g20_has "a repository-relative \`file:line\`" "$G20_CT")"
+
+  # --- 20ag-20au: review-round-cap v2, round two must be earned (W2466) ---
+
+  # Happy path: the three grounds and the recorded disposition, in Step 5.
+  assert_eq "20ag: the round-two grounds clause is extractable from the orchestrator" \
+    'a fix made in answer to round one touched a code path, the block round one returned carries a `critical`, or that block carries a `category: "security"` entry of any severity' \
+    "$G20_GROUNDS"
+
+  assert_eq "20ag2: and the grounds are stated INSIDE Step 5" "found" \
+    "$(g20_in "$G20_GROUNDS" "$G20_STEP5")"
+
+  assert_eq "20ag3: Step 5 says exactly three things earn round two" "found" \
+    "$(g20_in "exactly three things earn it" "$G20_STEP5")"
+
+  assert_eq "20ai: the recorded-not-re-reviewed disposition is extractable" \
+    "recorded, not re-reviewed" "$G20_RNR"
+
+  assert_eq "20ai2: and it is stated INSIDE Step 5" "found" \
+    "$(g20_in "$G20_RNR" "$G20_STEP5")"
+
+  assert_eq "20aj: without a ground, round one's block is what is submitted" "found" \
+    "$(g20_in "Without a ground, round two does not run" "$G20_STEP5")"
+
+  # Boundary: the code-path definition and its self-applied disclosure.
+  assert_eq "20ak: a code path is a changed path that is not docs, not a test, not comment-only" "found" \
+    "$(g20_in "is a changed path that is not documentation, not a test, and not an edit whose every added or removed line is blank or a whole-line comment" "$G20_STEP5")"
+
+  assert_eq "20al: the classification is disclosed as self-applied" "found" \
+    "$(g20_in "the classification is self-applied" "$G20_STEP5")"
+
+  assert_eq "20am: this repo's test scripts are named as tests" "found" \
+    "$(g20_in 'test scripts named `test-*.sh` or `test-*.ps1`' "$G20_STEP5")"
+
+  assert_eq "20am2: and the hook scripts and manifests are named as code" "found" \
+    "$(g20_in '`hooks/hooks.json` and `gemini-extension.json` are code' "$G20_STEP5")"
+
+  assert_eq "20an: the markdown-is-documentation limit is disclosed" "found" \
+    "$(g20_in "markdown is documentation here even though this extension ships it" "$G20_STEP5")"
+
+  assert_eq "20an2: an unclassifiable path fails toward code" "found" \
+    "$(g20_in "Whatever resists the sort counts as a code path" "$G20_STEP5")"
+
+  # Error / exception: the critical and security exits are reachable from the
+  # new disposition and cannot be recorded through it.
+  assert_eq "20ar: the no-ground record can never hold a critical or security entry" "found" \
+    "$(g20_in 'can never hold a `critical` or a `category: "security"` entry' "$G20_STEP5")"
+
+  # Null / empty: the "Stated, not pinned" paragraph, sliced on its own.
+  assert_eq "20ap: the Stated-not-pinned paragraph says the grounds are followed, not enforced" "found" \
+    "$(g20_in "followed, not enforced" "$G20_STATED")"
+
+  assert_eq "20aq: an unreconstructable ground counts as a trigger that fired" "found" \
+    "$(g20_in "counts as a trigger that fired" "$G20_STATED")"
+
+  assert_eq "20aq2: and that doubt never opens a third round" "found" \
+    "$(g20_in "neither ever opens a third" "$G20_STATED")"
+
+  # Lifecycle / wiring: every mirror carries the orchestrator's bytes.
+  assert_eq "20ah: completing-tasks carries the grounds, byte for byte" "found" \
+    "$(g20_has "$G20_GROUNDS" "$G20_CT")"
+
+  assert_eq "20ah2: subagent-workflow carries the grounds, byte for byte" "found" \
+    "$(g20_has "$G20_GROUNDS" "$G20_SAW")"
+
+  assert_eq "20ah3: README carries the grounds, byte for byte" "found" \
+    "$(g20_has "$G20_GROUNDS" "$G20_README")"
+
+  assert_eq "20ai3: completing-tasks carries the disposition" "found" \
+    "$(g20_has "$G20_RNR" "$G20_CT")"
+
+  assert_eq "20ai4: subagent-workflow carries the disposition" "found" \
+    "$(g20_has "$G20_RNR" "$G20_SAW")"
+
+  assert_eq "20ai5: README carries the disposition" "found" \
+    "$(g20_has "$G20_RNR" "$G20_README")"
+
+  assert_eq "20as: an unearned round two that already ran is no breach to escalate" "found" \
+    "$(g20_has "A round two that ran without a ground is no breach to escalate" "$G20_CT")"
+
+  # The two v1 sentences v2 contradicts must not come back.
+  assert_eq "20au: completing-tasks no longer passes two rounds unconditionally" "0" \
+    "$(grep -c 'One round passes; two rounds passes' "$G20_CT" || true)"
+
+  assert_eq "20au2: subagent-workflow no longer keys round two on clearing every finding" "0" \
+    "$(grep -c 'A fix that clears every finding needs no second round' "$G20_SAW" || true)"
+
+  # No mechanism stride carries and this port does not was named as present.
+  assert_eq "20at: no classifier or round predicate was pasted in from stride" "0" \
+    "$(grep -c 'FIX_CODE_PATHS\|FIX_STAGE\|review-fixbase\|round_cap_ok' "$G20_WF" || true)"
+
+  # Contract / serialization: the anchor carries v2, once, and only here.
+  assert_eq "20ao: the anchor reads review-round-cap v2 inside Step 5" "found" \
+    "$(g20_in "<!-- canon:review-round-cap v2 -->" "$G20_STEP5")"
+
+  assert_eq "20ao2: and exactly one review-round-cap anchor is in the orchestrator" "1" \
+    "$(grep -c 'canon:review-round-cap' "$G20_WF" || true)"
+
+  assert_eq "20ao3: and none was written into README" "0" \
+    "$(grep -c 'canon:review-round-cap' "$G20_README" || true)"
 fi
 
 # ============================================================
@@ -4725,8 +4841,12 @@ else
   assert_eq "21m: an absent or empty issues[] is never an all-cosmetic round" "found" \
     "$(g21_in 'An absent or empty `issues[]` is never an all-cosmetic round' "$G21_STEP5")"
 
-  assert_eq "21n: a changes_requested status is honoured regardless" "found" \
-    "$(g21_in "honour that and re-invoke regardless" "$G21_STEP5")"
+  # Needle updated by W2466: under review-round-cap v2 a changes_requested status
+  # no longer orders a round by itself — it withdraws the all-cosmetic shortcut
+  # and hands the decision to the three round-two grounds. The property pinned is
+  # unchanged: changes_requested is honoured, never overridden by the shortcut.
+  assert_eq "21n: a changes_requested status is honoured, withdrawing the shortcut" "found" \
+    "$(g21_in "honour that — the shortcut is withdrawn" "$G21_STEP5")"
 
   # Scoping must reuse this port's OWN round definition, not import stride's.
   assert_eq "21o: the scoping reuses this port's round definition" "found" \
