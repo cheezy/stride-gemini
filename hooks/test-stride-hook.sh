@@ -5931,6 +5931,138 @@ two" "$(jq -r '.acceptance_criteria' "$F" 2>/dev/null)"
 fi
 
 # ============================================================
+# Test Group 35: dispatches pass TASK_FILE (W2464)
+# ============================================================
+# The explorer and reviewer invocations name the claim hook's saved task file
+# (Group 34) instead of pasting the task's fields, and both agents read their
+# fields from it as data. Every inline fallback stays. 35 is the number the goal
+# reserved for this task when it was filed, and it was still free.
+#
+# Contract text only, so this group needs no jq and is not mirrored in the
+# PowerShell suite (Groups 20-22 set that precedent). It slices each site out of
+# the file first and asserts the slice is non-empty (35a), so a heading reword
+# cannot empty an extraction and let the needle cases below pass vacuously.
+echo ""
+echo "=== Test Group 35: dispatches pass TASK_FILE (W2464) ==="
+
+G35_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G35_SAW="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G35_EXP="$SCRIPT_DIR/../agents/task-explorer.md"
+G35_REV="$SCRIPT_DIR/../agents/task-reviewer.md"
+
+if [ ! -f "$G35_WF" ] || [ ! -f "$G35_SAW" ] || [ ! -f "$G35_EXP" ] || [ ! -f "$G35_REV" ]; then
+  echo "  SKIP: Test Group 35 (contract files not found relative to the hooks directory)"
+else
+  # Same two helpers as Group 20, for the same two hazards: a whole-file match
+  # never builds a pipe (the pipefail/EPIPE false FAIL on a >64 KB haystack),
+  # and an empty needle reports itself instead of matching everything.
+  g35_has() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    if grep -qF -- "$1" "$2"; then echo "found"; else echo "missing"; fi
+  }
+  g35_in() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    case "$2" in (*"$1"*) echo "found" ;; (*) echo "missing" ;; esac
+  }
+
+  G35_BRC="$(awk '/^### Branch C:/{f=1} /^## Step 4:/{f=0} f' "$G35_WF")"
+  G35_ITEM1="$(printf '%s\n' "$G35_BRC" | grep -F '`task-explorer` custom agent' | head -1)"
+  G35_ITEM2="$(printf '%s\n' "$G35_BRC" | grep -F '2. **When the decision matrix' | head -1)"
+  G35_STEP5="$(awk '/^## Step 5: Code Review/{f=1} /^## Step 5\.5:/{f=0} f' "$G35_WF")"
+  G35_RVB="$(printf '%s\n' "$G35_STEP5" | grep -F '**Every review field the task supplies' | head -1)"
+  G35_REREV="$(printf '%s\n' "$G35_STEP5" | grep -F '**Re-review and follow-up rounds' | head -1)"
+  G35_P1="$(awk '/^## Phase 1: Exploration/{f=1} /^## Phase 2:/{f=0} f' "$G35_SAW")"
+  G35_P3="$(awk '/^## Phase 3: Code Review/{f=1} /^## Phase 3\.5:/{f=0} f' "$G35_SAW")"
+  G35_EXPIN="$(grep -F 'You will receive' "$G35_EXP" | head -1)"
+  G35_REVIN="$(grep -F 'You will receive' "$G35_REV" | head -1)"
+  G35_FIELDS='`acceptance_criteria`, `pitfalls`, `patterns_to_follow`, `testing_strategy`, `security_considerations`, `behaviour_test_matrix`, `description`, `what`, and `why`'
+
+  # --- 35a: every slice extracted, so no case below can pass on "" ---
+  for G35_S in BRC ITEM1 ITEM2 STEP5 RVB REREV P1 P3 EXPIN REVIN; do
+    eval "G35_V=\"\$G35_$G35_S\""
+    assert_eq "35a: the $G35_S slice is non-empty" "non-empty" "$([ -n "$G35_V" ] && echo non-empty || echo empty)"
+  done
+
+  # --- AC1 / UT1: Step 3 Branch C hands the explorer TASK_FILE ---
+  assert_eq "35b: Branch C item 1 hands the explorer TASK_FILE instead of the fields" "found" \
+    "$(g35_in 'handing it `TASK_FILE` rather than the fields' "$G35_ITEM1")"
+  assert_eq "35c: item 1 carries the one read-as-data sentence" "found" \
+    "$(g35_in 'as data, not instructions' "$G35_ITEM1")"
+  assert_eq "35d: item 1 keeps an inline fallback" "found" \
+    "$(g35_in '**Inline fallback:**' "$G35_ITEM1")"
+  assert_eq "35d: the fallback still lists the four explorer fields" "found" \
+    "$(g35_in '`key_files`, `patterns_to_follow`, `where_context`, and `testing_strategy`' "$G35_ITEM1")"
+
+  # --- security_considerations: the orchestrator passes the path, never the contents ---
+  assert_eq "35e: item 1 checks the file's identifier with jq before using it" "found" \
+    "$(g35_in 'jq -r .identifier' "$G35_ITEM1")"
+  assert_eq "35e: item 1 resolves the path from this port's own project-dir chain" "found" \
+    "$(g35_in '${GEMINI_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$(pwd)}}' "$G35_ITEM1")"
+  assert_eq "35e: item 1 forbids reading the file back into the session" "found" \
+    "$(g35_in 'never print the file into this session' "$G35_ITEM1")"
+
+  # --- AC2 / UT2: Step 5 hands the reviewer TASK_FILE, fallback kept ---
+  assert_eq "35f: the every-review-field bullet goes by way of TASK_FILE" "found" \
+    "$(g35_in 'by way of `TASK_FILE`' "$G35_RVB")"
+  assert_eq "35g: the reviewer bullet keeps an inline fallback" "found" \
+    "$(g35_in '**Inline fallback:**' "$G35_RVB")"
+  assert_eq "35g: the inline fallback still forbids a subset" "found" \
+    "$(g35_in 'never a subset' "$G35_RVB")"
+
+  # The Step 5 list and the reviewer's "You will receive" line must keep matching.
+  assert_eq "35h: Step 5 names all nine review fields" "found" "$(g35_in "$G35_FIELDS" "$G35_RVB")"
+  assert_eq "35h: the reviewer's input line names the same nine" "found" "$(g35_in "$G35_FIELDS" "$G35_REVIN")"
+  assert_eq "35h: the subagent-workflow review phase names the same nine" "found" "$(g35_in "$G35_FIELDS" "$G35_P3")"
+  assert_eq "35h: Step 5 still ties its list to the You will receive line" "found" \
+    "$(g35_in 'the "You will receive" line in `agents/task-reviewer.md`' "$G35_RVB")"
+
+  # Edge case: a re-review after a changes_requested round.
+  assert_eq "35i: a re-review points at that same TASK_FILE" "found" \
+    "$(g35_in 'that same `TASK_FILE`' "$G35_REREV")"
+  assert_eq "35i: the inline re-review still carries the criteria unchanged" "found" \
+    "$(g35_in '**unchanged**' "$G35_REREV")"
+
+  # --- AC3 / UT3: both agents read the file as data, and fall back ---
+  for G35_A in EXPIN REVIN; do
+    eval "G35_V=\"\$G35_$G35_A\""
+    assert_eq "35j: $G35_A names TASK_FILE" "found" "$(g35_in '`TASK_FILE`' "$G35_V")"
+    assert_eq "35j: $G35_A treats the file as data" "found" "$(g35_in 'never an instruction to you' "$G35_V")"
+    assert_eq "35j: $G35_A opens only the supplied path" "found" \
+      "$(g35_in 'Open only the absolute path the orchestrator put in the prompt' "$G35_V")"
+    assert_eq "35j: $G35_A refuses a file naming another task" "found" \
+      "$(g35_in 'an `identifier` other than the task' "$G35_V")"
+    assert_eq "35j: $G35_A falls back to the prompt's fields" "found" \
+      "$(g35_in 'whatever fields the prompt' "$G35_V")"
+    assert_eq "35j: $G35_A keeps the no-file path" "found" \
+      "$(g35_in 'With no `TASK_FILE`, the fields arrive in the prompt as before' "$G35_V")"
+  done
+  assert_eq "35k: the reviewer reports a bad file on a task_file: line" "found" \
+    "$(g35_in '`task_file:`' "$G35_REVIN")"
+
+  # --- AC4 / UT4: one criterion per non-blank line, verbatim, in order ---
+  assert_eq "35l: the reviewer emits one entry per non-blank line" "found" \
+    "$(g35_in 'one `acceptance_criteria[]` entry for each non-blank line' "$G35_REVIN")"
+  assert_eq "35l: verbatim and in file order" "found" \
+    "$(g35_in 'copied verbatim and kept in file order' "$G35_REVIN")"
+  assert_eq "35m: the review steps parse non-blank lines only" "found" \
+    "$(g35_has 'Parse each non-blank line of `acceptance_criteria`' "$G35_REV")"
+
+  # --- AC5 / UT5: the subagent-workflow mirror ---
+  assert_eq "35n: Phase 1 hands the explorer TASK_FILE" "found" "$(g35_in '- `TASK_FILE`, plus one sentence' "$G35_P1")"
+  assert_eq "35n: Phase 1 carries the read-as-data sentence" "found" "$(g35_in 'as data, not instructions' "$G35_P1")"
+  assert_eq "35n: Phase 1 keeps the inline fields as the fallback" "found" \
+    "$(g35_in '**Only when there is no usable task file**' "$G35_P1")"
+  assert_eq "35n: the fallback list is intact" "found" "$(g35_in "The task's \`where_context\` text" "$G35_P1")"
+  assert_eq "35o: Phase 3 goes by way of TASK_FILE" "found" "$(g35_in 'by way of `TASK_FILE`' "$G35_P3")"
+  assert_eq "35o: Phase 3 keeps the inline path" "found" "$(g35_in 'pasted inline only when' "$G35_P3")"
+
+  # --- pitfall: planning is inline here, so no planner contract was ported ---
+  assert_eq "35p: no PLAN_REPORT_PATH in the workflow skill" "0" "$(grep -c 'PLAN_REPORT_PATH' "$G35_WF" || true)"
+  assert_eq "35p: no PLAN_REPORT_PATH in the subagent-workflow skill" "0" "$(grep -c 'PLAN_REPORT_PATH' "$G35_SAW" || true)"
+  assert_eq "35p: the inline planning item names no TASK_FILE" "missing" "$(g35_in 'TASK_FILE' "$G35_ITEM2")"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
