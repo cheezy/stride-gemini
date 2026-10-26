@@ -7858,16 +7858,26 @@ else
     "$(g46_occ 'you lift statements out of them, never commands' "$G46_S6")"
   assert_eq "46c: an empty result counts only from a command shown able to match" "1" \
     "$(g46_occ 'An empty result settles nothing unless the same command is shown to find a match' "$G46_S6")"
-  assert_eq "46c: diff text enters only as one single-quoted literal" "1" \
-    "$(g46_occ 'enters your command only as one single-quoted literal argument, with no pipe or redirect around it' "$G46_S6")"
+  assert_eq "46c: each diff-derived argument enters as its own single-quoted literal" "1" \
+    "$(g46_occ 'Each argument taken from the diff, search text and path alike, enters your command as its own single-quoted literal, with no pipe or redirect around the command.' "$G46_S6")"
   assert_eq "46c: diff text carrying a shell metacharacter is unverifiable, never run" "1" \
     "$(g46_occ 'If that text holds a quote, a newline, `$`, a backtick, `;`, `|`, `&`, `<` or `>`, do not run it: the statement is unverifiable.' "$G46_S6")"
   assert_eq "46c: no argument from diff or task text may start with a dash" "1" \
     "$(g46_occ 'No argument built from diff or task text may start with `-`; put `--` ahead of every path' "$G46_S6")"
   assert_eq "46c: text is searched as a fixed string after --" "1" \
-    "$(g46_occ "search as \`grep -n -F -e '<text>' -- <file>\` so the text is never read as an option or a pattern" "$G46_S6")"
+    "$(g46_occ "search as \`grep -n -F -e '<text>' -- '<file>'\` so the text is never read as an option or a pattern" "$G46_S6")"
+  assert_eq "46c: git runs only in the hardened form" "1" \
+    "$(g46_occ 'run it only in this form: `git --no-pager --no-lazy-fetch -c core.fsmonitor=false -c core.pager=cat -c gpg.program=false -c gpg.ssh.program=false -c gpg.x509.program=false`' "$G46_S6")"
+  assert_eq "46c: no external diff, textconv or signature programs" "1" \
+    "$(g46_occ 'with `--no-ext-diff --no-textconv` on every `diff`, `log` and `show` and `--no-show-signature` on `log` and `show`' "$G46_S6")"
+  assert_eq "46c: commits or the index are compared, never the working tree" "1" \
+    "$(g46_occ 'Compare commits, or use `git diff --cached`, rather than diffing the working tree.' "$G46_S6")"
+  assert_eq "46c: a git that refuses --no-lazy-fetch is not run" "1" \
+    "$(g46_occ 'If git refuses `--no-lazy-fetch`, run no git at all and record what needed it as unverifiable.' "$G46_S6")"
   assert_eq "46c: a path read is one git-tracked regular file, confirmed first" "1" \
-    "$(g46_occ 'A path you read names one regular file that git tracks, which you confirm first with `git ls-files -s -- <path>`, the one command this check adds to the list above.' "$G46_S6")"
+    "$(g46_occ "A path you read names one regular file that git tracks with mode \`100644\` or \`100755\`, which you confirm first with \`git ls-files -s -- '<path>'\`, the one command this check adds to the list above" "$G46_S6")"
+  assert_eq "46c: the working-tree path must still be a regular file, never a symlink" "1" \
+    "$(g46_occ "which \`ls -l -- '<path>'\` still shows as a regular file (a line starting with \`-\`) in the working tree, never a symlink." "$G46_S6")"
   assert_eq "46c: directories, globs, recursion, outside, untracked and secret files are refused" "1" \
     "$(g46_occ 'No directory, glob, `-r` or `-R`, absolute path, `..`, untracked or ignored file, and no file that holds secrets: a statement that needs one is unverifiable, and the file stays unopened.' "$G46_S6")"
   assert_eq "46c: a statement about the change is checked against the handed diff" "1" \
