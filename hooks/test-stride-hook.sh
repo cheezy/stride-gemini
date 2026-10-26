@@ -6458,6 +6458,76 @@ else
 fi
 
 # ============================================================
+# Test Group 37: the explorer wait and the stop gate's agent exemption (W2467)
+# ============================================================
+# Pins the W2467 decision on stride W2254 and W2255. Gemini CLI 0.65.0 was
+# measured, not read about: a custom-agent invocation holds the main turn until
+# the agent returns, and the AfterAgent input carries no running-agent list. So
+# Branch C says there is nothing to overlap, and the gates stay as they were.
+# Contract text plus two blob pins, so this half carries it alone, as Groups
+# 20-22, 35 and 38 do. 37 was the number the goal reserved, and it was free.
+echo ""
+echo "=== Test Group 37: the explorer wait and the stop gate's agent exemption (W2467) ==="
+
+G37_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G37_HR="$SCRIPT_DIR/../docs/HOOK_RESEARCH.md"
+if [ -f "$G37_WF" ] && [ -f "$G37_HR" ]; then
+  G37_ITEM1="$(awk '/^### Branch C:/{f=1; next} /^##/{f=0} f && /^1\. \*\*/' "$G37_WF")"
+  G37_REC="$(awk '/^## Custom-agent invocation and the `AfterAgent` input/{f=1} f' "$G37_HR")"
+  assert_eq "37a: Branch C has exactly one item 1" "1" "$(printf '%s\n' "$G37_ITEM1" | grep -c '^1\. \*\*')"
+  assert_eq "37a: the measured record exists" "yes" "$([ -n "$G37_REC" ] && echo yes || echo no)"
+
+  # --- the record: version, method, the fields seen, both answers, both decisions ---
+  assert_contains "37b: record names the CLI version" '**CLI version: 0.65.0**' "$G37_REC"
+  assert_contains "37b: record says the raw log is not committed" '**The raw log is not committed**' "$G37_REC"
+  assert_contains "37b: record lists the AfterAgent fields" \
+    '`AfterAgent`: `cwd`, `hook_event_name`, `prompt`, `prompt_response`, `session_id`,' "$G37_REC"
+  assert_contains "37b: including stop_hook_active" '`stop_hook_active`, `timestamp`, `transcript_path`' "$G37_REC"
+  assert_contains "37c: answer 1 — the invocation blocks" '**Does the invocation block? Yes.**' "$G37_REC"
+  assert_contains "37c: answer 2 — no running-agent list" \
+    '**Does the `AfterAgent` input list running agents? No.**' "$G37_REC"
+  assert_contains "37c: W2254 is disclosed" '**W2254 — disclosed rather than ported.**' "$G37_REC"
+  assert_contains "37c: W2255 is not applicable" '**W2255 — not applicable.**' "$G37_REC"
+  assert_contains "37c: no marker was invented" 'no running-agent marker was invented' \
+    "$(printf '%s' "$G37_REC" | tr '\n' ' ' | tr -s ' ')"
+
+  # --- Branch C item 1 agrees with the record ---
+  assert_contains "37d: Branch C says there is nothing to overlap" 'there is nothing to overlap with the explorer' "$G37_ITEM1"
+  assert_contains "37d: Branch C cites the record" '`docs/HOOK_RESEARCH.md`' "$G37_ITEM1"
+  assert_contains "37d: Branch C still says to wait" 'Wait for the result.' "$G37_ITEM1"
+  assert_contains "37d: and still says to use the output" "Read and use the explorer's output" "$G37_ITEM1"
+  G37_V_WF="$(printf '%s\n' "$G37_ITEM1" | grep -oE 'Gemini CLI [0-9]+\.[0-9]+\.[0-9]+' | head -1 | sed 's/^Gemini CLI //')"
+  G37_V_HR="$(printf '%s\n' "$G37_REC" | grep -oE '\*\*CLI version: [0-9]+\.[0-9]+\.[0-9]+\*\*' | head -1 | sed -E 's/[^0-9.]//g')"
+  assert_eq "37e: Branch C names a version" "yes" "$([ -n "$G37_V_WF" ] && echo yes || echo no)"
+  assert_eq "37e: the same version as the record" "$G37_V_HR" "$G37_V_WF"
+  # The host cannot follow an overlap instruction, so none may creep back in.
+  assert_eq "37f: no edit-hold instruction from stride's W2254" "0" "$(printf '%s\n' "$G37_ITEM1" | grep -ciF 'edit no file until')"
+  assert_eq "37f: no background dispatch" "0" "$(printf '%s\n' "$G37_ITEM1" | grep -ciE 'run_in_background|in the background')"
+  assert_eq "37f: no read-while-it-runs instruction" "0" \
+    "$(printf '%s\n' "$G37_ITEM1" | grep -ciE 'while (it|the explorer) runs?,? read')"
+else
+  echo "  SKIP: Test Group 37 (SKILL.md or docs/HOOK_RESEARCH.md not found)"
+fi
+
+# --- W2255 not ported: both gate halves are byte-identical to before W2467 ---
+# A deliberate gate edit must update these two pins, and in doing so re-read
+# the W2467 record: it is the reason the gate carries no agent exemption.
+G37_SH="$SCRIPT_DIR/stride-stop-gate.sh"
+G37_PS="$SCRIPT_DIR/stride-stop-gate.ps1"
+if command -v git >/dev/null 2>&1 && [ -f "$G37_SH" ] && [ -f "$G37_PS" ]; then
+  assert_eq "37g: stride-stop-gate.sh is unchanged" "14f989bc6420e10d4e66e0f44d50f786f4e620be" "$(git hash-object "$G37_SH")"
+  assert_eq "37g: stride-stop-gate.ps1 is unchanged" "6f34c8721907b1a51b74f517c2f55f5bb84d98ce" "$(git hash-object "$G37_PS")"
+else
+  echo "  SKIP: Test Group 37 blob pins (git or a gate half not found)"
+fi
+for G37_GATE in "$G37_SH" "$G37_PS"; do
+  if [ -f "$G37_GATE" ]; then
+    assert_eq "37h: $(basename "$G37_GATE") reads no running-agent list" "0" \
+      "$(grep -ciE 'background_tasks|since_epoch|stop-pending' "$G37_GATE")"
+  fi
+done
+
+# ============================================================
 # Test Group 38: slim discovery, enrichment after the claim (W2468)
 # ============================================================
 # Ports stride W2256. Contract text only, so this half carries it alone, as

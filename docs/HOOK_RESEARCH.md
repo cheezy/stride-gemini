@@ -19,6 +19,10 @@
 > historical CHANGELOG entries citing superseded step numbers are not rewritten. In this port the marker clear now
 > lives under `## Step 8: Post-Completion Decision`. For current guidance always read
 > `skills/stride-workflow/SKILL.md`, whose own `## Step` headings are the ground truth.
+>
+> **One later record is appended at the end:** the W2467 measurement of how a custom-agent invocation and the
+> `AfterAgent` input behave. It carries its own date and CLI version, and from that date it is frozen on the same
+> terms as everything above it.
 
 Research target: decide whether stride 1.10.0's PreToolUse(Skill) gate
 (`stride-skill-gate.sh` + matcher `"Skill"`) ports to Gemini CLI.
@@ -204,3 +208,99 @@ is now active on Gemini.
 
 Layers 2 (INTERNAL descriptions, W299) and 3 (STOP preamble, W298) are
 runtime-independent and remain the always-available enforcement.
+
+## Custom-agent invocation and the `AfterAgent` input — measured (W2467, 2026-10-25)
+
+stride 1.81.0 shipped two fixes whose value rests on host behaviour: W2254 (read the `key_files` while
+the explorer runs) and W2255 (let a held-claim stop through while a subagent is still running, which
+reads the running-agent list Claude Code puts on its `Stop` input). Each port has to measure its own
+host before porting either. This section is that measurement for Gemini CLI.
+
+### How it was measured
+
+- **CLI version: 0.65.0** — the `latest` npm tag of `@google/gemini-cli` on the day, fetched with
+  `npm pack` (no install scripts run) and executed from the package's own `bundle/gemini.js`, whose
+  `--version` printed `0.65.0`.
+- **Throwaway everything.** A scratch project and a scratch `HOME`, headless (`-p` with `--yolo`). The
+  model endpoint was a local mock reached through `GOOGLE_GEMINI_BASE_URL`, with a placeholder API key:
+  no real credential existed in the session, and none was needed, because the mock scripted the model.
+- **The script.** The main model's first response asked for two calls at once — `invoke_agent` naming a
+  throwaway user-level agent, and `read_file`. The agent ran `sleep 6` through `run_shell_command` and
+  then called `complete_task`. Project-local hooks on `BeforeAgent`, `BeforeTool`, `AfterTool` and
+  `AfterAgent` appended the event name, a millisecond clock and the sorted top-level field names of
+  their stdin to a log. **The raw log is not committed**; only the field names and timings below are.
+- **Two runs.** The second set `experimental.adk.agentSessionSubagentEnabled: true`, which selects the
+  other invocation class in the agent tool's source. Both runs gave the same ordering. Whether that
+  setting was honoured in headless mode was not separately confirmed; the source check below covers
+  both classes either way.
+
+### What the hooks saw (first run; milliseconds after the `invoke_agent` `BeforeTool`)
+
+| Event | Tool | ms |
+|---|---|---:|
+| `BeforeTool` | `read_file` | 0 |
+| `BeforeTool` | `invoke_agent` | 0 |
+| `AfterTool` | `read_file` | 69 |
+| `BeforeTool` | `run_shell_command` (inside the agent) | 70 |
+| `AfterTool` | `run_shell_command` | 6,186 |
+| `BeforeTool` / `AfterTool` | `complete_task` | 6,234 / 6,275 |
+| `AfterTool` | `invoke_agent` | 6,321 |
+| `AfterAgent` | — | 6,373 |
+
+The mock recorded the main model's second request at 6,327 ms — after the invocation's `AfterTool`,
+never during the sleep.
+
+Field names on stdin:
+
+- `BeforeAgent`: `cwd`, `hook_event_name`, `prompt`, `session_id`, `timestamp`, `transcript_path`
+- `BeforeTool`: those base fields without `prompt`, plus `tool_name` and `tool_input`
+- `AfterTool`: the `BeforeTool` set plus `tool_response`
+- `AfterAgent`: `cwd`, `hook_event_name`, `prompt`, `prompt_response`, `session_id`,
+  `stop_hook_active`, `timestamp`, `transcript_path`
+
+Two side observations: the agent's own tool calls fired the session's `BeforeTool` / `AfterTool` hooks
+like any other call, and `AfterAgent` fired exactly once per run — for the main turn, after the agent had
+already returned. The agent's own turns did not fire it.
+
+### Source cross-check (0.65.0 `@google/gemini-cli-core`, `dist/src`)
+
+- `hooks/types.d.ts`: `AfterAgentInput` declares exactly `prompt`, `prompt_response` and
+  `stop_hook_active` over the base fields. No agent or task list.
+- `agents/agent-tool.js`: the invocation's `execute` awaits the child invocation. Both child classes
+  await the finished result — `agents/local-invocation.js` awaits `executor.run`, and
+  `agents/local-session-invocation.js` awaits `session.getResult()`.
+- `scheduler/scheduler.js` with `utils/tool-utils.js` (`isParallelizable`): contiguous calls from one
+  model response run as one batch, unless they are edits or set `wait_for_previous`. That is why
+  `read_file` finished beside the invocation. Each result goes back to the model only when the batch
+  is done.
+- `docs/core/subagents.md`, bundled with the package, describes no background or asynchronous mode for
+  subagents, so this version's own docs promise no background mode that its code then lacks.
+
+### Answers
+
+1. **Does the invocation block? Yes.** The main model takes no turn until the agent returns. Read-only
+   calls in the same response can run beside it (an edit, or a call that sets `wait_for_previous`,
+   waits for the calls ahead of it instead), but the model chose them before seeing anything, and their
+   results arrive with the agent's.
+2. **Does the `AfterAgent` input list running agents? No.** None of its eight fields is an agent or task
+   list. `prompt_response` is the model's final text, not a list. And because the invocation holds the
+   turn, `AfterAgent` cannot fire while an agent is running on this version.
+
+### Decisions
+
+- **W2254 — disclosed rather than ported.** `skills/stride-workflow/SKILL.md` Step 3 Branch C item 1 now
+  says there is nothing to overlap. It gives no instruction to read files during the wait, which the
+  host does not allow. It also gives no instruction to batch reads beside the invocation: the saving
+  would be the reads' own milliseconds.
+- **W2255 — not applicable.** `hooks/stride-stop-gate.sh` and `.ps1` are unchanged, and no
+  running-agent marker was invented to stand in for a list the host does not provide.
+
+Not applicable on this port, for the release entry:
+
+- the W2255 running-agent permit at the stop gate and its 30-minute `since_epoch` bound — `AfterAgent`
+  carries no running-agent list, and the gate never runs while an agent does;
+- the W2254 instruction to read `key_files` while the explorer runs — the invocation holds the turn.
+
+**Re-measure** when a Gemini CLI release documents a background subagent mode or adds an agent list to
+the `AfterAgent` input. Test Group 37 in `hooks/test-stride-hook.sh` pins this record, the Branch C
+wording and the unchanged gates, so a change to any of them shows up as a failing group.

@@ -304,6 +304,12 @@ worth knowing before changing the gate:
   block is an unbounded one, a failure to record the count permits instead of
   blocking.
 
+**No exemption for a running agent (stride's W2255 does not apply here).** stride lets a held-claim
+stop through while a subagent is still working, because Claude Code's stop input lists the agents
+that are running. On Gemini CLI 0.65.0 the `AfterAgent` input lists none, and a custom-agent
+invocation keeps the turn until the agent returns, so this gate never runs while an agent does. The
+measurement is in `docs/HOOK_RESEARCH.md`.
+
 **The escape hatches are not interchangeable between the two conditions.**
 `STRIDE_ALLOW_STOP=1` clears either. Deleting `.stride/.loop-state.json` clears
 only the *unfollowed completion*; it is **inert** against a held claim, which
