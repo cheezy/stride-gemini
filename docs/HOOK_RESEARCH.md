@@ -20,9 +20,10 @@
 > lives under `## Step 8: Post-Completion Decision`. For current guidance always read
 > `skills/stride-workflow/SKILL.md`, whose own `## Step` headings are the ground truth.
 >
-> **One later record is appended at the end:** the W2467 measurement of how a custom-agent invocation and the
-> `AfterAgent` input behave. It carries its own date and CLI version, and from that date it is frozen on the same
-> terms as everything above it.
+> **Two later records are appended at the end:** the W2467 measurement of how a custom-agent invocation and the
+> `AfterAgent` input behave, and the measurement that settled risk R1 (whether `AfterAgent` honours the JSON
+> decision). Each carries its own date and CLI version, and from that date it is frozen on the same terms as
+> everything above it.
 
 Research target: decide whether stride 1.10.0's PreToolUse(Skill) gate
 (`stride-skill-gate.sh` + matcher `"Skill"`) ports to Gemini CLI.
@@ -304,3 +305,47 @@ Not applicable on this port, for the release entry:
 **Re-measure** when a Gemini CLI release documents a background subagent mode or adds an agent list to
 the `AfterAgent` input. Test Group 37 in `hooks/test-stride-hook.sh` pins this record, the Branch C
 wording and the unchanged gates, so a change to any of them shows up as a failing group.
+
+## Does `AfterAgent` honour the JSON decision? — measured (risk R1, 2026-10-26)
+
+Risk R1 (W2145) said the stop gate's blocking contract was confirmed for `BeforeTool` but not for `AfterAgent`.
+If `AfterAgent` honoured only exit 2, the gate's `{"decision":"deny"}` at exit 0 would never block. This record
+settles it.
+
+### How it was measured
+
+- **CLI version: 0.65.0**, run the same way as the W2467 record above: the `npm pack` tarball's own
+  `bundle/gemini.js`, a scratch project and a scratch `HOME`, headless, with the model replaced by a local mock
+  reached through `GOOGLE_GEMINI_BASE_URL` and a placeholder API key.
+- A project-local `AfterAgent` hook logged its stdin and a call count. On its first call it did one of three
+  things, and on any later call it permitted (exit 0, no output):
+  - **Run A:** printed `{"decision":"deny","reason":"R1-PROBE-A please continue"}` and exited 0.
+  - **Run B:** wrote `R1-PROBE-B` to stderr and exited 2.
+  - **Run C:** permitted (the control).
+- The mock counted model requests and kept their bodies. **The raw logs are not committed**; the counts and
+  the fields below are.
+
+### What happened
+
+| Run | First call | Model requests | `AfterAgent` calls | `stop_hook_active` |
+|---|---|---:|---:|---|
+| A | JSON `deny`, exit 0 | 2 | 2 | `false`, then `true` |
+| B | stderr, exit 2 | 2 | 2 | `false`, then `true` |
+| C | permit | 1 | 1 | `false` |
+
+In runs A and B the second model request carried the hook's reason as a new user turn after the model's first
+answer. Run C ended after one request.
+
+### Source cross-check (0.65.0 `@google/gemini-cli-core`, `dist/src`)
+
+- `core/client.js`, `sendMessageStream`: after a turn with no pending tools it fires `AfterAgent`. If the output
+  is a blocking decision, it sends the reason as the next request and calls itself again with
+  `stopHookActive` set to `true`.
+- `hooks/types.js`: `isBlockingDecision()` is true for `'block'` and for `'deny'`. So the `block` spelling other
+  ports use would block here too. `deny` is this port's spelling, not the only one that works.
+
+### Decision
+
+**R1 is settled: the gate's contract holds.** `hooks/stride-stop-gate.sh` and `.ps1` are unchanged apart from
+their headers, which now record this result in place of the unconfirmed-contract warning. **Re-measure** when a
+Gemini CLI release changes how `sendMessageStream` handles an `AfterAgent` decision.

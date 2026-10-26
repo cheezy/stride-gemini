@@ -29,18 +29,20 @@
 #
 # BLOCKING CONTRACT (Gemini-specific, and it differs from the sibling ports):
 #   {"decision":"deny","reason":"<prompt>"} on stdout, exit 0.
-#   The value is 'deny' — NOT 'block' as on Codex and Copilot. The wrong token
-#   means no block at all. The reason is fed to the agent as its next prompt,
-#   so it must name the claimable identifier.
+#   The fleet spelling is 'block' (Codex, Copilot); this port emits 'deny'. On
+#   Gemini CLI 0.65.0 both are blocking decisions (isBlockingDecision in
+#   core hooks/types.js accepts either), so the spelling is this port's
+#   convention, pinned by 19a2, not a correctness boundary. The reason is fed
+#   to the agent as its next prompt, so it must name the claimable identifier.
 #
-#   *** UNCONFIRMED CONTRACT (W2145, risk R1) ***
-#   docs/HOOK_RESEARCH.md documents the exit-0 + JSON-decision pairing only for
-#   BeforeTool; nothing there confirms it for AfterAgent. Exit 2 with stderr is
-#   documented as also triggering a retry, but the fleet rule is to use the JSON
-#   decision so one implementation works everywhere. If AfterAgent turns out to
-#   honour only exit 2, this gate silently never blocks — the fix is one line in
-#   emit_deny plus inverting test 19z. Only a live Gemini CLI restart can settle
-#   it; the suite invokes this script directly and cannot.
+#   CONTRACT MEASURED (W2145 risk R1, settled 2026-10-26 on Gemini CLI 0.65.0):
+#   an AfterAgent hook that prints this JSON decision at exit 0 re-prompts the
+#   model — the reason arrives as a new user turn and the hook fires again with
+#   stop_hook_active true. Exit 2 with stderr does the same, and a permitting
+#   hook ends the turn after one model request. Source: core/client.js
+#   sendMessageStream. docs/HOOK_RESEARCH.md has the runs. Re-measure if a
+#   Gemini CLI release changes AfterAgent handling; the suite invokes this
+#   script directly and cannot see the host.
 #
 # STDOUT DISCIPLINE: Gemini parses this script's stdout as ONE JSON document.
 # A single stray byte breaks the parse and the CLI falls back to ALLOWING the

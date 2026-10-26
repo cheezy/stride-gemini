@@ -286,18 +286,15 @@ worth knowing before changing the gate:
 
 - **The refusal is spelled `deny`.** Gemini reads
   `{"decision":"deny","reason":"..."}` from stdout at exit 0, and feeds the
-  reason back to the agent as its next prompt. The `block` token used elsewhere
-  in the fleet does nothing here — a gate that emits it never refuses at all.
-  Exit status carries no decision: permit and deny both exit 0, so stdout is the
-  only channel that says anything.
-- **That pairing is confirmed for `BeforeTool`, not for `AfterAgent`** — carried
-  as risk R1 in both gate script headers and as a Known limit in the changelog.
-  `docs/HOOK_RESEARCH.md` documents exit 0 plus a JSON decision only for
-  `BeforeTool`; exit 2 with stderr is documented as also triggering a retry. The
-  fleet rule is to emit the JSON decision so one implementation serves every
-  port, but if `AfterAgent` honours exit 2 alone then **this gate silently never
-  blocks**. Only a live Gemini CLI run settles it — the suite invokes the script
-  directly and cannot.
+  reason back to the agent as its next prompt. Gemini CLI 0.65.0 also accepts
+  the `block` spelling used elsewhere in the fleet; `deny` is this port's
+  choice, and the suite pins it. Exit status carries no decision: permit and
+  deny both exit 0, so stdout is the only channel that says anything.
+- **The pairing is measured for `AfterAgent` too.** Risk R1 said it was
+  confirmed only for `BeforeTool`. A run on Gemini CLI 0.65.0 showed that the
+  JSON decision at exit 0 re-prompts the model on `AfterAgent`, and so does
+  exit 2. `docs/HOOK_RESEARCH.md` has the runs. The suite invokes the script
+  directly, so a later CLI change would need a new live run to catch.
 - **Nothing in the runtime caps a repeated refusal,** so the gate bounds itself.
   It refuses at most twice per condition and then yields — the two budgets are
   keyed separately, so neither can spend the other's — and because an uncounted

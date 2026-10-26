@@ -21,6 +21,12 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Risk R1 settled: the stop gate's AfterAgent contract is measured
+
+The stop gate's headers carried an unconfirmed-contract warning (risk R1, W2145): the JSON `deny` decision at exit 0 was documented for `BeforeTool` and not for `AfterAgent`, and if `AfterAgent` honoured only exit 2 the gate would never block. A run on Gemini CLI 0.65.0 settled it. The JSON decision at exit 0 re-prompts the model with the reason as a new user turn, and exit 2 does the same. The gate's behaviour is unchanged. Its headers, the README and `docs/HOOK_RESEARCH.md` now record the result. They also correct an earlier claim: the `block` spelling other ports use is accepted here too, so `deny` is this port's spelling rather than the only one that works. Test 37i pins the record and the headers, and 37g's blob pins move for the comment-only header edit.
+
 ## [1.51.0] - 2026-10-26
 
 This release carries the whole of stride's G446–G448 batch into this extension

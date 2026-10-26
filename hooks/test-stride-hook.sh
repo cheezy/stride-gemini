@@ -3489,7 +3489,7 @@ fi
 #     them — with states 3 and 4 absent there is no taxonomy to file a stop
 #     under, so this gate has one permit() helper and three silent exits.
 #   * Claude's 34s asserts the legacy "block" spelling; 19a2 inverts it, since
-#     Gemini's value is "deny" and "block" here means no block at all.
+#     this port's spelling is "deny" (Gemini CLI 0.65.0 also accepts "block").
 #   * Claude's 34j asserts a dual decision spelling; 19b2 replaces it with an
 #     exact-two-keys assertion, because Gemini documents one spelling.
 echo ""
@@ -3603,7 +3603,7 @@ G19STUB
       "$(grep -c '^ARGS:' "$S/curl.log" 2>/dev/null || echo 0)"
   done
 
-  # 19a2: the value is deny and NOT block — the wrong token means no block at all
+  # 19a2: the value is deny and NOT block — the port's pinned spelling
   assert_eq "19a2: the decision is not the Codex/Copilot spelling" "false" \
     "$(printf '%s' "$G19_OUT" | jq -r '.decision == "block"' 2>/dev/null)"
 
@@ -5499,8 +5499,8 @@ else
   assert_exit "23ab: a refusal exits 2" 2 "$G23_RC"
   assert_eq "23ab: it emits exactly one JSON document" "1" \
     "$(jq -s 'length' < "$G23_OUT" 2>/dev/null)"
-  # THE TOKEN. `deny`, not `block` -- that belongs to other runtimes in this
-  # fleet, and the wrong token would mean no refusal at all.
+  # THE TOKEN. `deny`, not `block` -- `block` is the spelling other runtimes in
+  # this fleet use. Gemini CLI 0.65.0 accepts both; `deny` is this port's.
   assert_eq "23ab: the decision token is deny" "deny" \
     "$(jq -r '.decision // "MISSING"' < "$G23_OUT" 2>/dev/null)"
   assert_eq "23ab: and is not block" "false" \
@@ -6546,14 +6546,16 @@ else
   echo "  SKIP: Test Group 37 (SKILL.md or docs/HOOK_RESEARCH.md not found)"
 fi
 
-# --- W2255 not ported: both gate halves are byte-identical to before W2467 ---
+# --- W2255 not ported: both gate halves are pinned by blob hash ---
 # A deliberate gate edit must update these two pins, and in doing so re-read
 # the W2467 record: it is the reason the gate carries no agent exemption.
+# Last moved for the R1 header rewrite (comments only; the non-comment lines
+# are byte-identical to the W2467 pins).
 G37_SH="$SCRIPT_DIR/stride-stop-gate.sh"
 G37_PS="$SCRIPT_DIR/stride-stop-gate.ps1"
 if command -v git >/dev/null 2>&1 && [ -f "$G37_SH" ] && [ -f "$G37_PS" ]; then
-  assert_eq "37g: stride-stop-gate.sh is unchanged" "14f989bc6420e10d4e66e0f44d50f786f4e620be" "$(git hash-object "$G37_SH")"
-  assert_eq "37g: stride-stop-gate.ps1 is unchanged" "6f34c8721907b1a51b74f517c2f55f5bb84d98ce" "$(git hash-object "$G37_PS")"
+  assert_eq "37g: stride-stop-gate.sh is unchanged" "c96fdef614e2e1a6fd7dec21209337b4fb9bae7d" "$(git hash-object "$G37_SH")"
+  assert_eq "37g: stride-stop-gate.ps1 is unchanged" "079f701d09b2000ccda6234c0b1338467da7387f" "$(git hash-object "$G37_PS")"
 else
   echo "  SKIP: Test Group 37 blob pins (git or a gate half not found)"
 fi
@@ -6563,6 +6565,24 @@ for G37_GATE in "$G37_SH" "$G37_PS"; do
       "$(grep -ciE 'background_tasks|since_epoch|stop-pending' "$G37_GATE")"
   fi
 done
+
+# --- 37i: risk R1 is settled, and every place that carried it says so ---
+G37_R1="$(awk '/^## Does `AfterAgent` honour the JSON decision\?/{f=1} f' "$G37_HR")"
+assert_eq "37i: the R1 record exists" "yes" "$([ -n "$G37_R1" ] && echo yes || echo no)"
+assert_contains "37i: it names the CLI version" '**CLI version: 0.65.0**' "$G37_R1"
+assert_contains "37i: it gives the decision" '**R1 is settled: the gate' "$G37_R1"
+assert_contains "37i: JSON deny re-prompted the model" '| A | JSON `deny`, exit 0 | 2 | 2 |' "$G37_R1"
+assert_contains "37i: the control did not" '| C | permit | 1 | 1 |' "$G37_R1"
+for G37_GATE in "$G37_SH" "$G37_PS"; do
+  if [ -f "$G37_GATE" ]; then
+    assert_eq "37i: $(basename "$G37_GATE") no longer calls the contract unconfirmed" "0" \
+      "$(grep -c 'UNCONFIRMED CONTRACT' "$G37_GATE")"
+    assert_eq "37i: $(basename "$G37_GATE") records the measurement" "1" \
+      "$(grep -c 'CONTRACT MEASURED (W2145 risk R1, settled 2026-10-26 on Gemini CLI 0.65.0)' "$G37_GATE")"
+  fi
+done
+assert_eq "37i: no file claims block means no block at all" "0" \
+  "$(grep -rlE 'no block at all|never refuses at all|wrong token would mean' "$G37_SH" "$G37_PS" "$SCRIPT_DIR/../README.md" | wc -l | tr -d ' ')"
 
 # ============================================================
 # Test Group 38: slim discovery, enrichment after the claim (W2468)

@@ -9,12 +9,13 @@
 # and permits on everything else.
 #
 # BLOCKING CONTRACT: {"decision":"deny","reason":"<prompt>"} on stdout, exit 0.
-# The value is 'deny', NOT 'block' as on Codex and Copilot.
+# The fleet spells it 'block'; this port emits 'deny'. Gemini CLI 0.65.0
+# accepts both as blocking decisions.
 #
-#   *** UNCONFIRMED CONTRACT (W2145, risk R1) *** docs/HOOK_RESEARCH.md
-#   documents the exit-0 + JSON-decision pairing only for BeforeTool, not for
-#   AfterAgent. If AfterAgent honours only exit 2, this gate silently never
-#   blocks. Only a live Gemini CLI restart can settle it.
+#   CONTRACT MEASURED (W2145 risk R1, settled 2026-10-26 on Gemini CLI 0.65.0):
+#   on AfterAgent the JSON decision at exit 0 re-prompts the model with the
+#   reason as a new user turn. docs/HOOK_RESEARCH.md has the runs, and
+#   stride-stop-gate.sh's header has the summary.
 #
 # STDOUT DISCIPLINE — the live hazard on this half. Gemini parses stdout as ONE
 # JSON document, and PowerShell's IMPLICIT PIPELINE OUTPUT means any cmdlet
