@@ -6211,6 +6211,253 @@ else
 fi
 
 # ============================================================
+# Test Group 36: stale-install warning at Step 0 (W2465)
+# ============================================================
+# Ports stride W2251. check-plugin-current.sh finds gemini-extension.json from
+# its own location, so each case copies the script into a fixture extension
+# (<ext>/hooks/ beside <ext>/gemini-extension.json). A stub curl first on PATH
+# serves the catalog body and logs its arguments, so no case touches the
+# network and the catalog URL stays a constant in the script. 36 was the number
+# the goal reserved for this task, and it was still free.
+echo ""
+echo "=== Test Group 36: stale-install warning at Step 0 (W2465) ==="
+
+G36_SRC="$SCRIPT_DIR/check-plugin-current.sh"
+G36_DIR="$TMPDIR_TEST/g36"
+G36_UPDATE='gemini extensions update stride-gemini'
+mkdir -p "$G36_DIR/stub"
+cat > "$G36_DIR/stub/curl" <<'G36STUB'
+#!/usr/bin/env bash
+printf 'ARGS: %s\n' "$*" >> "$G36_CURL_LOG"
+[ -f "$G36_BODY_FILE" ] && cat "$G36_BODY_FILE"
+exit "${G36_CURL_EXIT:-0}"
+G36STUB
+chmod +x "$G36_DIR/stub/curl"
+
+# g36_ext <name> [manifest-json] -> echoes the script path inside a fixture
+# extension; with no manifest argument the manifest is left out entirely.
+g36_ext() {
+  mkdir -p "$G36_DIR/ext/$1/hooks"
+  cp "$G36_SRC" "$G36_DIR/ext/$1/hooks/check-plugin-current.sh"
+  rm -f "$G36_DIR/ext/$1/gemini-extension.json"
+  if [ "$#" -ge 2 ]; then printf '%s' "$2" > "$G36_DIR/ext/$1/gemini-extension.json"; fi
+  printf '%s' "$G36_DIR/ext/$1/hooks/check-plugin-current.sh"
+}
+# g36_ver <version> -> a fixture extension whose manifest names that version
+g36_ver() {
+  g36_ext "v-$1" "{\"name\":\"stride-gemini\",\"version\":\"$1\",\"contextFileName\":\"GEMINI.md\"}"
+}
+# g36_catalog <stride-gemini-version> -> a catalog body with decoys on both sides
+g36_catalog() {
+  printf '[{"name":"stride-gemini-ideation","version":"9.9.9"},{"name":"stride-gemini","version":"%s","repo":"https://github.com/cheezy/stride-gemini"},{"name":"stride-gemini-security-review","version":"9.9.9"}]' "$1" > "$G36_DIR/body"
+}
+# g36_run <script> [curl-exit] [extra args...] -> sets G36_OUT, G36_ERR, G36_RC
+g36_run() {
+  _g36_script="$1"; _g36_exit="${2:-0}"
+  shift; [ "$#" -gt 0 ] && shift
+  : > "$G36_DIR/curl.log"
+  G36_OUT=$(G36_CURL_LOG="$G36_DIR/curl.log" G36_BODY_FILE="$G36_DIR/body" G36_CURL_EXIT="$_g36_exit" \
+    PATH="$G36_DIR/stub:$PATH" bash "$_g36_script" "$@" 2> "$G36_DIR/stderr")
+  G36_RC=$?
+  G36_ERR="$(cat "$G36_DIR/stderr")"
+}
+G36_WARN_1_0='This stride-gemini extension is at 1.0.0; stride-gemini-marketplace lists 1.50.0. To catch up, run: gemini extensions update stride-gemini'
+
+if [ -f "$G36_SRC" ] && command -v jq > /dev/null 2>&1; then
+  # --- matrix row 0: an older install warns once and exits 0 ---
+  g36_catalog "1.50.0"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_exit "36a: older install exits 0" 0 "$G36_RC"
+  assert_eq "36a: older install prints the warning line" "$G36_WARN_1_0" "$G36_OUT"
+  assert_eq "36a: exactly one line" "1" "$(printf '%s\n' "$G36_OUT" | grep -c '')"
+  assert_eq "36a: nothing on stderr" "" "$G36_ERR"
+  assert_contains "36a: the line names the update command" "$G36_UPDATE" "$G36_OUT"
+
+  # --- matrix row 1: numeric compare; equal and newer are silent ---
+  g36_run "$(g36_ver 1.50.0)"
+  assert_eq "36b: equal versions print nothing" "" "$G36_OUT"
+  assert_exit "36b: equal versions exit 0" 0 "$G36_RC"
+  g36_run "$(g36_ver 1.51.0)"
+  assert_eq "36c: newer install prints nothing" "" "$G36_OUT"
+  g36_run "$(g36_ver 1.9.0)"
+  assert_contains "36d: 1.9.0 installed vs a 1.50.0 pin warns (numeric, not string)" \
+    'This stride-gemini extension is at 1.9.0; stride-gemini-marketplace lists 1.50.0.' "$G36_OUT"
+  g36_catalog "1.9.0"
+  g36_run "$(g36_ver 1.50.0)"
+  assert_eq "36e: 1.50.0 installed vs a 1.9.0 pin is silent" "" "$G36_OUT"
+  g36_catalog "1.50.0"
+  g36_run "$(g36_ver 1.50)"
+  assert_eq "36e: a missing part counts as 0 (1.50 vs 1.50.0 is silent)" "" "$G36_OUT"
+
+  # --- matrix row 2: unreachable or malformed catalog is silent ---
+  rm -f "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)" 28
+  assert_eq "36f: curl timeout prints nothing" "" "$G36_OUT"
+  assert_exit "36f: curl timeout exits 0" 0 "$G36_RC"
+  g36_catalog "1.50.0"
+  g36_run "$(g36_ver 1.0.0)" 22
+  assert_eq "36f: a failing curl is silent even when its body would warn" "" "$G36_OUT"
+  rm -f "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)" 0
+  assert_eq "36g: empty body prints nothing" "" "$G36_OUT"
+  printf '<html>rate limited</html>' > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36h: unparsable catalog prints nothing" "" "$G36_OUT"
+  assert_exit "36h: unparsable catalog exits 0" 0 "$G36_RC"
+  printf '[{"name":"stride-gemini","version":"1.50' > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36h: truncated catalog prints nothing" "" "$G36_OUT"
+  printf '[{"name":"stride-gemini-ideation","version":"9.9.9"},{"name":"Stride-Gemini","version":"9.9.9"}]' > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36i: no stride-gemini entry prints nothing (decoys ignored)" "" "$G36_OUT"
+  printf '{"x":{"name":"stride-gemini","version":"1.50.0"}}' > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36j: an object-shaped catalog is not walked" "" "$G36_OUT"
+  printf '{"name":"stride-gemini","version":"1.50.0"}' > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36j: a bare entry object is not a catalog" "" "$G36_OUT"
+  printf '[]' > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36j: an empty catalog prints nothing" "" "$G36_OUT"
+  printf '[{"name":"stride-gemini","version":"1.50.0 and more"}]' > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36k: a non-version pin is never printed" "" "$G36_OUT"
+  printf '[{"name":"stride-gemini","version":"$(touch %s/pwned)"}]' "$G36_DIR" > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36k: a command-shaped pin prints nothing" "" "$G36_OUT"
+  assert_eq "36k: and is never executed" "no" "$([ -e "$G36_DIR/pwned" ] && echo yes || echo no)"
+  printf '[{"name":"stride-gemini","version":1.5}]' > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36k: a numeric (non-string) pin prints nothing" "" "$G36_OUT"
+  printf '[{"name":"stride-gemini","version":"1.50.0\\n"}]' > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36k: a pin ending in a newline still yields one line" "$G36_WARN_1_0" "$G36_OUT"
+  printf '[[{"name":"stride-gemini","version":"1.50.0"}]]' > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36j: a nested one-element catalog is not walked" "" "$G36_OUT"
+
+  # --- matrix row 3: an unreadable installed manifest is silent ---
+  g36_catalog "1.50.0"
+  g36_run "$(g36_ext nomanifest)"
+  assert_eq "36l: no manifest beside hooks/ prints nothing" "" "$G36_OUT"
+  assert_exit "36l: no manifest exits 0" 0 "$G36_RC"
+  assert_eq "36l: no manifest -> no fetch is attempted" "" "$(cat "$G36_DIR/curl.log")"
+  g36_run "$(g36_ext numver '{"name":"stride-gemini","version":1.0}')"
+  assert_eq "36m: a non-string manifest version prints nothing" "" "$G36_OUT"
+  g36_run "$(g36_ext nover '{"name":"stride-gemini"}')"
+  assert_eq "36m: a manifest with no version prints nothing" "" "$G36_OUT"
+  g36_run "$(g36_ext arrver '["1.0.0"]')"
+  assert_eq "36m: an array manifest prints nothing" "" "$G36_OUT"
+  g36_run "$(g36_ext arrobj '[{"name":"stride-gemini","version":"1.0.0"}]')"
+  assert_eq "36m: a one-element array of a manifest object prints nothing" "" "$G36_OUT"
+  g36_run "$(g36_ver latest)"
+  assert_eq "36n: a non-numeric version ('latest') prints nothing" "" "$G36_OUT"
+  g36_run "$(g36_ver v1.0.0)"
+  assert_eq "36n: a v-prefixed version prints nothing" "" "$G36_OUT"
+  g36_run "$(g36_ext broken '{"name":"stride-gemini","version":')"
+  assert_eq "36n: an unparsable manifest prints nothing" "" "$G36_OUT"
+  assert_exit "36n: an unparsable manifest exits 0" 0 "$G36_RC"
+
+  # --- edge case: pre-release strings ---
+  g36_catalog "1.51.0"
+  g36_run "$(g36_ver 1.51.0-rc.1)"
+  assert_contains "36o: a pre-release install is older than its release" \
+    'This stride-gemini extension is at 1.51.0-rc.1; stride-gemini-marketplace lists 1.51.0.' "$G36_OUT"
+  g36_catalog "1.51.0-rc.1"
+  g36_run "$(g36_ver 1.51.0)"
+  assert_eq "36p: a release install vs its pre-release pin is silent" "" "$G36_OUT"
+  g36_catalog "1.51.0-rc.2"
+  g36_run "$(g36_ver 1.51.0-rc.1)"
+  assert_eq "36p: two pre-releases of one release are not guessed at" "" "$G36_OUT"
+  g36_catalog "1.52.0-rc.1"
+  g36_run "$(g36_ver 1.51.0)"
+  assert_contains "36p: a newer pre-release pin still outranks an older release" \
+    'stride-gemini-marketplace lists 1.52.0-rc.1.' "$G36_OUT"
+
+  # --- security_considerations: one bounded, credential-free HTTPS fetch ---
+  g36_catalog "1.50.0"
+  g36_run "$(g36_ver 1.0.0)"
+  G36_ARGS="$(cat "$G36_DIR/curl.log")"
+  assert_contains "36q: reads the published catalog" \
+    'https://raw.githubusercontent.com/cheezy/stride-gemini-marketplace/main/extensions.json' "$G36_ARGS"
+  assert_contains "36q: HTTPS only" "proto =https" "$G36_ARGS"
+  assert_eq "36q: -q comes first, so no ~/.curlrc is read" "1" "$(grep -c '^ARGS: -q ' "$G36_DIR/curl.log")"
+  assert_contains "36q: short connect timeout" "connect-timeout 2" "$G36_ARGS"
+  assert_contains "36q: short overall timeout" "max-time 3" "$G36_ARGS"
+  assert_eq "36q: exactly one fetch" "1" "$(grep -c '^ARGS:' "$G36_DIR/curl.log")"
+  assert_eq "36q: sends no Authorization header" "0" "$(grep -ciF 'authorization' "$G36_DIR/curl.log")"
+  assert_eq "36q: sends no extra header at all" "0" "$(grep -cE '(^| )-H( |$)' "$G36_DIR/curl.log")"
+  assert_eq "36q: follows no redirect" "0" "$(grep -cE '(^| )-L( |$)|--location' "$G36_DIR/curl.log")"
+
+  # --- edge case: no curl, no jq (minimal PATH holding only what is kept) ---
+  G36_BASH="$(command -v bash)"
+  mkdir -p "$G36_DIR/nocurl" "$G36_DIR/nojq"
+  ln -sf "$(command -v jq)" "$G36_DIR/nocurl/jq"
+  ln -sf "$G36_DIR/stub/curl" "$G36_DIR/nojq/curl"
+  G36_OLD="$(g36_ver 1.0.0)"
+  : > "$G36_DIR/curl.log"
+  G36_OUT=$(PATH="$G36_DIR/nocurl" "$G36_BASH" "$G36_OLD" 2>&1); G36_RC=$?
+  assert_eq "36r: curl absent -> nothing" "" "$G36_OUT"
+  assert_exit "36r: curl absent exits 0" 0 "$G36_RC"
+  G36_OUT=$(G36_CURL_LOG="$G36_DIR/curl.log" G36_BODY_FILE="$G36_DIR/body" \
+    PATH="$G36_DIR/nojq" "$G36_BASH" "$G36_OLD" 2>&1); G36_RC=$?
+  assert_eq "36s: jq absent -> nothing" "" "$G36_OUT"
+  assert_exit "36s: jq absent exits 0" 0 "$G36_RC"
+  assert_eq "36s: jq absent -> no fetch is attempted" "" "$(cat "$G36_DIR/curl.log")"
+
+  # --- self-location: the manifest is found from the script, never an argument ---
+  G36_REL_DIR="$G36_DIR/ext/v-1.0.0/hooks"
+  : > "$G36_DIR/curl.log"
+  G36_OUT=$(cd "$G36_REL_DIR" && G36_CURL_LOG="$G36_DIR/curl.log" G36_BODY_FILE="$G36_DIR/body" \
+    PATH="$G36_DIR/stub:$PATH" bash check-plugin-current.sh 2>&1)
+  assert_eq "36t: run by bare name from its own directory" "$G36_WARN_1_0" "$G36_OUT"
+  G36_OUT=$(cd "$G36_DIR/ext/v-1.0.0" && G36_CURL_LOG="$G36_DIR/curl.log" G36_BODY_FILE="$G36_DIR/body" \
+    PATH="$G36_DIR/stub:$PATH" bash hooks/check-plugin-current.sh 2>&1)
+  assert_eq "36t: run by a relative path" "$G36_WARN_1_0" "$G36_OUT"
+  g36_run "$(g36_ver 1.50.0)" 0 "$G36_DIR/ext/v-1.0.0"
+  assert_eq "36t: a path argument is ignored (an up-to-date copy stays quiet)" "" "$G36_OUT"
+
+  # --- source pins ---
+  assert_eq "36u: the script never evals or sources" "0" "$(grep -cE '(^|[^a-z_])(eval|source)[[:space:]]' "$G36_SRC")"
+  assert_eq "36u: the repo copy is executable" "yes" "$([ -x "$G36_SRC" ] && echo yes || echo no)"
+  assert_eq "36u: the repo's manifest sits beside hooks/" "yes" \
+    "$([ -f "$SCRIPT_DIR/../gemini-extension.json" ] && echo yes || echo no)"
+else
+  echo "  SKIP: Test Group 36 needs hooks/check-plugin-current.sh and jq"
+fi
+
+# --- matrix row 5: Step 0 wiring in the workflow skill, and the README ---
+G36_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G36_README="$SCRIPT_DIR/../README.md"
+if [ -f "$G36_WF" ] && [ -f "$G36_README" ]; then
+  G36_STEP0="$(awk '/^## Step 0:/{f=1} /^## Step 1:/{f=0} f' "$G36_WF")"
+  G36_ITEM5="$(awk '/^## Step 0:/{s=1} /^## Step 1:/{s=0} s && /^5\. \*\*/{f=1} s && f && /^\*\*Then write the orchestrator activation marker\*\*/{f=0} s && f' "$G36_WF")"
+  assert_eq "36v: Step 0 slice is not empty" "yes" "$([ -n "$G36_STEP0" ] && echo yes || echo no)"
+  assert_eq "36v: Step 0 has exactly one item 5" "1" "$(printf '%s\n' "$G36_STEP0" | grep -c '^5\. \*\*')"
+  assert_contains "36v: item 5 runs the bash script" 'hooks/check-plugin-current.sh' "$G36_ITEM5"
+  assert_contains "36v: item 5 names the PowerShell twin" 'hooks/check-plugin-current.ps1' "$G36_ITEM5"
+  assert_contains "36v: item 5 locates the extension root by its manifest" 'gemini-extension.json' "$G36_ITEM5"
+  assert_contains "36v: item 5 is informational only" '**Stale-install check — informational only.**' "$G36_ITEM5"
+  assert_contains "36v: item 5 relays the line once" 'pass that line to the user once, unchanged' "$G36_ITEM5"
+  assert_contains "36v: item 5 carries on" 'carry on — do not wait for an answer' "$G36_ITEM5"
+  assert_contains "36v: item 5 never runs the update" 'do not run the update yourself' "$G36_ITEM5"
+  assert_contains "36v: item 5 skips a manual install" 'skip this item without comment' "$G36_ITEM5"
+  G36_L4="$(printf '%s\n' "$G36_STEP0" | grep -n '^4\. \*\*' | head -1 | cut -d: -f1)"
+  G36_L5="$(printf '%s\n' "$G36_STEP0" | grep -n '^5\. \*\*' | head -1 | cut -d: -f1)"
+  G36_LM="$(printf '%s\n' "$G36_STEP0" | grep -n '^\*\*Then write the orchestrator activation marker\*\*' | head -1 | cut -d: -f1)"
+  assert_eq "36w: item 5 follows the .gitignore item" "yes" \
+    "$([ -n "$G36_L4" ] && [ -n "$G36_L5" ] && [ "$G36_L4" -lt "$G36_L5" ] && echo yes || echo no)"
+  assert_eq "36w: and precedes the activation marker" "yes" \
+    "$([ -n "$G36_L5" ] && [ -n "$G36_LM" ] && [ "$G36_L5" -lt "$G36_LM" ] && echo yes || echo no)"
+  G36_RM="$(cat "$G36_README")"
+  assert_contains "36x: README documents the warning" '### The stale-install warning' "$G36_RM"
+  assert_contains "36x: README names the script" 'hooks/check-plugin-current.sh' "$G36_RM"
+  assert_contains "36x: README gives the update command" "$G36_UPDATE" "$G36_RM"
+else
+  echo "  SKIP: Test Group 36 wiring (SKILL.md or README.md not found)"
+fi
+
+# ============================================================
 # Test Group 38: slim discovery, enrichment after the claim (W2468)
 # ============================================================
 # Ports stride W2256. Contract text only, so this half carries it alone, as

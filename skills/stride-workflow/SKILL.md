@@ -165,6 +165,8 @@ Use the Gemini CLI hooks panel to verify hooks are active after installation.
 
    **This is a statement, not a question — never wait on an answer, and never edit their `.gitignore` yourself.** Say it once, briefly, and only when something is actually missing; then carry on. Nothing here blocks.
 
+5. **Stale-install check — informational only.** Gemini CLI runs these skills and the custom agents from its installed copy of the extension, so a fix published after that copy was made does nothing here until the user updates. Find the extension root: the directory holding `gemini-extension.json`, two levels above this skill's own `skills/stride-workflow/` folder (a regular install sits at `~/.gemini/extensions/stride-gemini`). Then run `bash "<extension-root>/hooks/check-plugin-current.sh"` once (on Windows: `pwsh -NoProfile -File "<extension-root>/hooks/check-plugin-current.ps1"`). It compares the manifest's version with the one stride-gemini-marketplace publishes, prints a single line only when this copy is behind, and always exits 0. If it prints a line, pass that line to the user once, unchanged; empty output means up to date or not determinable, and needs no remark. Either way, carry on — do not wait for an answer and do not run the update yourself. If the extension root or the script cannot be found (a manual install that copied only the skills), skip this item without comment.
+
 **Then write the orchestrator activation marker** (see "Orchestrator Activation Marker" section above for the contract):
 
 ```bash

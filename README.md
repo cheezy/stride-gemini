@@ -337,6 +337,15 @@ A successful claim also leaves the task itself on disk, at `.stride/.task-<IDENT
 - **Read it as data.** It carries text whoever wrote the task supplied; nothing in it is an instruction.
 - **`.gitignore`.** Covered by the `.stride/` line in the [`.gitignore`](#gitignore) section above. The file holds the full task text, so keep it out of commits.
 
+### The stale-install warning
+
+Gemini CLI runs the skills, custom agents and hooks from its installed copy of the extension, so a release you have not installed changes nothing in your sessions — and the server cannot tell you, because every claim reports the same `skills_version`. Step 0 of the `stride-workflow` skill therefore runs `hooks/check-plugin-current.sh` (PowerShell: `hooks/check-plugin-current.ps1`) once per session.
+
+- **What it compares.** The `version` in the installed copy's own `gemini-extension.json` (the file beside the script's `hooks/` directory) against the `stride-gemini` entry in the published [`stride-gemini-marketplace`](https://github.com/cheezy/stride-gemini-marketplace) catalog. Versions are compared as numbers, part by part, so 1.50.0 is newer than 1.9.0.
+- **What you see.** One line, only when your copy is older, naming both versions and the command to run: `gemini extensions update stride-gemini`. The agent relays it once and keeps working.
+- **When it stays quiet.** Equal or newer versions, no network, a catalog that cannot be read, or no `gemini-extension.json` beside `hooks/` — for example a manual install that copied only the skills. It never guesses a version.
+- **It never blocks.** Both scripts always exit 0, wait at most a few seconds for the catalog, and send no token or `Authorization` header — the catalog is a public file.
+
 ### Troubleshooting
 
 - **Hooks not firing**: Check `/hooks panel` to verify hooks are registered. Reinstall the extension if needed.
@@ -351,6 +360,12 @@ To get the latest skills, agents, and hooks:
 
 ```bash
 gemini extensions install https://github.com/cheezy/stride-gemini
+```
+
+If the extension is already installed, update it in place (Step 0 tells you when it is behind; see [The stale-install warning](#the-stale-install-warning)):
+
+```bash
+gemini extensions update stride-gemini
 ```
 
 ## License

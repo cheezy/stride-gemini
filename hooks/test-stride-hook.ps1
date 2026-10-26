@@ -3440,6 +3440,236 @@ try {
     $env:PATH = $g20OldPath
 }
 
+
+# ============================================================
+# Test Group 21: stale-install warning at Step 0 (W2465)
+# ============================================================
+# Mirror of test-stride-hook.sh Test Group 36. The script finds
+# gemini-extension.json from its own location, so each case copies it into a
+# fixture extension (<ext>\hooks\ beside <ext>\gemini-extension.json) and
+# dot-sources that copy, which defines the functions without running the check.
+# Get-StridePinBody is then replaced in-process with a fixture body, so no case
+# touches the network and the catalog URL stays a constant in the script. 21
+# was the number the goal reserved for this task, and it was still free.
+Write-Host ""
+Write-Host "=== Test Group 21: stale-install warning at Step 0 (W2465) ==="
+
+$g21Src = Join-Path $ScriptDir 'check-plugin-current.ps1'
+$g21Dir = Join-Path $TmpDir 'g21'
+$g21Update = 'gemini extensions update stride-gemini'
+$g21Warn10 = "This stride-gemini extension is at 1.0.0; stride-gemini-marketplace lists 1.50.0. To catch up, run: $g21Update"
+
+# New-G21Ext <name> [manifest-json] -> path of the script copy in a fixture
+# extension; with no manifest argument the manifest is left out entirely.
+function New-G21Ext {
+    param([string]$Name, [string]$Manifest = $null)
+    $root = Join-Path (Join-Path $g21Dir 'ext') $Name
+    $hooks = Join-Path $root 'hooks'
+    New-Item -ItemType Directory -Path $hooks -Force | Out-Null
+    Copy-Item -LiteralPath $g21Src -Destination (Join-Path $hooks 'check-plugin-current.ps1') -Force
+    $m = Join-Path $root 'gemini-extension.json'
+    Remove-Item -LiteralPath $m -Force -ErrorAction SilentlyContinue
+    if ($PSBoundParameters.ContainsKey('Manifest')) { [System.IO.File]::WriteAllText($m, $Manifest) }
+    return (Join-Path $hooks 'check-plugin-current.ps1')
+}
+function New-G21Ver {
+    param([string]$Version)
+    return (New-G21Ext ("v-" + $Version) ('{"name":"stride-gemini","version":"' + $Version + '","contextFileName":"GEMINI.md"}'))
+}
+function New-G21Catalog {
+    param([string]$Version)
+    return ('[{"name":"stride-gemini-ideation","version":"9.9.9"},{"name":"stride-gemini","version":"' + $Version + '","repo":"https://github.com/cheezy/stride-gemini"},{"name":"stride-gemini-security-review","version":"9.9.9"}]')
+}
+# Run the check from a dot-sourced copy, in a child scope, with a fixture body.
+function Invoke-G21Check {
+    param([string]$Copy, [string]$Body)
+    $out = & {
+        . $Copy
+        $script:G21Body = $Body
+        function Get-StridePinBody { return $script:G21Body }
+        Invoke-StridePluginCheck $script:StrideGeminiExtensionRoot
+    }
+    return (@($out) -join "`n")
+}
+
+if (Test-Path -LiteralPath $g21Src) {
+    # --- matrix row 0: an older install warns once ---
+    $out = Invoke-G21Check (New-G21Ver '1.0.0') (New-G21Catalog '1.50.0')
+    Assert-Eq "21a: older install prints the warning line" $g21Warn10 $out
+    Assert-Eq "21a: exactly one line" '1' ([string]@($out -split "`n").Count)
+
+    # --- matrix row 1: numeric compare; equal and newer are silent ---
+    Assert-Eq "21b: equal versions print nothing" '' (Invoke-G21Check (New-G21Ver '1.50.0') (New-G21Catalog '1.50.0'))
+    Assert-Eq "21c: newer install prints nothing" '' (Invoke-G21Check (New-G21Ver '1.51.0') (New-G21Catalog '1.50.0'))
+    Assert-Contains "21d: 1.9.0 installed vs a 1.50.0 pin warns (numeric, not string)" 'This stride-gemini extension is at 1.9.0; stride-gemini-marketplace lists 1.50.0.' (Invoke-G21Check (New-G21Ver '1.9.0') (New-G21Catalog '1.50.0'))
+    Assert-Eq "21e: 1.50.0 installed vs a 1.9.0 pin is silent" '' (Invoke-G21Check (New-G21Ver '1.50.0') (New-G21Catalog '1.9.0'))
+    Assert-Eq "21e: a missing part counts as 0 (1.50 vs 1.50.0 is silent)" '' (Invoke-G21Check (New-G21Ver '1.50') (New-G21Catalog '1.50.0'))
+
+    # --- matrix row 2: unreachable or malformed catalog is silent ---
+    $old = New-G21Ver '1.0.0'
+    Assert-Eq "21f: unreachable catalog (empty body) prints nothing" '' (Invoke-G21Check $old '')
+    Assert-Eq "21g: unparsable catalog prints nothing" '' (Invoke-G21Check $old '<html>rate limited</html>')
+    Assert-Eq "21g: truncated catalog prints nothing" '' (Invoke-G21Check $old '[{"name":"stride-gemini","version":"1.50')
+    Assert-Eq "21h: no stride-gemini entry prints nothing (decoys ignored)" '' (Invoke-G21Check $old '[{"name":"stride-gemini-ideation","version":"9.9.9"},{"name":"Stride-Gemini","version":"9.9.9"}]')
+    Assert-Eq "21i: an object-shaped catalog is not walked" '' (Invoke-G21Check $old '{"x":{"name":"stride-gemini","version":"1.50.0"}}')
+    Assert-Eq "21i: a bare entry object is not a catalog" '' (Invoke-G21Check $old '{"name":"stride-gemini","version":"1.50.0"}')
+    Assert-Eq "21i: an empty catalog prints nothing" '' (Invoke-G21Check $old '[]')
+    Assert-Eq "21j: a non-version pin is never printed" '' (Invoke-G21Check $old '[{"name":"stride-gemini","version":"1.50.0 and more"}]')
+    Assert-Eq "21j: a numeric (non-string) pin prints nothing" '' (Invoke-G21Check $old '[{"name":"stride-gemini","version":1.5}]')
+    Assert-Eq "21j: a pin ending in a newline is not version-shaped" '' (Invoke-G21Check $old '[{"name":"stride-gemini","version":"1.50.0\n"}]')
+    Assert-Eq "21i: a nested one-element catalog is not walked" '' (Invoke-G21Check $old '[[{"name":"stride-gemini","version":"1.50.0"}]]')
+    # PS7 unrolls a one-element array into a bare object; that must still count
+    Assert-Eq "21k: a one-element catalog array still warns" $g21Warn10 (Invoke-G21Check $old '[{"name":"stride-gemini","version":"1.50.0"}]')
+
+    # --- matrix row 3: an unreadable installed manifest is silent ---
+    $cat = New-G21Catalog '1.50.0'
+    Assert-Eq "21l: no manifest beside hooks\ prints nothing" '' (Invoke-G21Check (New-G21Ext 'nomanifest') $cat)
+    Assert-Eq "21m: a non-string manifest version prints nothing" '' (Invoke-G21Check (New-G21Ext 'numver' '{"name":"stride-gemini","version":1.0}') $cat)
+    Assert-Eq "21m: a manifest with no version prints nothing" '' (Invoke-G21Check (New-G21Ext 'nover' '{"name":"stride-gemini"}') $cat)
+    Assert-Eq "21m: an array manifest prints nothing" '' (Invoke-G21Check (New-G21Ext 'arrver' '["1.0.0"]') $cat)
+    Assert-Eq "21m: a one-element array of a manifest object prints nothing" '' (Invoke-G21Check (New-G21Ext 'arrobj' '[{"name":"stride-gemini","version":"1.0.0"}]') $cat)
+    Assert-Eq "21n: a non-numeric version ('latest') prints nothing" '' (Invoke-G21Check (New-G21Ver 'latest') $cat)
+    Assert-Eq "21n: a v-prefixed version prints nothing" '' (Invoke-G21Check (New-G21Ver 'v1.0.0') $cat)
+    Assert-Eq "21n: an unparsable manifest prints nothing" '' (Invoke-G21Check (New-G21Ext 'broken' '{"name":"stride-gemini","version":') $cat)
+
+    # --- edge case: pre-release strings ---
+    Assert-Contains "21o: a pre-release install is older than its release" 'This stride-gemini extension is at 1.51.0-rc.1; stride-gemini-marketplace lists 1.51.0.' (Invoke-G21Check (New-G21Ver '1.51.0-rc.1') (New-G21Catalog '1.51.0'))
+    Assert-Eq "21p: a release install vs its pre-release pin is silent" '' (Invoke-G21Check (New-G21Ver '1.51.0') (New-G21Catalog '1.51.0-rc.1'))
+    Assert-Eq "21p: two pre-releases of one release are not guessed at" '' (Invoke-G21Check (New-G21Ver '1.51.0-rc.1') (New-G21Catalog '1.51.0-rc.2'))
+    Assert-Contains "21p: a newer pre-release pin still outranks an older release" 'stride-gemini-marketplace lists 1.52.0-rc.1.' (Invoke-G21Check (New-G21Ver '1.51.0') (New-G21Catalog '1.52.0-rc.1'))
+    Assert-Eq "21p: an overflowing version part is silence, not an error" '' (Invoke-G21Check (New-G21Ver '1.99999999999999999999999999999999') (New-G21Catalog '1.100.0'))
+
+    # --- self-location: the root is the directory above the copy's hooks\ ---
+    $g21Root = & { . $old; $script:StrideGeminiExtensionRoot }
+    Assert-Eq "21q: the extension root is found from the script's own location" (Join-Path (Join-Path $g21Dir 'ext') 'v-1.0.0') $g21Root
+
+    # --- Get-StridePinBody over its seam: Invoke-StridePinRequest shadowed ---
+    function Invoke-G21Fetch {
+        param([string]$Copy, [scriptblock]$Req)
+        $out = & {
+            . $Copy
+            ${function:Invoke-StridePinRequest} = $Req
+            Invoke-StridePluginCheck $script:StrideGeminiExtensionRoot
+        }
+        return (@($out) -join "`n")
+    }
+    $script:G21Catalog = New-G21Catalog '1.50.0'
+    Assert-Eq "21r: a catalog returned by the request is read" $g21Warn10 (Invoke-G21Fetch $old { [string]$script:G21Catalog })
+    Assert-Eq "21r: a throwing request is caught into silence" '' (Invoke-G21Fetch $old { throw 'simulated network failure' })
+
+    # --- the real Invoke-StridePinRequest against a local listener. The URL is
+    # re-pointed only inside the dot-sourced copy's scope; the script itself
+    # has no way to take one. ---
+    function Start-G21Listener {
+        param([int]$Port, [int]$Code, [string]$Body, [int]$StallSeconds = 0, [string]$Location = '')
+        $job = Start-Job -ArgumentList $Port, $Code, $Body, $StallSeconds, $Location -ScriptBlock {
+            param($Port, $Code, $Body, $StallSeconds, $Location)
+            $l = [System.Net.HttpListener]::new()
+            $l.Prefixes.Add("http://localhost:$Port/")
+            try {
+                $l.Start()
+                $ctx = $l.GetContext()
+                $ctx.Response.StatusCode = $Code
+                if ($Location) { $ctx.Response.RedirectLocation = $Location }
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+                if ($StallSeconds -gt 0) {
+                    # headers and a first chunk, then a body that never finishes
+                    $ctx.Response.ContentLength64 = $bytes.Length + 4096
+                    $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+                    $ctx.Response.OutputStream.Flush()
+                    Start-Sleep -Seconds $StallSeconds
+                } else {
+                    $ctx.Response.ContentLength64 = $bytes.Length
+                    $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+                }
+                $ctx.Response.Close()
+            } catch {
+            } finally {
+                if ($l.IsListening) { $l.Stop() }
+            }
+        }
+        $null = Wait-ForListener -Port $Port
+        return $job
+    }
+    function Invoke-G21Local {
+        param([int]$Port)
+        return (& {
+            . $old
+            $script:StrideGeminiPinUrl = "http://localhost:$Port/"
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $body = Get-StridePinBody
+            $sw.Stop()
+            [pscustomobject]@{ Body = [string]$body; Ms = $sw.ElapsedMilliseconds }
+        })
+    }
+    $g21Port = Get-Random -Minimum 41000 -Maximum 49000
+    $job = Start-G21Listener -Port $g21Port -Code 200 -Body $script:G21Catalog
+    $r = Invoke-G21Local -Port $g21Port
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    Assert-Eq "21r: a 200 response body is returned as text" $script:G21Catalog $r.Body
+    $g21Port++
+    $job = Start-G21Listener -Port $g21Port -Code 500 -Body $script:G21Catalog
+    $r = Invoke-G21Local -Port $g21Port
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    Assert-Eq "21r: a non-success status yields nothing" '' $r.Body
+    $g21Port++
+    # the redirect target is live and serves a catalog, so following it would show
+    $job2 = Start-G21Listener -Port ($g21Port + 100) -Code 200 -Body $script:G21Catalog
+    $job = Start-G21Listener -Port $g21Port -Code 302 -Body '' -Location "http://localhost:$($g21Port + 100)/"
+    $r = Invoke-G21Local -Port $g21Port
+    Remove-Job $job, $job2 -Force -ErrorAction SilentlyContinue
+    Assert-Eq "21r: a redirect is not followed" '' $r.Body
+    $g21Port++
+    $job = Start-G21Listener -Port $g21Port -Code 200 -Body '[{"name":"stride' -StallSeconds 20
+    $r = Invoke-G21Local -Port $g21Port
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    Assert-Eq "21r: a body that stalls after the headers yields nothing" '' $r.Body
+    Assert-Eq "21r: and gives up within the 3-second budget" 'True' ([string]($r.Ms -lt 6000))
+
+    # --- security_considerations: one bounded, credential-free HTTPS fetch ---
+    $g21Text = [System.IO.File]::ReadAllText($g21Src)
+    Assert-Contains "21s: reads the published catalog" "'https://raw.githubusercontent.com/cheezy/stride-gemini-marketplace/main/extensions.json'" $g21Text
+    Assert-Contains "21s: the whole request shares one 3-second budget" '$client.Timeout = [TimeSpan]::FromSeconds(3)' $g21Text
+    Assert-Contains "21s: the body is buffered inside that budget" '$client.GetAsync($script:StrideGeminiPinUrl)' $g21Text
+    Assert-NotContains "21s: never returns at the headers" 'ResponseHeadersRead' $g21Text
+    Assert-Contains "21s: never follows a redirect off the host" '$handler.AllowAutoRedirect = $false' $g21Text
+    Assert-Contains "21s: sends no default credentials" '$handler.UseDefaultCredentials = $false' $g21Text
+    Assert-Contains "21s: the version pattern anchors at the true end" "?\z'" $g21Text
+    Assert-Eq "21s: sends no Authorization header" 'False' ([string]$g21Text.Contains('Authorization'))
+    Assert-Eq "21s: never evaluates fetched text" 'False' ([string]$g21Text.Contains('Invoke-Expression'))
+
+    # --- a real child process: a copy with no manifest prints nothing and exits 0 ---
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = (Get-Process -Id $PID).Path
+    $psi.Arguments = "-NoProfile -File `"$(New-G21Ext 'child')`" ignored-argument"
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $g21Stdout = $proc.StandardOutput.ReadToEnd()
+    $null = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    Assert-Eq "21t: run as a script with no manifest, it prints nothing" '' $g21Stdout.Trim()
+    Assert-Exit "21t: and exits 0" 0 $proc.ExitCode
+} else {
+    Write-Host "  SKIP: Test Group 21 needs hooks/check-plugin-current.ps1"
+}
+
+# --- matrix row 5: Step 0 wiring (ASCII needles; the file is read as UTF-8) ---
+$g21Wf = Join-Path (Join-Path (Join-Path (Split-Path -Parent $ScriptDir) 'skills') 'stride-workflow') 'SKILL.md'
+if (Test-Path -LiteralPath $g21Wf) {
+    $g21WfText = [System.IO.File]::ReadAllText($g21Wf, [System.Text.Encoding]::UTF8)
+    $g21Step0 = [regex]::Match($g21WfText, '(?s)## Step 0:.*?## Step 1:').Value
+    $g21Item5 = [regex]::Match($g21Step0, '(?ms)^5\. \*\*.*?^\*\*Then write the orchestrator activation marker\*\*').Value
+    Assert-Eq "21u: Step 0 has an item 5" 'True' ([string]($g21Item5.Length -gt 0))
+    Assert-Contains "21u: item 5 runs the bash script" 'hooks/check-plugin-current.sh' $g21Item5
+    Assert-Contains "21u: item 5 names the PowerShell twin" 'hooks/check-plugin-current.ps1' $g21Item5
+    Assert-Contains "21u: item 5 relays the line once" 'pass that line to the user once, unchanged' $g21Item5
+    Assert-Contains "21u: item 5 never runs the update" 'do not run the update yourself' $g21Item5
+} else {
+    Write-Host "  SKIP: Test Group 21 SKILL.md not found"
+}
+
 # ============================================================
 # Summary
 # ============================================================
