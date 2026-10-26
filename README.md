@@ -107,7 +107,7 @@ stride-creating-goals            ← BEFORE calling POST /api/tasks/batch (goals
 
 ### task-explorer
 
-A read-only codebase exploration agent dispatched after claiming a task. Reads every file listed in `key_files`, finds related test files, searches for patterns referenced in `patterns_to_follow`, navigates to `where_context`, and returns a structured summary so the primary agent can start coding with full context.
+A read-only codebase exploration agent dispatched after claiming a task. Reads every file listed in `key_files`, finds related test files, searches for patterns referenced in `patterns_to_follow`, navigates to `where_context`, and returns a structured summary so the primary agent can start coding with full context. Before it writes that summary it checks each thing the task claims about the code as it stands, and the summary opens with `Task statements the current code contradicts`. The agent has no shell, so the orchestrator runs git for it and passes in which commits touched each key file since the task was created (`skills/stride-workflow/commit-window.md`).
 
 ### task-decomposer
 
