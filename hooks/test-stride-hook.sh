@@ -8116,6 +8116,192 @@ else
 fi
 
 # ============================================================
+# Test Group 47: the enricher and decomposer run a cross-field consistency pass (W2473)
+# ============================================================
+# Ports stride W2297. agents/task-enricher.md runs six checks after its
+# unchanged 18-item checklist, and agents/task-decomposer.md runs the same six
+# on every child as a new Step 7: verification scope, no contradiction,
+# prescribed patterns traced on paper, precedence stated, one line per
+# criterion, external contracts named. A check that cannot be decided never
+# blocks: the enricher writes it to technical_details.open_questions, the
+# decomposer adds an `Open question:` sentence to the child's description. The
+# three creation skills each carry a one-line pointer. The goal planned this
+# as Group 42, but W2472 took 42 and W2474-W2477 took 43-46, so it is 47.
+#
+# Every phrase pin asserts an occurrence COUNT of exactly 1 in its slice, so a
+# deleted sentence and a duplicated one both turn it red. Contract text only,
+# so the bash half carries it alone, as Groups 35 and 42-46 do. Not covered:
+# whether a live enricher widens a narrow step or records the question; that is
+# runtime behaviour, and the task's manual verification step exercises it.
+echo ""
+echo "=== Test Group 47: the enricher and decomposer run a cross-field consistency pass (W2473) ==="
+
+G47_ENR="$SCRIPT_DIR/../agents/task-enricher.md"
+G47_DEC="$SCRIPT_DIR/../agents/task-decomposer.md"
+G47_REV="$SCRIPT_DIR/../agents/task-reviewer.md"
+G47_CT="$SCRIPT_DIR/../skills/stride-creating-tasks/SKILL.md"
+G47_CG="$SCRIPT_DIR/../skills/stride-creating-goals/SKILL.md"
+G47_EN="$SCRIPT_DIR/../skills/stride-enriching-tasks/SKILL.md"
+
+if [ ! -f "$G47_ENR" ] || [ ! -f "$G47_DEC" ] || [ ! -f "$G47_REV" ] || [ ! -f "$G47_CT" ] || [ ! -f "$G47_CG" ] || [ ! -f "$G47_EN" ]; then
+  echo "  SKIP: Test Group 47 (an agent or a creation skill not found relative to the hooks directory)"
+else
+  # Occurrences of a fixed string, not matching lines. An empty needle says so.
+  g47_occ() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    { grep -oF -- "$1" <<<"$2" || true; } | wc -l | tr -d ' '
+  }
+  g47_yes() { if "$@"; then echo yes; else echo no; fi; }
+
+  G47_ENR_ALL="$(cat "$G47_ENR")"
+  G47_DEC_ALL="$(cat "$G47_DEC")"
+  G47_ENR_FM="$(awk 'NR==1 && /^---$/{f=1; next} f && /^---$/{exit} f' "$G47_ENR")"
+  G47_DEC_FM="$(awk 'NR==1 && /^---$/{f=1; next} f && /^---$/{exit} f' "$G47_DEC")"
+  G47_ENR_SUM="$(grep -F -- '4. **Phase 4 — Assemble and Validate**' "$G47_ENR" || true)"
+  G47_ENR_TD="$(awk '/^### Optional: Capture Technical Details/{f=1} /^## Phase 3/{f=0} f' "$G47_ENR")"
+  G47_ENR_CHK="$(awk '/^\*\*Pre-submission checklist \(18 items\):\*\*$/{f=1} /^### Cross-Field Consistency Pass/{f=0} f' "$G47_ENR")"
+  G47_ENR_PASS="$(awk '/^### Cross-Field Consistency Pass/{f=1} /^## Handling Defect Tasks/{f=0} f' "$G47_ENR")"
+  G47_ENR_OUT="$(grep -F -- '- `technical_details`: Optional free-form object' "$G47_ENR" || true)"
+  G47_DEC_S6="$(awk '/^### Step 6: Output Assembly/{f=1} /^### Step 7: /{f=0} f' "$G47_DEC")"
+  G47_DEC_S7="$(awk '/^### Step 7: /{f=1} /^## Task Sizing Heuristics/{f=0} f' "$G47_DEC")"
+  G47_CT_SL="$(awk '/^\*\*Recommended fields:\*\*$/{f=1} /^## Field Type Validations/{f=0} f' "$G47_CT")"
+  G47_CG_SL="$(awk '/^## Task Nesting Rules/{f=1} /^> \*\*Authoring tip/{f=0} f' "$G47_CG")"
+  G47_EN_SL="$(awk '/^\*\*Pre-submission checklist:\*\*$/{f=1} /^## API Integration/{f=0} f' "$G47_EN")"
+
+  # --- 47a: the slices are non-empty, bounded and in order ---
+  for G47_PAIR in "enricher front matter:$G47_ENR_FM" "decomposer front matter:$G47_DEC_FM" \
+                  "enricher Phase 4 summary:$G47_ENR_SUM" "enricher technical_details:$G47_ENR_TD" \
+                  "enricher checklist:$G47_ENR_CHK" "enricher pass:$G47_ENR_PASS" \
+                  "enricher output bullet:$G47_ENR_OUT" "decomposer Step 6:$G47_DEC_S6" \
+                  "decomposer Step 7:$G47_DEC_S7" "creating-tasks placement:$G47_CT_SL" \
+                  "creating-goals placement:$G47_CG_SL" "enriching-tasks placement:$G47_EN_SL"; do
+    assert_eq "47a: the ${G47_PAIR%%:*} slice is non-empty" "yes" "$(g47_yes test -n "${G47_PAIR#*:}")"
+  done
+  assert_eq "47a: the enricher pass heading appears once" "1" "$(g47_occ '### Cross-Field Consistency Pass' "$G47_ENR_ALL")"
+  assert_eq "47a: the decomposer has one Step 7" "1" "$(g47_occ '### Step 7: ' "$G47_DEC_ALL")"
+  assert_eq "47a: the enricher pass ends before defect handling" "0" "$(g47_occ 'Defect enrichment follows the same phases' "$G47_ENR_PASS")"
+  assert_eq "47a: the checklist slice stops at the pass, before defect handling" "0" "$(g47_occ 'Defect enrichment follows the same phases' "$G47_ENR_CHK")"
+  assert_eq "47a: the enricher pass holds no checklist item" "0" "$(grep -c '^- \[ \]' <<<"$G47_ENR_PASS" || true)"
+  assert_eq "47a: the 18-item checklist heading is unchanged" "1" "$(g47_occ '**Pre-submission checklist (18 items):**' "$G47_ENR_ALL")"
+  assert_eq "47a: the checklist still holds exactly 18 items" "18" "$(grep -c '^- \[ \]' <<<"$G47_ENR_CHK" || true)"
+  assert_eq "47a: decomposer Step 6 stops at Step 7, before the sizing table" "0" "$(g47_occ '| Size | Hours |' "$G47_DEC_S6")"
+  assert_eq "47a: decomposer Step 7 comes after Step 6" "0" "$(g47_occ '### Step 6' "$G47_DEC_S7")"
+  assert_eq "47a: decomposer Step 6 still ends on the batch root-key warning" "1" "$(g47_occ 'Batch endpoint root key is' "$G47_DEC_S6")"
+  assert_eq "47a: decomposer Step 7 ends before the sizing table" "0" "$(g47_occ '| Size | Hours |' "$G47_DEC_S7")"
+
+  # --- 47b (matrix row 0): the enricher states all six checks after its checklist ---
+  for G47_TITLE in '1. **Verification scope.**' '2. **No contradiction.**' '3. **Prescribed patterns tested.**' \
+                   '4. **Precedence stated.**' '5. **One line per criterion.**' '6. **External contracts named.**'; do
+    assert_eq "47b: the enricher pass states '$G47_TITLE'" "1" "$(g47_occ "$G47_TITLE" "$G47_ENR_PASS")"
+  done
+  assert_eq "47b: every task gets all six checks" "1" "$(g47_occ 'Every task gets all six checks' "$G47_ENR_PASS")"
+  assert_eq "47b: check 1 widens a narrow step or records the gap" "1" \
+    "$(g47_occ 'grows until it matches the criterion, or the shortfall is written down as an open question' "$G47_ENR_PASS")"
+  assert_eq "47b: check 2 keeps both human halves and ranks them" "1" \
+    "$(g47_occ 'leave both standing and add a sentence saying which one governs (check 4)' "$G47_ENR_PASS")"
+  assert_eq "47b: check 4 never drops one side" "1" \
+    "$(g47_occ 'Dropping one side to make a contradiction disappear is never the fix' "$G47_ENR_PASS")"
+  assert_eq "47b: check 5 gives the reviewer's line-count reason" "1" \
+    "$(g47_occ 'takes every non-blank line of `acceptance_criteria` to be a separate requirement' "$G47_ENR_PASS")"
+  assert_eq "47b: check 6 cites file:line" "1" "$(g47_occ 'together with the `file:line` that shows it' "$G47_ENR_PASS")"
+  assert_eq "47b: check 6 never copies a credential, token or internal hostname" "1" \
+    "$(g47_occ 'never copy a credential, a token or an internal hostname you came across into the task' "$G47_ENR_PASS")"
+  assert_eq "47b: the Phase 4 summary names the pass after the checklist" "1" \
+    "$(g47_occ 'run the 18-item checklist and after it the cross-field consistency pass' "$G47_ENR_SUM")"
+  assert_eq "47b: the enricher points at the decomposer's copy" "1" \
+    "$(g47_occ 'Step 7 of `agents/task-decomposer.md`, so a change to one copy belongs in the other' "$G47_ENR_PASS")"
+
+  # --- 47c (matrix row 1): the decomposer runs the six checks on every child ---
+  for G47_TITLE in '1. **Verification scope.**' '2. **No contradiction.**' '3. **Prescribed patterns tested.**' \
+                   '4. **Precedence stated.**' '5. **One line per criterion.**' '6. **External contracts named.**'; do
+    assert_eq "47c: decomposer Step 7 states '$G47_TITLE'" "1" "$(g47_occ "$G47_TITLE" "$G47_DEC_S7")"
+  done
+  assert_eq "47c: every child gets all six checks" "1" "$(g47_occ 'Every child gets all six checks' "$G47_DEC_S7")"
+  assert_eq "47c: check 1 widens a step that proves less" "1" "$(g47_occ 'Widen one that proves less' "$G47_DEC_S7")"
+  assert_eq "47c: check 2 keeps both halves of goal wording and ranks them" "1" \
+    "$(g47_occ 'both halves stay and the child says which one governs (check 4)' "$G47_DEC_S7")"
+  assert_eq "47c: check 4 never drops one side" "1" \
+    "$(g47_occ 'Dropping one side to make a contradiction disappear is never the fix' "$G47_DEC_S7")"
+  assert_eq "47c: check 5 gives the reviewer's line-count reason" "1" \
+    "$(g47_occ 'takes every non-blank line of `acceptance_criteria` to be a separate requirement' "$G47_DEC_S7")"
+  assert_eq "47c: check 6 cites file:line" "1" "$(g47_occ 'with the `file:line` they came from' "$G47_DEC_S7")"
+  assert_eq "47c: check 6 never copies a credential, token or internal hostname" "1" \
+    "$(g47_occ 'never copy a credential, a token or an internal hostname you came across into the child' "$G47_DEC_S7")"
+  assert_eq "47c: the decomposer points at the enricher's copy" "1" \
+    "$(g47_occ 'Phase 4 of `agents/task-enricher.md` applies the same six checks' "$G47_DEC_S7")"
+
+  # --- 47d (matrix rows 2-3, edge cases): an undecidable check is recorded, never blocking ---
+  assert_eq "47d: the enricher never blocks on an undecidable check" "1" \
+    "$(g47_occ 'A check that cannot be decided never blocks the return.' "$G47_ENR_PASS")"
+  assert_eq "47d: the enricher records it in technical_details.open_questions" "1" \
+    "$(g47_occ 'one sentence in the `technical_details.open_questions` array' "$G47_ENR_PASS")"
+  assert_eq "47d: the Phase-2-only rule names open_questions as its exception" "1" \
+    "$(g47_occ '`open_questions` is the exception: the cross-field consistency pass in Phase 4 writes that key' "$G47_ENR_TD")"
+  assert_eq "47d: the output bullet lets technical_details carry open_questions" "1" \
+    "$(g47_occ 'in which case it carries an `open_questions` array, one sentence per entry' "$G47_ENR_OUT")"
+  assert_eq "47d: the decomposer never blocks on an undecidable check" "1" \
+    "$(g47_occ 'A check that cannot be decided never blocks the output' "$G47_DEC_S7")"
+  assert_eq "47d: the decomposer adds an Open question: sentence to the description" "1" \
+    "$(g47_occ "give that child's \`description\` one extra sentence that begins \`Open question:\`" "$G47_DEC_S7")"
+  for G47_PAIR in "enricher:$G47_ENR_PASS" "decomposer:$G47_DEC_S7"; do
+    assert_eq "47d: the ${G47_PAIR%%:*} runs the other five checks with no verification steps" "1" \
+      "$(g47_occ 'gives check 1 no input; the five other checks run regardless' "${G47_PAIR#*:}")"
+    assert_eq "47d: the ${G47_PAIR%%:*} treats two conflicting pitfalls as a check-4 case" "1" \
+      "$(g47_occ 'pull against each other are a check-4 case' "${G47_PAIR#*:}")"
+  done
+
+  # --- 47e: the human's title, type and description are never rewritten ---
+  assert_eq "47e: the enricher pass never edits the human's fields" "1" \
+    "$(g47_occ "\`title\`, \`type\` and \`description\` are the human's words, and the pass never edits them" "$G47_ENR_PASS")"
+  assert_eq "47e: the enricher's Phase 1 preservation rule is intact" "1" \
+    "$(g47_occ '**The fields `title`, `type`, and `description` are human-provided and MUST be preserved exactly as given. Enrichment never modifies these fields.**' "$G47_ENR_ALL")"
+  assert_eq "47e: decomposer Step 7 leaves the human's fields untouched" "1" \
+    "$(g47_occ "This pass leaves the human's \`title\`, \`type\` and \`description\` untouched" "$G47_DEC_S7")"
+  assert_eq "47e: the Large task splitting section Step 7 names still exists" "1" \
+    "$(g47_occ '### Large task splitting' "$G47_DEC_ALL")"
+
+  # --- 47f (matrix row 3, security considerations): patterns are read, never run ---
+  for G47_PAIR in "enricher:$G47_ENR_PASS" "decomposer:$G47_DEC_S7"; do
+    assert_eq "47f: the ${G47_PAIR%%:*} reads a prescribed command and never runs it" "1" \
+      "$(g47_occ 'so a prescribed command is read, never run, and you execute nothing with side effects' "${G47_PAIR#*:}")"
+    assert_eq "47f: the ${G47_PAIR%%:*} skips check 3 when nothing is prescribed" "1" \
+      "$(g47_occ 'Nothing prescribed means nothing to trace, and the check is skipped.' "${G47_PAIR#*:}")"
+    assert_eq "47f: the ${G47_PAIR%%:*} records a pattern with no edge cases as an open question" "1" \
+      "$(g47_occ 'prescribes a pattern yet lists no edge cases, record an open question' "${G47_PAIR#*:}")"
+  done
+  assert_eq "47f: the enricher says its tools execute nothing" "1" "$(g47_occ 'none of them executes anything' "$G47_ENR_PASS")"
+  for G47_PAIR in "enricher:$G47_ENR_FM" "decomposer:$G47_DEC_FM"; do
+    assert_eq "47f: the ${G47_PAIR%%:*} grants no shell tool" "0" "$(g47_occ 'run_shell_command' "${G47_PAIR#*:}")"
+    assert_eq "47f: the ${G47_PAIR%%:*} grants exactly four tools" "4" "$(grep -c '^  - ' <<<"${G47_PAIR#*:}" || true)"
+  done
+  assert_eq "47f: the reviewer still parses each non-blank criterion line as one requirement" "1" \
+    "$(g47_occ 'Parse each non-blank line of `acceptance_criteria` as a separate requirement' "$(cat "$G47_REV")")"
+
+  # --- 47g (matrix row 5): each creation skill carries one pointer to the pass ---
+  for G47_TRIPLE in "creating-tasks|$G47_CT|Phase 4 of \`agents/task-enricher.md\`" \
+                    "creating-goals|$G47_CG|Step 7 of \`agents/task-decomposer.md\`" \
+                    "enriching-tasks|$G47_EN|Phase 4 of \`agents/task-enricher.md\`"; do
+    G47_NAME="${G47_TRIPLE%%|*}"; G47_REST="${G47_TRIPLE#*|}"
+    G47_FILE="${G47_REST%%|*}"; G47_TARGET="${G47_REST#*|}"
+    G47_PTR="$(grep -F -- '**Cross-field consistency pass.**' "$G47_FILE" || true)"
+    assert_eq "47g: $G47_NAME carries exactly one pointer line" "1" "$(grep -cF -- '**Cross-field consistency pass.**' "$G47_FILE" || true)"
+    assert_eq "47g: the $G47_NAME pointer names its target once" "1" "$(g47_occ "$G47_TARGET" "$G47_PTR")"
+    assert_eq "47g: $G47_NAME does not restate the six checks" "0" "$(g47_occ '1. **Verification scope.**' "$(cat "$G47_FILE")")"
+  done
+  assert_eq "47g: the creating-tasks pointer follows the recommended fields" "1" \
+    "$(g47_occ '**Cross-field consistency pass.**' "$G47_CT_SL")"
+  assert_eq "47g: the creating-goals pointer sits in Task Nesting Rules" "1" \
+    "$(g47_occ '**Cross-field consistency pass.**' "$G47_CG_SL")"
+  assert_eq "47g: the enriching-tasks pointer follows the checklist" "1" \
+    "$(g47_occ '**Cross-field consistency pass.**' "$G47_EN_SL")"
+
+  # --- 47h (pitfall): no canon anchor for a rule the canon does not carry ---
+  for G47_FILE in "$G47_ENR" "$G47_DEC" "$G47_CT" "$G47_CG" "$G47_EN"; do
+    assert_eq "47h: ${G47_FILE##*/../} carries no canon anchor" "0" "$(g47_occ '<!-- canon:' "$(cat "$G47_FILE")")"
+  done
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

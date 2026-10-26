@@ -244,6 +244,19 @@ The first child stands in `behaviour_test_matrix` with a single placeholder. Bec
 
 **CRITICAL:** Batch endpoint root key is `"goals"`, NOT `"tasks"`. Both create shapes also carry a top-level `agent_name` — display metadata only, never an authorization signal.
 
+### Step 7: Cross-Field Consistency Pass for Every Child
+
+Step 5 writes each child's fields and Step 6 packs them into the payload; this step reads each child's fields against one another before the payload goes back. A child whose sentences disagree sends its implementer after the most specific one, which is frequently the mistaken one. Every child gets all six checks, and you fix the child in place. Phase 4 of `agents/task-enricher.md` applies the same six checks to a single enriched task, so a change to one copy belongs in the other.
+
+1. **Verification scope.** Each verification step proves at least as much as the acceptance criterion it is attached to. Widen one that proves less — a grep, command or manual step with a smaller reach than its criterion — or record the shortfall as an open question.
+2. **No contradiction.** A child's `what` and `patterns_to_follow` never cut against its own pitfalls or security considerations. Repair the half you wrote; where the goal's own wording is the source of the clash, both halves stay and the child says which one governs (check 4).
+3. **Prescribed patterns tested.** Trace every regex or command a child prescribes over each of that child's edge-case strings on paper. Like the enricher, you hold only read_file, grep_search, glob and list_directory, so a prescribed command is read, never run, and you execute nothing with side effects to settle the answer. Nothing prescribed means nothing to trace, and the check is skipped. If the child prescribes a pattern yet lists no edge cases, record an open question about it.
+4. **Precedence stated.** If a child carries two instructions that could point different ways, even when both are pitfalls, the child names the winner in the wording of one of them. Dropping one side to make a contradiction disappear is never the fix.
+5. **One line per criterion.** `agents/task-reviewer.md` takes every non-blank line of `acceptance_criteria` to be a separate requirement, so each criterion stays on one line; a wrapped one would be scored as two.
+6. **External contracts named.** The outside rules a child is bound by — validation the server applies, behaviour a protocol requires, a version tag that already exists — appear in its `pitfalls` or `patterns_to_follow` with the `file:line` they came from. Point at the location; never copy a credential, a token or an internal hostname you came across into the child.
+
+**Edge cases.** A child without verification steps gives check 1 no input; the five other checks run regardless. Two of its pitfalls that pull against each other are a check-4 case. A check that cannot be decided never blocks the output: give that child's `description` one extra sentence that begins `Open question:` and names the doubt. This pass leaves the human's `title`, `type` and `description` untouched, both the goal's and, under Large task splitting below, the original task's; a clash inside that text becomes an open question rather than an edit.
+
 ## Task Sizing Heuristics
 
 | Size | Hours | Key_files | Signals | Action |

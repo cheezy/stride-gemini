@@ -260,6 +260,8 @@ When depending on EXISTING tasks already in the system:
 
 These five fields must be filled in on every nested task in the batch — the goal-level `description` does not satisfy any of them.
 
+**Cross-field consistency pass.** Nested tasks you write yourself, rather than receive from the `task-decomposer` agent, still owe the six checks that agent runs across each child's fields before returning them; Step 7 of `agents/task-decomposer.md` spells them out, so work through them for every nested task before the batch is sent.
+
 > **Authoring tip — phrase each nested task's `manual_tests` as charters (advisory).** When the `stride-gemini-exploratory-testing` extension is installed, each nested task's `manual_tests` entry is run as an exploratory-testing charter (the stride-workflow Manual & Exploratory Testing step / Step 5.5). Charters work best as a *scenario* — a target plus the information or risk to discover — rather than a bare test fragment. This is **advisory only**: it does not change the required `testing_strategy` shape, does not make `manual_tests` phrasing mandatory, and does not affect the review_queue empty-pill gate, so terse entries still validate.
 >
 > - **Before:** `"Test in multiple browsers"`
