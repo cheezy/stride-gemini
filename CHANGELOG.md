@@ -21,11 +21,122 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
-## [Unreleased]
+## [1.52.0] - 2026-10-26
+
+Everything merged since 1.51.0, which stays closed: stride's G455 rework gates,
+ported in seven tasks over nine commits, the test adjustment they needed, and
+two changes from the same window that are not part of G455. The end of the entry
+lists the parts of G455 this runtime takes differently or not at all, each with
+its reason.
+
+### Added — creation authors a `behaviour_test_matrix` by default (W2472)
+
+If a task's testing strategy calls for a unit or integration test,
+`stride-creating-tasks`, `stride-creating-goals` (for each nested task) and
+`agents/task-decomposer.md` (for each child) now write the seven-category
+matrix the enricher already produced. Each site gives the manual-only rule, the
+one-sentence reason for leaving the matrix out, where row test names come from,
+the unchanged server rule and the no-secrets rule. Bash Group 42. Port of
+stride W2292.
+
+### Added — a cross-field consistency pass in the enricher and decomposer (W2473)
+
+Six checks run after the enricher's checklist and, as a new Step 7, on every
+child the decomposer writes: verification scope, contradictions, prescribed
+patterns traced on paper, precedence, one line per criterion, and external
+contracts cited by file:line. A check that cannot be decided never blocks; it
+becomes an open question in `technical_details` (enricher) or in the child's
+description (decomposer). The creation and enrichment skills point to it. Bash
+Group 47. Port of stride W2297.
+
+### Added — the explorer checks the task against today's code (W2474)
+
+`agents/task-explorer.md` gains step 6. It gathers the statements a task makes
+about the code, settles each with a `read_file`, `grep_search` or `glob` call of
+its own, writes `checked by:` beside it, and leads its summary with `Task
+statements the current code contradicts`. The explorer has no shell, so the
+orchestrator measures the commit window for it in Step 3 Branch C with the
+snippet in the new `skills/stride-workflow/commit-window.md`. Bash Group 43.
+Port of stride W2298.
+
+### Changed — the reviewer pairs each `testing_strategy` entry with a test (W2475)
+
+Review step 4 now matches every `unit_tests`, `integration_tests` and
+`edge_cases` entry to the test that exercises it, cited as file:line; an entry
+with no test is an Important testing issue and fails the `testing_strategy`
+verdict. Manual tests get a one-line note and no pairing. The mapping goes in
+the prose report, so the JSON block and its `schema_version` 1.7 are unchanged.
+Bash Group 44. Port of stride W2293.
+
+### Added — break-it records for the tests a diff touches (W2476)
+
+Step 4 points to the new `skills/stride-workflow/test-non-vacuity.md`: for each
+test a diff adds or changes, break what it guards, see it fail, undo the break
+by hand, see it pass, and hand the record to the reviewer as `break_it`, a Step
+5 bullet of its own. Review step 4 treats a missing or weak record as an
+Important testing issue. Bash Group 45. Port of stride W2294.
+
+### Added — the reviewer checks the statements a diff adds (W2477)
+
+Review step 6 gains a Statement Verification block: each count, path,
+identifier, line reference, version or claim about the code that the diff
+introduces is settled, and one the code contradicts is an Important
+`code_quality` issue. A deep security review of the first version, which used a
+shell, led to `run_shell_command` leaving the reviewer's `tools:` list;
+statements are now checked with `read_file`, `grep_search` and `glob`, and one
+that only git history could settle is recorded as unverifiable. Bash Group 46.
+Port of stride W2295.
+
+### Added — the reviewer flags untouched twins (W2478)
+
+After the statement checks, a Twin Check looks for each touched file's declared
+counterparts: the other half of a `.sh`/`.ps1` pair, a file that a mirror or
+keep-in-sync sentence names, and a file sharing its canon anchor. A counterpart
+left behind when shared behaviour moved is an Important `code_quality` issue.
+Counterparts come from the reviewer's own `glob` and `grep_search` results,
+which see the working tree rather than git's index. Bash Group 48. Port of
+stride W2296.
+
+### Changed — Test 40c reads the W2470 shrink from history
+
+Test 40c had held the reviewer under its pre-W2470 size for good, which left no
+room for the three reviewer ports that landed after it (W2476, W2477, W2478). It
+now proves from git that W2470's own commit made the file smaller, and skips
+when that history is not available.
 
 ### Risk R1 settled: the stop gate's AfterAgent contract is measured
 
 The stop gate's headers carried an unconfirmed-contract warning (risk R1, W2145): the JSON `deny` decision at exit 0 was documented for `BeforeTool` and not for `AfterAgent`, and if `AfterAgent` honoured only exit 2 the gate would never block. A run on Gemini CLI 0.65.0 settled it. The JSON decision at exit 0 re-prompts the model with the reason as a new user turn, and exit 2 does the same. The gate's behaviour is unchanged. Its headers, the README and `docs/HOOK_RESEARCH.md` now record the result. They also correct an earlier claim: the `block` spelling other ports use is accepted here too, so `deny` is this port's spelling rather than the only one that works. Test 37i pins the record and the headers, and 37g's blob pins move for the comment-only header edit.
+
+### Fixed — env-cache values are data on both hook halves
+
+The bash claim writer now escapes every value it caches, so a single quote in a
+task title can no longer break out of its quoting when the cache is sourced.
+The PowerShell writers flatten every line terminator and quote each value, and
+the loader unquotes it exactly, so a title can no longer add variables of its
+own to the environment. `check-plugin-current.ps1` also drops trailing newlines
+from a version the way bash does. Tests: bash 6f, 36k and 36y; PowerShell 10k
+and 21j. Port of stride D280.
+
+### Not ported from G455 — kept here so a gap is not read as an oversight
+
+- **W2295, the claims-census hand-off — not applicable.** This extension keeps
+  no claims census, so the reviewer has no recorded census command to rerun;
+  statement verification works from the diff and the repository alone.
+- **W2298, `verified_by` and an explorer shell — carried another way.** The
+  explorer here has read-only file tools only. It names the call that settled
+  each statement as `checked by:`, and its commit history comes from the
+  orchestrator, which runs `commit-window.md` in Step 3 Branch C and passes the
+  output in as `commit window:` lines. When the orchestrator has no task file
+  it sends `commit window: not checked — no task file`; when no line arrives at
+  all the explorer writes `commit window: not checked — none supplied`. Either
+  way that history moves to the unverified list and the files are still read.
+- **W2295 and W2296, checks stride runs through a shell — read-only tools
+  instead.** The reviewer holds no shell, so a statement only git history could
+  settle is recorded as unverifiable, and twins are found in the working tree,
+  not in git's index.
+- **No canon entry.** G455 registers none, so none of these rules carries an
+  anchor here.
 
 ## [1.51.0] - 2026-10-26
 
