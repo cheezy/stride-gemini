@@ -7259,6 +7259,183 @@ else
 fi
 
 # ============================================================
+# Test Group 42: a behaviour_test_matrix by default at creation (W2472)
+# ============================================================
+# Ports stride W2292. stride-creating-tasks, stride-creating-goals (every
+# nested task) and agents/task-decomposer.md (every child task) now write a
+# seven-category matrix whenever testing_strategy lists a unit or integration
+# test, the default agents/task-enricher.md already followed. The goal planned
+# Group 41 for this task, but W2471 took 41 first, so this is 42, the next free
+# number.
+#
+# Every phrase pin counts occurrences of a fixed string, exactly 1, inside its
+# slice: the creating-tasks behaviour_test_matrix section (heading to the
+# security_considerations heading), the creating-goals nested-task paragraphs
+# (the default paragraph to "Minimal nested tasks"), and the decomposer's Step 5
+# (heading to Step 6). Each of the three slices is checked for the same four
+# authoring rules and the unchanged server rule, so dropping one from any one
+# site turns its pin red.
+#
+# Contract text only, so the bash half carries it alone, as Groups 35 and 43-46
+# do. Not covered: whether a live decomposer emits matching matrices; the
+# task's manual verification step exercises that.
+echo ""
+echo "=== Test Group 42: a behaviour_test_matrix by default at creation (W2472) ==="
+
+G42_CT="$SCRIPT_DIR/../skills/stride-creating-tasks/SKILL.md"
+G42_CG="$SCRIPT_DIR/../skills/stride-creating-goals/SKILL.md"
+G42_DEC="$SCRIPT_DIR/../agents/task-decomposer.md"
+G42_ENR="$SCRIPT_DIR/../agents/task-enricher.md"
+
+if [ ! -f "$G42_CT" ] || [ ! -f "$G42_CG" ] || [ ! -f "$G42_DEC" ] || [ ! -f "$G42_ENR" ]; then
+  echo "  SKIP: Test Group 42 (a creating skill, the decomposer or the enricher not found relative to the hooks directory)"
+else
+  # Occurrences of a fixed string, not matching lines. An empty needle says so.
+  g42_occ() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    { grep -oF -- "$1" <<<"$2" || true; } | wc -l | tr -d ' '
+  }
+  g42_yes() { if "$@"; then echo yes; else echo no; fi; }
+
+  G42_CT_ALL="$(cat "$G42_CT")"
+  G42_CG_ALL="$(cat "$G42_CG")"
+  G42_DEC_ALL="$(cat "$G42_DEC")"
+  G42_CT_CHK="$(grep -F -- '- [ ] `behaviour_test_matrix` - ' "$G42_CT" || true)"
+  G42_CT_SEC="$(awk '/^### behaviour_test_matrix$/{f=1} /^### security_considerations/{f=0} f' "$G42_CT")"
+  G42_CG_SEC="$(awk '/^Each nested task takes the same `behaviour_test_matrix` default/{f=1} /^\*\*Minimal nested tasks fail the same way/{f=0} f' "$G42_CG")"
+  G42_DEC_S5="$(awk '/^### Step 5: Full Specification per Task/{f=1} /^### Step 6: Output Assembly/{f=0} f' "$G42_DEC")"
+
+  # --- 42a: the slices are non-empty and bounded ---
+  for G42_PAIR in "creating-tasks checklist:$G42_CT_CHK" "creating-tasks section:$G42_CT_SEC" \
+                  "creating-goals nested paragraphs:$G42_CG_SEC" "decomposer Step 5:$G42_DEC_S5"; do
+    assert_eq "42a: the ${G42_PAIR%%:*} slice is non-empty" "yes" "$(g42_yes test -n "${G42_PAIR#*:}")"
+  done
+  assert_eq "42a: one checklist line names the matrix" "1" "$(printf '%s\n' "$G42_CT_CHK" | grep -c .)"
+  assert_eq "42a: the creating-tasks section keeps its WRONG/RIGHT examples" "1" \
+    "$(g42_occ '❌ WRONG (strings — must be row objects):' "$G42_CT_SEC")"
+  assert_eq "42a: the creating-tasks section ends before security_considerations" "0" \
+    "$(g42_occ '❌ WRONG (single string):' "$G42_CT_SEC")"
+  assert_eq "42a: the creating-goals slice ends before Minimal nested tasks" "0" \
+    "$(g42_occ 'Minimal nested tasks fail the same way' "$G42_CG_SEC")"
+  assert_eq "42a: the decomposer slice ends before Step 6" "0" "$(g42_occ 'Output Assembly' "$G42_DEC_S5")"
+
+  # --- 42b (matrix row 0): creating-tasks makes the matrix the default ---
+  assert_eq "42b: the section opens with the seven-or-none default" "1" \
+    "$(g42_occ '**A testable task carries the matrix as standard: seven categories, or no matrix at all.**' "$G42_CT_SEC")"
+  assert_eq "42b: the trigger is a unit or integration test in testing_strategy" "1" \
+    "$(g42_occ 'As soon as `testing_strategy` lists a unit test or an integration test, write a `behaviour_test_matrix` covering every one of the seven fixed categories' "$G42_CT_SEC")"
+  assert_eq "42b: an untouched category is waived, not a reason to drop the field" "1" \
+    "$(g42_occ 'A category the change never touches gets a waived row; it is no excuse to drop the field.' "$G42_CT_SEC")"
+  assert_eq "42b: the section points at the enricher's matching rule" "1" \
+    "$(g42_occ '`agents/task-enricher.md` already works this way.' "$G42_CT_SEC")"
+  assert_eq "42b: the checklist line says written by default" "1" \
+    "$(g42_occ '**written by default for a testable task**' "$G42_CT_CHK")"
+  assert_eq "42b: the example note says a testable task carries one by default" "1" \
+    "$(g42_occ 'yet a testable task carries one by default' "$G42_CT_ALL")"
+  assert_eq "42b: the field table says a testable task carries it by default" "1" \
+    "$(g42_occ 'the API accepts it absent, but a testable task carries it by default; once non-empty, all 7 categories must appear' "$G42_CT_ALL")"
+  for G42_GONE in '**OPTIONAL** array of behaviour/test rows' 'omitting it is always fine' \
+                  'nothing concrete to record' '`behaviour_test_matrix` and `technical_details` are both optional' \
+                  'No (but if non-empty, all 7 categories must appear)'; do
+    assert_eq "42b: the old optional wording '$G42_GONE' is gone from creating-tasks" "0" "$(g42_occ "$G42_GONE" "$G42_CT_ALL")"
+  done
+
+  # --- 42c (matrix row 5): creating-goals and the decomposer carry the same default ---
+  assert_eq "42c: every nested task takes the flat-task default" "1" \
+    "$(g42_occ 'Each nested task takes the same `behaviour_test_matrix` default as a flat task' "$G42_CG_SEC")"
+  assert_eq "42c: creating-goals states seven-or-none for a nested task" "1" \
+    "$(g42_occ '**A testable nested task carries the matrix as standard: seven categories, or no matrix at all.**' "$G42_CG_SEC")"
+  assert_eq "42c: creating-goals uses the same trigger" "1" \
+    "$(g42_occ "As soon as a nested task's \`testing_strategy\` lists a unit test or an integration test" "$G42_CG_SEC")"
+  assert_eq "42c: the goal description never substitutes for a nested matrix" "1" \
+    "$(g42_occ "The goal's own \`description\` never substitutes for a nested task's matrix." "$G42_CG_SEC")"
+  assert_eq "42c: the row-shape bullets are kept" "1" \
+    "$(g42_occ 'A **non-empty** matrix must include at least one row for **every** one of the 7 categories' "$G42_CG_SEC")"
+  for G42_GONE in 'MAY also carry an optional `behaviour_test_matrix`' 'Omitting it on a nested task is always fine' \
+                  'Populate it per nested task only where'; do
+    assert_eq "42c: the old optional wording '$G42_GONE' is gone from creating-goals" "0" "$(g42_occ "$G42_GONE" "$G42_CG_ALL")"
+  done
+  assert_eq "42c: the decomposer's field table lists the matrix as By default" "1" \
+    "$(g42_occ '| `behaviour_test_matrix` | By default |' "$G42_DEC_S5")"
+  assert_eq "42c: the decomposer states seven-or-none for every testable child" "1" \
+    "$(g42_occ '**Every child task with testable behaviour carries a matrix as standard: seven categories, or no matrix at all.**' "$G42_DEC_S5")"
+  assert_eq "42c: the decomposer uses the same trigger" "1" \
+    "$(g42_occ "As soon as a child's \`testing_strategy\` lists a unit test or an integration test" "$G42_DEC_S5")"
+  assert_eq "42c: stride-creating-tasks wins where the decomposer differs" "1" \
+    "$(g42_occ 'where this section and that skill differ, the skill wins' "$G42_DEC_S5")"
+  assert_eq "42c: the worked example says why it shows no matrix" "1" \
+    "$(g42_occ 'To keep the example short, its tasks carry no `behaviour_test_matrix`.' "$G42_DEC_ALL")"
+
+  # --- 42d (matrix row 3) and 42e (matrix row 1): the same rules at all three sites ---
+  for G42_SITE in "creating-tasks:$G42_CT_SEC" "creating-goals:$G42_CG_SEC" "decomposer:$G42_DEC_S5"; do
+    G42_NAME="${G42_SITE%%:*}"
+    G42_TEXT="${G42_SITE#*:}"
+    for G42_NEEDLE in \
+      '**Manual-only strategies.**' \
+      'ask whether those checks drive behaviour that this change introduces or modifies.' \
+      'write the matrix with `type` set to `"manual"` on each row and a `test_name` taken from one of the `manual_tests` entries' \
+      'leave the matrix out and give the reason' \
+      '**Leaving it out needs a reason.**' \
+      'explains the omission in a single sentence' \
+      'No behaviour_test_matrix: this change edits documentation only, so it has no behaviour to test.' \
+      '**Row test names come from `testing_strategy`.**' \
+      'The `test_name` on each row must be a test that `testing_strategy` already lists' \
+      'a waived row names no test and explains itself in `na_reason`' \
+      'The matrix sits beside `testing_strategy` and never stands in for it' \
+      'never record secrets or credentials in `behaviour`, `test_name`, or `na_reason`'; do
+      assert_eq "42d: $G42_NAME states '$G42_NEEDLE'" "1" "$(g42_occ "$G42_NEEDLE" "$G42_TEXT")"
+    done
+    for G42_NEEDLE in \
+      '**The server rule has not moved.**' \
+      'The API still accepts an absent or empty matrix, and that never shows as an empty pill' \
+      'Writing it by default is guidance for authors, not a new requirement on the API.' \
+      'A matrix that skips any category is refused with a 422, so send all seven or none.'; do
+      assert_eq "42e: $G42_NAME states '$G42_NEEDLE'" "1" "$(g42_occ "$G42_NEEDLE" "$G42_TEXT")"
+    done
+  done
+
+  # --- 42f: no canon anchor; the enricher's default is untouched ---
+  for G42_FILE in "$G42_CT" "$G42_CG" "$G42_DEC" "$G42_ENR"; do
+    assert_eq "42f: ${G42_FILE##*/../} carries no canon anchor" "0" "$(g42_occ '<!-- canon:' "$(cat "$G42_FILE")")"
+  done
+  assert_eq "42f: the enricher still emits the matrix by default" "1" \
+    "$(g42_occ '**Emit it by default — all seven categories or nothing.**' "$(cat "$G42_ENR")")"
+
+  # --- 42g: row-text security at all three sites ---
+  assert_eq "42g: the decomposer never copies a credential-shaped string into a row" "1" \
+    "$(g42_occ 'describe the behaviour in your own words and never copy such a string into a row' "$G42_DEC_S5")"
+  assert_eq "42g: the decomposer says the API refuses out-of-vocabulary category and status" "1" \
+    "$(g42_occ 'The API refuses a `category` or `status` outside the fixed vocabulary' "$G42_DEC_S5")"
+  assert_eq "42g: the decomposer keeps raw HTML out of row text" "1" \
+    "$(g42_occ 'row text carries no raw HTML' "$G42_DEC_S5")"
+  assert_eq "42g: creating-tasks keeps the out-of-vocabulary rejection" "1" \
+    "$(g42_occ 'the API rejects an out-of-vocabulary `category` or `status` outright' "$G42_CT_SEC")"
+  assert_eq "42g: creating-goals keeps the out-of-vocabulary rejection" "1" \
+    "$(g42_occ 'the API rejects an out-of-vocabulary `category` or `status` outright' "$G42_CG_SEC")"
+
+  # --- 42h: the examples obey the rules they illustrate ---
+  # The Complete Task Object's matrix rows (two-space indent, so the indented
+  # excerpts further down are not read) must each name a test its own
+  # testing_strategy lists, and the decomposer's Step 6 template must not show a
+  # testable child with no matrix. Both gaps were found by the task's
+  # exploratory session.
+  G42_EX_TS="$(awk '/^  "testing_strategy": \{/{f=1} f{print} f && /^  \},?$/{exit}' "$G42_CT")"
+  G42_EX_MX="$(awk '/^  "behaviour_test_matrix": \[/{f=1} f{print} f && /^  \],?$/{exit}' "$G42_CT")"
+  G42_EX_NAMES="$(grep -F '"test_name": ' <<<"$G42_EX_MX" | grep -vF '"test_name": "N/A"' | sed 's/^ *"test_name": //; s/,$//' || true)"
+  assert_eq "42h: the example matrix has six named rows" "6" "$(printf '%s\n' "$G42_EX_NAMES" | grep -c .)"
+  while IFS= read -r G42_TN; do
+    [ -n "$G42_TN" ] || continue
+    assert_eq "42h: the example testing_strategy lists $G42_TN" "1" "$(g42_occ "$G42_TN" "$G42_EX_TS")"
+  done <<<"$G42_EX_NAMES"
+  assert_eq "42h: creating-tasks says how to keep row names and strategy entries equal" "1" \
+    "$(g42_occ 'write each `testing_strategy` entry as `path — "test name"` and copy it into the row unchanged' "$G42_CT_SEC")"
+  assert_eq "42h: the decomposer template child carries a matrix placeholder" "1" \
+    "$(g42_occ '"behaviour_test_matrix": ["... seven rows, one per category; see Step 5 ..."]' "$G42_DEC_ALL")"
+  assert_eq "42h: the decomposer says a real template child carries all seven rows" "1" \
+    "$(g42_occ 'a real child in its place carries all seven rows, as Step 5 says' "$G42_DEC_ALL")"
+fi
+
+# ============================================================
 # Test Group 43: the explorer reports task statements the code contradicts (W2474)
 # ============================================================
 # Ports stride W2298. The task-explorer gains a step 6 that checks what the task

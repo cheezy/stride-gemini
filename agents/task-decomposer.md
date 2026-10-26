@@ -158,8 +158,21 @@ Every decomposed task MUST include all fields required by stride-creating-tasks:
 | `patterns_to_follow` | Yes | Newline-separated string |
 | `pitfalls` | Yes | Array of strings |
 | `technical_details` | No | Optional free-form object of additional technical context; any keys; NOT one of the five review_queue-scored fields |
+| `behaviour_test_matrix` | By default | Seven categories on any child whose `testing_strategy` lists a unit or integration test; left out only for a child with nothing testable, whose `description` then gives the reason; outside the five review_queue-scored fields |
 
 A decomposed task MAY also carry an optional free-form `technical_details` object (any keys — data shapes, gotchas, decisions, or reference links surfaced during scope analysis). It is never required and is **not** one of the five review_queue-scored fields, so leaving it as `{}` or omitting it is fine. Because it is free-form, never record secrets (tokens, passwords, credentials) in it.
+
+**Every child task with testable behaviour carries a matrix as standard: seven categories, or no matrix at all.** This is the rule `agents/task-enricher.md` follows, and `stride-creating-tasks` owns the row shape; where this section and that skill differ, the skill wins. As soon as a child's `testing_strategy` lists a unit test or an integration test, write a `behaviour_test_matrix` on that child covering every one of the seven fixed categories, with each row either pointing at a real test or waived through `na_reason`. A category the change never touches gets a waived row; it is no excuse to drop the field. Filler rows are no better than a missing matrix.
+
+**Manual-only strategies.** If `manual_tests` holds the only entries in a child's `testing_strategy`, ask whether those checks drive behaviour that this change introduces or modifies. When they do, write the matrix with `type` set to `"manual"` on each row and a `test_name` taken from one of the `manual_tests` entries. When they merely proof-read documentation, copy or configuration, leave the matrix out and give the reason.
+
+**Leaving it out needs a reason.** Only a child with nothing testable in it, such as a change to docs, copy or config alone, goes without a matrix, and its `description` explains the omission in a single sentence — for instance `No behaviour_test_matrix: this change edits documentation only, so it has no behaviour to test.` A matrix that is simply missing, with no reason given, looks like something forgotten.
+
+**The server rule has not moved.** The API still accepts an absent or empty matrix, and that never shows as an empty pill, since the matrix sits outside the five review_queue-scored fields. Writing it by default is guidance for authors, not a new requirement on the API. A matrix that skips any category is refused with a 422, so send all seven or none.
+
+**Row test names come from `testing_strategy`.** The `test_name` on each row must be a test that `testing_strategy` already lists, which keeps the two in step; a waived row names no test and explains itself in `na_reason`. Need a test the strategy lacks? Add it to `testing_strategy` before any row refers to it. The matrix sits beside `testing_strategy` and never stands in for it, and `testing_strategy` stays one of the five scored fields.
+
+**Row text is stored and later rendered**, so never record secrets or credentials in `behaviour`, `test_name`, or `na_reason`. Decomposing means reading project files, and some of them hold credential-shaped strings: describe the behaviour in your own words and never copy such a string into a row. The API refuses a `category` or `status` outside the fixed vocabulary, and row text carries no raw HTML.
 
 ### Step 6: Output Assembly
 
@@ -194,6 +207,7 @@ The goal goes under the `task` root key; `agent_name` rides at the top level bes
         "dependencies": [],
         "verification_steps": [{"step_type": "command", "step_text": "mix test ...", "position": 0}],
         "testing_strategy": {"unit_tests": ["..."], "integration_tests": ["..."]},
+        "behaviour_test_matrix": ["... seven rows, one per category; see Step 5 ..."],
         "security_considerations": ["..."],
         "acceptance_criteria": "...",
         "patterns_to_follow": "...",
@@ -208,6 +222,8 @@ The goal goes under the `task` root key; `agent_name` rides at the top level bes
   }
 }
 ```
+
+The first child stands in `behaviour_test_matrix` with a single placeholder. Because its `testing_strategy` lists unit and integration tests, a real child in its place carries all seven rows, as Step 5 says.
 
 **Batch format (POST /api/tasks/batch):**
 
@@ -470,6 +486,8 @@ Migration → Context → LiveView → Template
 - Task 3 (notifications) depends on [0, 2] — needs both comments and mention parsing
 - Tasks 1 and 2 can run in parallel (fan-out pattern from task 0)
 - No key_file overlap between tasks — each modifies different files
+
+To keep the example short, its tasks carry no `behaviour_test_matrix`. Each of the four lists unit and integration tests, so a real decomposition would give every one of them a full seven-category matrix, as Step 5 requires.
 
 ## Important Constraints
 
