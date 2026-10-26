@@ -7152,6 +7152,46 @@ EOF
 fi
 
 # ============================================================
+# Test Group 41: release bookkeeping for the G446-G448 port (W2471)
+# ============================================================
+# RELEASE.md says nothing tests the manifest version against the changelog;
+# this pins it: the newest numbered CHANGELOG heading must be the version
+# gemini-extension.json carries, so a release that bumps one without the other
+# fails here. It also pins the 1.51.0 "Not ported" list, so a later edit cannot
+# quietly drop the record of what this port could not carry. 41 was the next
+# free group number.
+echo ""
+echo "=== Test Group 41: release bookkeeping for the G446-G448 port (W2471) ==="
+
+G41_CL="$SCRIPT_DIR/../CHANGELOG.md"
+G41_MANIFEST="$SCRIPT_DIR/../gemini-extension.json"
+
+if [ ! -f "$G41_CL" ] || [ ! -f "$G41_MANIFEST" ]; then
+  echo "  SKIP: Test Group 41 (CHANGELOG.md or gemini-extension.json not found relative to the hooks directory)"
+else
+  G41_TOP=$(sed -n 's/^## \[\([0-9][0-9.]*\)\].*/\1/p' "$G41_CL" | head -n 1)
+  G41_VER=$(jq -r '.version // empty' "$G41_MANIFEST" 2>/dev/null)
+  assert_eq "41a: the newest numbered CHANGELOG heading is non-empty" "yes" "$([ -n "$G41_TOP" ] && echo yes || echo no)"
+  assert_eq "41a: gemini-extension.json carries a version" "yes" "$([ -n "$G41_VER" ] && echo yes || echo no)"
+  assert_eq "41a: the newest numbered CHANGELOG heading matches gemini-extension.json" "$G41_VER" "$G41_TOP"
+
+  # The 1.51.0 entry only: from its heading up to the next numbered heading.
+  G41_ENTRY=$(awk '/^## \[1\.51\.0\]/ { f = 1; next } f && /^## \[/ { exit } f' "$G41_CL")
+  # Bullets wrap; join each continuation line (two-space indent) onto its bullet
+  # so a label split across lines is still one line here.
+  G41_NP=$(printf '%s\n' "$G41_ENTRY" | awk '/^### Not ported from G446/ { f = 1; next } f && /^### / { exit } f' \
+    | awk '/^- / { if (b != "") print b; b = $0; next } /^  [^ ]/ { sub(/^  /, " "); b = b $0; next } { if (b != "") print b; b = ""; print } END { if (b != "") print b }')
+  assert_eq "41b: the 1.51.0 entry has a Not ported section" "yes" "$([ -n "$G41_NP" ] && echo yes || echo no)"
+  for G41_ITEM in W2250 W2254 W2255 W2252 W2259; do
+    G41_LINE=$(printf '%s\n' "$G41_NP" | grep -F -- "**$G41_ITEM," | head -n 1)
+    assert_eq "41b: Not ported names $G41_ITEM" "yes" "$([ -n "$G41_LINE" ] && echo yes || echo no)"
+    # A reason follows the bold label: text after the closing ** on that bullet.
+    G41_REASON=$(printf '%s\n' "$G41_LINE" | sed -n 's/^- \*\*[^*]*\*\* *\(.\{1,\}\)$/\1/p')
+    assert_eq "41b: $G41_ITEM carries a reason after its label" "yes" "$([ -n "$G41_REASON" ] && echo yes || echo no)"
+  done
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

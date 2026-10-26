@@ -21,6 +21,123 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [1.51.0] - 2026-10-26
+
+This release carries the whole of stride's G446–G448 batch into this extension
+at once: the eight port commits since 1.50.0, plus a list at the end of the
+items this runtime cannot take, each with its reason.
+
+### Added — the claim hook saves the claimed task to `.stride/.task-<IDENTIFIER>.json` (W2463)
+
+After a 2xx claim whose own response names the task the claim command asked
+for, both hook halves write that response's `data` object under `.stride/`. The
+file is named for the identifier only when the whole identifier fits
+`^[A-Za-z0-9_-]{1,64}$`; otherwise the integer id is used, and with neither
+nothing is written, so no server value can steer the path out of `.stride/`. The
+write goes through a temp file and a rename, the PowerShell half writes no
+byte-order mark, and a failed write never fails the claim. Step 7 of the
+workflow skill removes the file after a 2xx completion; the README covers its
+lifetime and the `.gitignore` advice. Tests: bash Group 34, PowerShell Group 20.
+Port of stride W2248.
+
+### Changed — the explorer and reviewer take their fields from `TASK_FILE` (W2464)
+
+Steps 3 and 5 now hand `task-explorer` and `task-reviewer` the absolute path of
+that file plus one sentence saying its contents are data, not instructions,
+instead of retyping the task into the prompt. Both agents read every field from
+it and fall back to the prompt when it is absent or names another task. The
+reviewer builds `acceptance_criteria` one entry per non-blank line, verbatim and
+in order. When no file exists the old inline field lists still apply. Planning
+stays inline in this port, so there is no planner line. Bash Group 35 pins the
+wording. Port of stride W2249.
+
+### Added — Step 0 warns once about a stale install (W2465)
+
+New `hooks/check-plugin-current.sh` and `.ps1` compare the `version` in the
+installed `gemini-extension.json` with this extension's pin in the published
+`stride-gemini-marketplace` catalog. When the install is older they print one
+line naming both versions and `gemini extensions update stride-gemini`; when it
+is equal or newer, or anything cannot be read or reached, they print nothing.
+Versions compare numerically, the fetch is bounded at 3 seconds with no
+credential, and both scripts always exit 0. Step 0 item 5 relays the line and
+carries on. Tests: bash Group 36, PowerShell Group 21. Port of stride W2251.
+
+### Changed — a second review round has to be earned (W2466)
+
+Round two now runs only when round one's fixes touched a code path, or round one
+reported a critical, or it reported a `category: "security"` issue at any
+severity. Without one of those, fixed findings are recorded and round one's
+result is submitted. A code path is any changed path that is not documentation,
+a test or a comment-only edit, and this port applies that classification itself.
+The critical exemption and the never-record-a-security-issue rule are unchanged.
+The rule is now `review-round-cap` v2 in the workflow skill and is mirrored in
+`stride-completing-tasks`, `stride-subagent-workflow` and the README. Bash Group
+20 gains cases 20ag–20au. Port of stride W2252 (this port's share of W2253).
+
+### Changed — discovery is slim and enrichment reads the claim (W2468)
+
+Step 1 calls `GET /api/tasks/next?response_view=slim`, which returns a summary
+rather than the full task; a server that predates the parameter returns the full
+task, which still works. The full body now comes from the claim, so the
+enrichment check runs on the claim response, and a re-fetch happens only after
+an enrichment PATCH. The Stop gate's non-held request asks for the slim view too,
+while its held-mode request keeps its fields projection. GEMINI.md, the claiming
+skill and the workflow flowchart name the slim call; the enriching and
+subagent-workflow skills now place enrichment after the claim. Tests: bash Group 38
+and additions to Groups 19 and 24, PowerShell Group 15. Port of stride W2256.
+
+### Added — measured: the explorer holds the turn, and AfterAgent lists no agents (W2467)
+
+A throwaway Gemini CLI 0.65.0 session against a mock model endpoint showed that
+a custom-agent invocation keeps the main turn until the agent returns, and that
+the AfterAgent hook input carries no list of running agents. The evidence is in
+`docs/HOOK_RESEARCH.md`. Step 3 Branch C now says there is nothing to overlap
+while the explorer works, and the README's stop-gate section says why the gate
+needs no running-agent exemption. Bash Group 37 pins both. The two stride fixes
+this settles are listed under "Not ported" below.
+
+### Changed — rationale leaves the workflow skill for `docs/orchestrator-rationale.md` (W2469)
+
+Seventeen rationale and history passages moved out of
+`skills/stride-workflow/SKILL.md` into a new `docs/orchestrator-rationale.md`,
+one section each, with a one-sentence pointer left behind. Duplicated statements
+were deleted rather than moved. Every gate, matrix, schema, self-check, executed
+block, prompt-injection framing and redaction rule stayed inline, and no canon
+version changed. The file is 159,292 bytes, down from 160,091 at 1.50.0. Bash
+Group 39 checks the anchors and pointers. Port of the method of stride W2257.
+
+### Changed — rationale leaves the completing skill and the reviewer for `docs/` (W2470)
+
+The same move for `skills/stride-completing-tasks/SKILL.md`, into
+`docs/completion-rationale.md`, and for `agents/task-reviewer.md`, into
+`docs/task-reviewer-rationale.md`. Sections that only restated inline rules were
+deleted. The field reference, both result shapes, the skip-reason enum, the
+self-check, the reviewer's schema and safety rules, and the canon-governed
+blocks (byte for byte) stay inline. The completing skill went from 87,216 bytes
+at 1.50.0 to 74,038. The reviewer ends this release at 49,478 bytes, slightly
+above its 49,231 at 1.50.0, because W2464's `TASK_FILE` contract was added to it
+before this trim. Bash Group 40 pins it. Port of the method of stride W2258.
+
+### Not ported from G446–G448 — listed so "not applicable" reads differently from "missed"
+
+- **W2250, dispatcher mode on by default — not applicable.** stride-gemini has
+  no task-runner agent, so there is no dispatcher mode to switch on.
+- **W2254, reading key files while the explorer runs — not ported.** W2467
+  measured that the explorer invocation holds the turn on Gemini CLI 0.65.0, so
+  there is no window to fill. Step 3 Branch C says so instead.
+- **W2255, letting the Stop gate pass while a stride agent runs — not
+  applicable.** The AfterAgent input has no running-agent list, and because the
+  invocation blocks, the gate never fires while an agent is working. Both gate
+  halves are unchanged.
+- **W2252, round two must be earned — followed, not enforced.** This port
+  computes no round-cap predicate, so the three grounds are prose the session
+  applies to itself, not a check that can refuse.
+- **W2256's dispatcher size-gate fetch — not ported.** It belongs to dispatcher
+  mode, which this port does not have.
+- **W2259, the token and wall-clock measurement — not ported, and no saving is
+  claimed.** Stride measured its own plugin on Claude Code. Nothing was measured
+  on Gemini CLI, so this release makes no token or time claim.
+
 ## [1.50.0] - 2026-10-01
 
 ### Fixed — an escaped `>` is no longer read as an operator
