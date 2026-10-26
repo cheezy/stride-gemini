@@ -1361,8 +1361,8 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     $r = Invoke-HookScript -InputJson $claimA -Phase 'post' -ProjectDir $brA
     Assert-Exit "10a: inline JSON claim exits 0" 0 $r.ExitCode
     $cacheA = Get-Content -Raw -Path (Join-Path $brA '.stride-env-cache') -ErrorAction SilentlyContinue
-    Assert-Contains "10a: inline JSON writes the identifier" "TASK_IDENTIFIER=W42" $cacheA
-    Assert-Contains "10a: inline JSON sets TASK_BASE_REF to current HEAD" "TASK_BASE_REF=$headA" $cacheA
+    Assert-Contains "10a: inline JSON writes the identifier" "TASK_IDENTIFIER='W42'" $cacheA
+    Assert-Contains "10a: inline JSON sets TASK_BASE_REF to current HEAD" "TASK_BASE_REF='$headA'" $cacheA
 
     # 10b: a persisted-output notice pointing at a readable JSON file.
     $brB = New-GitRepo -Name 'g10-persisted'
@@ -1378,8 +1378,8 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     $r = Invoke-HookScript -InputJson $claimB -Phase 'post' -ProjectDir $brB
     Assert-Exit "10b: persisted-file claim exits 0" 0 $r.ExitCode
     $cacheB = Get-Content -Raw -Path (Join-Path $brB '.stride-env-cache') -ErrorAction SilentlyContinue
-    Assert-Contains "10b: persisted file supplies the identifier" "TASK_IDENTIFIER=W77" $cacheB
-    Assert-Contains "10b: persisted file path sets TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headB" $cacheB
+    Assert-Contains "10b: persisted file supplies the identifier" "TASK_IDENTIFIER='W77'" $cacheB
+    Assert-Contains "10b: persisted file path sets TASK_BASE_REF to HEAD" "TASK_BASE_REF='$headB'" $cacheB
 
     # 10c: garbage stdout refreshes only TASK_BASE_REF, preserves prior TASK_ID,
     # removes the stale snapshot.
@@ -1394,7 +1394,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Assert-Exit "10c: garbage-stdout claim exits 0" 0 $r.ExitCode
     $cacheC = Get-Content -Raw -Path (Join-Path $brC '.stride-env-cache') -ErrorAction SilentlyContinue
     Assert-Contains "10c: garbage stdout preserves the prior TASK_ID" "TASK_ID=42" $cacheC
-    Assert-Contains "10c: garbage stdout still refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headC" $cacheC
+    Assert-Contains "10c: garbage stdout still refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF='$headC'" $cacheC
     if (-not (Test-Path (Join-Path $brC '.stride-changed-files.json'))) {
         Write-Host "  PASS: 10c: base-ref-only refresh removes the stale snapshot" -ForegroundColor Green
         $script:PASS++
@@ -1414,7 +1414,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Assert-Exit "10d: missing-persisted-file claim exits 0" 0 $r.ExitCode
     $cacheD = Get-Content -Raw -Path (Join-Path $brD '.stride-env-cache') -ErrorAction SilentlyContinue
     Assert-Contains "10d: missing persisted file preserves the prior TASK_ID" "TASK_ID=42" $cacheD
-    Assert-Contains "10d: missing persisted file refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headD" $cacheD
+    Assert-Contains "10d: missing persisted file refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF='$headD'" $cacheD
 
     # 10e: a non-claim post invocation leaves TASK_BASE_REF untouched.
     $brE = New-GitRepo -Name 'g10-noclaim'
@@ -1463,7 +1463,7 @@ echo "claimed"
     Assert-Exit "10g: non-JSON-persisted-file claim exits 0" 0 $r.ExitCode
     $cacheG = Get-Content -Raw -Path (Join-Path $brG '.stride-env-cache') -ErrorAction SilentlyContinue
     Assert-Contains "10g: non-JSON persisted file preserves the prior TASK_ID" "TASK_ID=42" $cacheG
-    Assert-Contains "10g: non-JSON persisted file refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headG" $cacheG
+    Assert-Contains "10g: non-JSON persisted file refreshes TASK_BASE_REF to HEAD" "TASK_BASE_REF='$headG'" $cacheG
 
     # 10h: garbage stdout with NO pre-existing cache creates one with only
     # TASK_BASE_REF (no TASK_ identity lines to preserve).
@@ -1477,7 +1477,7 @@ echo "claimed"
     $r = Invoke-HookScript -InputJson $claimH -Phase 'post' -ProjectDir $brH
     Assert-Exit "10h: absent-cache claim exits 0" 0 $r.ExitCode
     $cacheH = Get-Content -Raw -Path (Join-Path $brH '.stride-env-cache') -ErrorAction SilentlyContinue
-    Assert-Contains "10h: absent cache is created with TASK_BASE_REF at HEAD" "TASK_BASE_REF=$headH" $cacheH
+    Assert-Contains "10h: absent cache is created with TASK_BASE_REF at HEAD" "TASK_BASE_REF='$headH'" $cacheH
     Assert-NotContains "10h: no spurious TASK_ID line created" "TASK_ID=" $cacheH
 
     # 10i: a persisted-output path containing spaces is recovered intact.
@@ -1493,7 +1493,7 @@ echo "claimed"
     $r = Invoke-HookScript -InputJson $claimI -Phase 'post' -ProjectDir $brI
     Assert-Exit "10i: spaced-path claim exits 0" 0 $r.ExitCode
     $cacheI = Get-Content -Raw -Path (Join-Path $brI '.stride-env-cache') -ErrorAction SilentlyContinue
-    Assert-Contains "10i: persisted path with spaces is recovered" "TASK_IDENTIFIER=W88" $cacheI
+    Assert-Contains "10i: persisted path with spaces is recovered" "TASK_IDENTIFIER='W88'" $cacheI
 
     # 10j: an id-only persisted payload (no {"data":...} envelope) caches its
     # identity lines instead of throwing under StrictMode and falling through.
@@ -1510,8 +1510,42 @@ echo "claimed"
     $r = Invoke-HookScript -InputJson $claimJ -Phase 'post' -ProjectDir $brJ
     Assert-Exit "10j: id-only persisted payload claim exits 0" 0 $r.ExitCode
     $cacheJ = Get-Content -Raw -Path (Join-Path $brJ '.stride-env-cache') -ErrorAction SilentlyContinue
-    Assert-Contains "10j: id-only persisted payload caches the identifier" "TASK_IDENTIFIER=W99" $cacheJ
-    Assert-Contains "10j: id-only persisted payload sets TASK_BASE_REF to HEAD" "TASK_BASE_REF=$headJ" $cacheJ
+    Assert-Contains "10j: id-only persisted payload caches the identifier" "TASK_IDENTIFIER='W99'" $cacheJ
+    Assert-Contains "10j: id-only persisted payload sets TASK_BASE_REF to HEAD" "TASK_BASE_REF='$headJ'" $cacheJ
+
+    # 10k: a hostile title is data. Every line terminator Get-Content honours
+    # (CR, LF, NEL, LINE SEPARATOR) is flattened, so none can start a forged
+    # KEY=VALUE record the loader would export; the single quote is escaped so
+    # the bash twin can source the same file; the loader unquotes exactly.
+    # The hook.env block forges through the Set-HookEnv writer the same way.
+    $brK = New-GitRepo -Name 'g10-hostile-title'
+    Set-Content -Path (Join-Path $brK '.stride.md') -Value @'
+## before_doing
+```bash
+echo "title=[$TASK_TITLE]"
+echo "forged=${FORGED_CR:-unset},${FORGED_LF:-unset},${FORGED_NEL:-unset},${FORGED_LS:-unset}"
+```
+'@ -Encoding UTF8
+    $hostile = "Evil'" + '$(touch pwned)' + "`rFORGED_CR=1`nFORGED_LF=1" + [char]0x85 + "FORGED_NEL=1" + [char]0x2028 + "FORGED_LS=1"
+    $claimK = @{
+        tool_input = @{ command = 'curl -X POST https://stride.example.com/api/tasks/claim' }
+        tool_response = @{
+            stdout = (@{
+                data = @{ id = 43; identifier = 'W43'; title = $hostile; status = 'in_progress'; complexity = 'small'; priority = 'low' }
+                hook = @{ name = 'before_doing'; env = @{ TASK_DESCRIPTION = "d`rFORGED_ENV=1" } }
+            } | ConvertTo-Json -Compress -Depth 5)
+            stderr = ''; interrupted = $false
+        }
+    } | ConvertTo-Json -Compress -Depth 6
+    $r = Invoke-HookScript -InputJson $claimK -Phase 'post' -ProjectDir $brK
+    Assert-Exit "10k: hostile-title claim exits 0" 0 $r.ExitCode
+    $linesK = @(Get-Content -Path (Join-Path $brK '.stride-env-cache') -Encoding UTF8 -ErrorAction SilentlyContinue)
+    Assert-Eq "10k: no forged record starts a cache line" '0' ([string]@($linesK | Where-Object { $_ -match '^FORGED' }).Count)
+    Assert-Eq "10k: the title is one cache record" '1' ([string]@($linesK | Where-Object { $_ -match '^TASK_TITLE=' }).Count)
+    Assert-Contains "10k: the title is single-quoted with its quote escaped" "TASK_TITLE='Evil'\''" ($linesK -join "`n")
+    Assert-Contains "10k: no forged variable reaches the section" "forged=unset,unset,unset,unset" $r.Stdout
+    Assert-Contains "10k: the loader unquotes the title exactly" ("title=[Evil'" + '$(touch pwned)' + " FORGED_CR=1 FORGED_LF=1 FORGED_NEL=1 FORGED_LS=1]") $r.Stdout
+    Assert-Eq "10k: nothing in the title was executed" 'no' $(if (Test-Path (Join-Path $brK 'pwned')) { 'yes' } else { 'no' })
 }
 
 # ============================================================
@@ -1873,7 +1907,7 @@ git pull -q origin main
         $script:PASS++
     }
     $d142Cache = Get-Content -Raw -Path (Join-Path $cloneA '.stride-env-cache') -ErrorAction SilentlyContinue
-    Assert-Contains "13a: claim records the POST-pull branch point as TASK_BASE_REF" "TASK_BASE_REF=$postPull" $d142Cache
+    Assert-Contains "13a: claim records the POST-pull branch point as TASK_BASE_REF" "TASK_BASE_REF='$postPull'" $d142Cache
     Assert-NotContains "13a: the stale prior-session TASK_BASE_REF was replaced" "1111111111111111111111111111111111111111" $d142Cache
 
     # 13b: committed-range override — a baseline entry whose path the task's
@@ -3516,7 +3550,11 @@ if (Test-Path -LiteralPath $g21Src) {
     Assert-Eq "21i: an empty catalog prints nothing" '' (Invoke-G21Check $old '[]')
     Assert-Eq "21j: a non-version pin is never printed" '' (Invoke-G21Check $old '[{"name":"stride-gemini","version":"1.50.0 and more"}]')
     Assert-Eq "21j: a numeric (non-string) pin prints nothing" '' (Invoke-G21Check $old '[{"name":"stride-gemini","version":1.5}]')
-    Assert-Eq "21j: a pin ending in a newline is not version-shaped" '' (Invoke-G21Check $old '[{"name":"stride-gemini","version":"1.50.0\n"}]')
+    # Trailing newlines are stripped as bash's $(...) strips them (bash 36k).
+    Assert-Eq "21j: a pin ending in a newline still yields one line" $g21Warn10 (Invoke-G21Check $old '[{"name":"stride-gemini","version":"1.50.0\n"}]')
+    Assert-Eq "21j: an installed version ending in a newline still warns" $g21Warn10 (Invoke-G21Check (New-G21Ext 'v-nl' '{"name":"stride-gemini","version":"1.0.0\n"}') (New-G21Catalog '1.50.0'))
+    Assert-Eq "21j: an interior newline is not version-shaped" '' (Invoke-G21Check $old '[{"name":"stride-gemini","version":"1.50\n.0"}]')
+    Assert-Eq "21j: a trailing CR is not version-shaped" '' (Invoke-G21Check $old '[{"name":"stride-gemini","version":"1.50.0\r"}]')
     Assert-Eq "21i: a nested one-element catalog is not walked" '' (Invoke-G21Check $old '[[{"name":"stride-gemini","version":"1.50.0"}]]')
     # PS7 unrolls a one-element array into a bare object; that must still count
     Assert-Eq "21k: a one-element catalog array still warns" $g21Warn10 (Invoke-G21Check $old '[{"name":"stride-gemini","version":"1.50.0"}]')

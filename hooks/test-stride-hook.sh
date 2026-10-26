@@ -700,6 +700,29 @@ STRIDE
   assert_contains "env cache (wrapped): identifier" "id=W217" "$OUTPUT"
   assert_contains "env cache (wrapped): title" "title=Wrapped Task" "$OUTPUT"
   rm -f "$CACHE_PROJ/.stride-env-cache"
+
+  # 6f: a hostile title is data. The cache is dot-sourced, so a raw '...' wrap
+  # let a single quote in the title close the quoting and run the rest as
+  # shell. Every claim-time value now goes through sq_escape.
+  INJ_PROJ="$TMPDIR_TEST/inject-project"
+  mkdir -p "$INJ_PROJ"
+  cat > "$INJ_PROJ/.stride.md" << 'STRIDE'
+## before_doing
+```bash
+echo "title=[$TASK_TITLE]"
+```
+STRIDE
+  INJ_TITLE="x'; touch $INJ_PROJ/pwned; echo '"
+  INJ_CLAIM=$(jq -cn --arg t "$INJ_TITLE" '{tool_input:{command:"curl -X POST https://stridelikeaboss.com/api/tasks/claim"},tool_response:({data:{id:44,identifier:"W44",title:$t,status:"in_progress",complexity:"small",priority:"low"}}|tojson)}')
+  OUTPUT=$(echo "$INJ_CLAIM" | GEMINI_PROJECT_DIR="$INJ_PROJ" bash "$HOOK_SCRIPT" post 2>&1)
+  EXIT_CODE=$?
+  assert_exit "6f: hostile-title claim exits 0" 0 "$EXIT_CODE"
+  assert_eq "6f: nothing in the title was executed" "no" "$([ -e "$INJ_PROJ/pwned" ] && echo yes || echo no)"
+  assert_contains "6f: the section sees the title exactly" "title=[$INJ_TITLE]" "$OUTPUT"
+  INJ_SOURCED=$(. "$INJ_PROJ/.stride-env-cache"; printf '%s' "$TASK_TITLE")
+  assert_eq "6f: sourcing the cache yields the title exactly" "$INJ_TITLE" "$INJ_SOURCED"
+  assert_eq "6f: sourcing the cache by hand runs nothing either" "no" "$([ -e "$INJ_PROJ/pwned" ] && echo yes || echo no)"
+  rm -f "$INJ_PROJ/.stride-env-cache"
 else
   echo "  SKIP: env caching tests (jq not available)"
 fi
@@ -6416,6 +6439,20 @@ if [ -f "$G36_SRC" ] && command -v jq > /dev/null 2>&1; then
   assert_eq "36t: run by a relative path" "$G36_WARN_1_0" "$G36_OUT"
   g36_run "$(g36_ver 1.50.0)" 0 "$G36_DIR/ext/v-1.0.0"
   assert_eq "36t: a path argument is ignored (an up-to-date copy stays quiet)" "" "$G36_OUT"
+
+  # --- newline parity with check-plugin-current.ps1 (its 21j) ---
+  # $(...) strips trailing LFs, and the ps1 strips them the same way; any other
+  # newline, or a CR, fails VERSION_RE on both halves.
+  g36_catalog "1.50.0"
+  g36_run "$(g36_ext v-nl '{"name":"stride-gemini","version":"1.0.0\n"}')"
+  assert_eq "36y: an installed version ending in a newline still warns" "$G36_WARN_1_0" "$G36_OUT"
+  printf '[{"name":"stride-gemini","version":"1.50\\n.0"}]' > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36y: an interior newline is not version-shaped" "" "$G36_OUT"
+  printf '[{"name":"stride-gemini","version":"1.50.0\\r"}]' > "$G36_DIR/body"
+  g36_run "$(g36_ver 1.0.0)"
+  assert_eq "36y: a trailing CR is not version-shaped" "" "$G36_OUT"
+  g36_catalog "1.50.0"
 
   # --- source pins ---
   assert_eq "36u: the script never evals or sources" "0" "$(grep -cE '(^|[^a-z_])(eval|source)[[:space:]]' "$G36_SRC")"

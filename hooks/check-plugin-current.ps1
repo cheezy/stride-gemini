@@ -52,7 +52,9 @@ Set-StrictMode -Version Latest
 
 $script:StrideGeminiPinUrl = 'https://raw.githubusercontent.com/cheezy/stride-gemini-marketplace/main/extensions.json'
 $script:StrideGeminiUpdateCmd = 'gemini extensions update stride-gemini'
-# \z, not $: in .NET a $ anchor also matches before a trailing newline.
+# \z, not $: in .NET a $ anchor also matches before a trailing newline. The
+# trailing newlines themselves are stripped first by ConvertTo-StrideBashValue,
+# so \z only has to refuse a newline anywhere else.
 $script:StrideGeminiVersionRe = '^[0-9]+(\.[0-9]+)*(-[0-9A-Za-z.-]+)?\z'
 $script:StrideGeminiExtensionRoot = ''
 if (-not [string]::IsNullOrEmpty($PSScriptRoot)) {
@@ -74,6 +76,14 @@ function Test-StrideVersionShape {
     return ($Version -cmatch $script:StrideGeminiVersionRe)
 }
 
+# Strip every trailing LF, exactly what bash's $(...) does to the same value,
+# so both halves read "1.51.0\n" as 1.51.0 (bash Test Group 36k, here 21j).
+# Only LF: $(...) leaves a CR, and so does this, for VERSION_RE to refuse.
+function ConvertTo-StrideBashValue {
+    param([string]$Value)
+    return $Value.TrimEnd([char]10)
+}
+
 # Return the "version" string of <Root>\gemini-extension.json, or ''.
 function Get-StrideInstalledVersion {
     param([string]$Root)
@@ -84,7 +94,7 @@ function Get-StrideInstalledVersion {
         $parsed = ConvertFrom-StrideJson (Get-Content -LiteralPath $manifest -Raw -ErrorAction Stop)
         if ($parsed -isnot [System.Management.Automation.PSCustomObject]) { return '' }
         if ($parsed.PSObject.Properties.Match('version').Count -gt 0 -and $parsed.version -is [string]) {
-            return $parsed.version
+            return (ConvertTo-StrideBashValue $parsed.version)
         }
     } catch {
         return ''
@@ -138,7 +148,7 @@ function Get-StridePublishedVersion {
             if ($entry.PSObject.Properties.Match('name').Count -eq 0) { continue }
             if ($entry.name -isnot [string] -or $entry.name -cne 'stride-gemini') { continue }
             if ($entry.PSObject.Properties.Match('version').Count -gt 0 -and $entry.version -is [string]) {
-                return $entry.version
+                return (ConvertTo-StrideBashValue $entry.version)
             }
             return ''
         }

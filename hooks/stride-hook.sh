@@ -2085,14 +2085,17 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     # Identity lines ONLY — no TASK_BASE_REF / TASK_BASE_REF_TRUSTED
     # (finalize_before_doing writes those post-section); overwriting the whole
     # cache here also strips any inherited base/trust marker.
-    # Values are single-quoted to handle spaces in titles/descriptions.
+    # Every value goes through sq_escape: this file is dot-sourced below, and
+    # the title is task-author text. Wrapping a raw value in '...' let a title
+    # carrying a single quote close the quoting and run the rest of itself as
+    # shell when the cache was sourced. Port of stride's claim-time writer.
     {
-      echo "TASK_ID='$(echo "$TASK_JSON" | jq -r '.id // empty')'"
-      echo "TASK_IDENTIFIER='$(echo "$TASK_JSON" | jq -r '.identifier // empty')'"
-      echo "TASK_TITLE='$(echo "$TASK_JSON" | jq -r '.title // empty')'"
-      echo "TASK_STATUS='$(echo "$TASK_JSON" | jq -r '.status // empty')'"
-      echo "TASK_COMPLEXITY='$(echo "$TASK_JSON" | jq -r '.complexity // empty')'"
-      echo "TASK_PRIORITY='$(echo "$TASK_JSON" | jq -r '.priority // empty')'"
+      echo "TASK_ID=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.id // empty')")"
+      echo "TASK_IDENTIFIER=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.identifier // empty')")"
+      echo "TASK_TITLE=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.title // empty')")"
+      echo "TASK_STATUS=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.status // empty')")"
+      echo "TASK_COMPLEXITY=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.complexity // empty')")"
+      echo "TASK_PRIORITY=$(sq_escape "$(echo "$TASK_JSON" | jq -r '.priority // empty')")"
     } > "$ENV_CACHE" 2>/dev/null || true
   elif [ -f "$ENV_CACHE" ]; then
     # (W1086/D142) No parseable response and no usable persisted file: keep the

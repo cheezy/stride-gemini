@@ -470,6 +470,43 @@ function Get-TopLevelMemberJson {
     return $null
 }
 
+# Env-cache value encoding. The bash half dot-sources .stride-env-cache, and
+# the claim's title is task-author text, so every value this side writes is
+# single-quoted with embedded quotes as '\'' (the bash twin's sq_escape) and
+# flattened to one line first. Flattening is the defence for THIS side's
+# loader: it splits the file with Get-Content, which treats CR, LF, NEL, LINE
+# SEPARATOR and PARAGRAPH SEPARATOR as line ends, so a title carrying any of
+# them would otherwise become extra KEY=VALUE records (PATH, BASH_ENV, ...)
+# that the loader exports. Port of stride's D280 helpers.
+#
+# .Replace(), not -replace: -replace's replacement string treats $ specially.
+function ConvertTo-ShSingleQuoted {
+    param([string]$Value)
+    return "'" + $Value.Replace("'", "'\''") + "'"
+}
+
+function ConvertTo-FlatEnvValue {
+    param([string]$Value)
+    return ($Value -replace '[\r\n\u0085\u2028\u2029]', ' ')
+}
+
+# The quoted, flattened right-hand side of one cache record.
+function ConvertTo-EnvCacheValue {
+    param($Value)
+    return (ConvertTo-ShSingleQuoted -Value (ConvertTo-FlatEnvValue -Value ([string]$Value)))
+}
+
+# The exact inverse of ConvertTo-ShSingleQuoted, for the bulk loader. Not a
+# .Trim("'"), which would leave an interior '\'' intact and eat a value's own
+# trailing quote. A value without surrounding quotes is returned verbatim, so a
+# cache written by an earlier release (bare values) still loads.
+function ConvertFrom-ShSingleQuoted {
+    param([string]$Value)
+    if ($Value.Length -lt 2) { return $Value }
+    if ($Value[0] -ne "'" -or $Value[$Value.Length - 1] -ne "'") { return $Value }
+    return $Value.Substring(1, $Value.Length - 2).Replace("'\''", "'")
+}
+
 # File-name stem: the identifier when it is 1-64 characters of [A-Za-z0-9_-]
 # (-cmatch with \A...\z: a whole-string, case-sensitive test), else the
 # non-negative integer id, else '' (write nothing).
@@ -750,13 +787,14 @@ if ($HookName -eq 'before_doing') {
 
                 # Identity lines ONLY — overwriting the whole cache here also
                 # strips any inherited TASK_BASE_REF / TASK_BASE_REF_TRUSTED.
+                # Quoted and flattened: see ConvertTo-EnvCacheValue.
                 $cacheLines = @(
-                    "TASK_ID=$($taskJson.id)"
-                    "TASK_IDENTIFIER=$($taskJson.identifier)"
-                    "TASK_TITLE=$($taskJson.title)"
-                    "TASK_STATUS=$($taskJson.status)"
-                    "TASK_COMPLEXITY=$($taskJson.complexity)"
-                    "TASK_PRIORITY=$($taskJson.priority)"
+                    "TASK_ID=" + (ConvertTo-EnvCacheValue $taskJson.id)
+                    "TASK_IDENTIFIER=" + (ConvertTo-EnvCacheValue $taskJson.identifier)
+                    "TASK_TITLE=" + (ConvertTo-EnvCacheValue $taskJson.title)
+                    "TASK_STATUS=" + (ConvertTo-EnvCacheValue $taskJson.status)
+                    "TASK_COMPLEXITY=" + (ConvertTo-EnvCacheValue $taskJson.complexity)
+                    "TASK_PRIORITY=" + (ConvertTo-EnvCacheValue $taskJson.priority)
                 )
                 $cacheLines | Set-Content -Path $EnvCache -Encoding UTF8
             } elseif (Test-Path $EnvCache) {
@@ -817,7 +855,7 @@ if (Test-Path $EnvCache) {
     Get-Content $EnvCache -Encoding UTF8 | ForEach-Object {
         $line = $_.Trim()
         if ($line -and $line -match '^([^=]+)=(.*)$') {
-            [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
+            [System.Environment]::SetEnvironmentVariable($Matches[1], (ConvertFrom-ShSingleQuoted -Value $Matches[2]), 'Process')
         }
     }
 }
@@ -1062,7 +1100,7 @@ function Invoke-FinalizeBeforeDoing {
         if (Test-Path $EnvCache) {
             $preserved = @(Get-Content $EnvCache -Encoding UTF8 | Where-Object { $_ -notmatch '^TASK_BASE_REF=' -and $_ -notmatch '^TASK_BASE_REF_TRUSTED=' })
         }
-        $newLines = $preserved + "TASK_BASE_REF=$baseRef" + "TASK_BASE_REF_TRUSTED=1"
+        $newLines = $preserved + ("TASK_BASE_REF=" + (ConvertTo-EnvCacheValue $baseRef)) + "TASK_BASE_REF_TRUSTED='1'"
         $newLines | Set-Content -Path $EnvCache -Encoding UTF8
         [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF', $baseRef, 'Process')
         [System.Environment]::SetEnvironmentVariable('TASK_BASE_REF_TRUSTED', '1', 'Process')
@@ -1849,7 +1887,8 @@ function Get-HookEnvFromPayload {
 # Export a map into the Process environment (inherited by the bash -c children
 # that run sections) and append it to the env cache, best-effort, so the
 # values survive for follow-up agent commands. The cache loader is line-based,
-# so embedded newlines are collapsed to spaces in the cached copy — the
+# so every line terminator (not only CR LF) is collapsed to a space and the
+# value single-quoted in the cached copy — see ConvertTo-EnvCacheValue. The
 # process env keeps the exact value. SetEnvironmentVariable involves no shell
 # parsing, so crafted values have no injection surface. Never echoes values to
 # stdout/stderr.
@@ -1871,7 +1910,7 @@ function Set-HookEnv {
         } else {
             $script:StrideEmptyEnvKeys = @($script:StrideEmptyEnvKeys | Where-Object { $_ -ne $key })
         }
-        $cacheLines += "$key=" + ($value -replace "`r?`n", ' ')
+        $cacheLines += "$key=" + (ConvertTo-EnvCacheValue $value)
     }
     try {
         Add-Content -Path $EnvCache -Value $cacheLines -Encoding UTF8
