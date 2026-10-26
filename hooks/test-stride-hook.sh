@@ -6946,10 +6946,14 @@ G40_ROOT="$SCRIPT_DIR/.."
 # Bytes when this task started (c244c3e). The skill is also held under its size
 # when the task was filed (a19029f). The reviewer is not: W2464 added about
 # 1.1 KB to it after the task was filed, more than its rationale ran to, so the
-# criterion it can honestly meet is the start-of-task size.
+# criterion it can honestly meet is that W2470's own commit shrank it. That is
+# read from history rather than held as a live ceiling: later reviewer ports
+# (the G455 rework-gate steps) add rules to the file, and a frozen size would
+# make each of them trim unrelated prose to fit.
 G40_CT_START=87932
 G40_CT_FILED=87216
 G40_REV_START=50330
+G40_REV_COMMIT=220262e
 
 if [ ! -f "$G40_CT" ] || [ ! -f "$G40_REV" ]; then
   echo "  SKIP: Test Group 40 (contract files not found relative to the hooks directory)"
@@ -7047,13 +7051,19 @@ EOF
 
   # --- matrix row 1: both files shrank ---
   G40_CT_SIZE="$(wc -c < "$G40_CT" | tr -d ' ')"
-  G40_REV_SIZE="$(wc -c < "$G40_REV" | tr -d ' ')"
   assert_eq "40c: the skill is smaller than at the start of this task ($G40_CT_START B)" "yes" \
     "$([ "$G40_CT_SIZE" -lt "$G40_CT_START" ] && echo yes || echo no)"
   assert_eq "40c: the skill is smaller than when the task was filed ($G40_CT_FILED B)" "yes" \
     "$([ "$G40_CT_SIZE" -lt "$G40_CT_FILED" ] && echo yes || echo no)"
-  assert_eq "40c: the reviewer is smaller than at the start of this task ($G40_REV_START B)" "yes" \
-    "$([ "$G40_REV_SIZE" -lt "$G40_REV_START" ] && echo yes || echo no)"
+  if command -v git >/dev/null 2>&1 && git -C "$G40_ROOT" cat-file -e "$G40_REV_COMMIT^:agents/task-reviewer.md" 2>/dev/null; then
+    G40_REV_AT="$(git -C "$G40_ROOT" show "$G40_REV_COMMIT:agents/task-reviewer.md" | wc -c | tr -d ' ')"
+    G40_REV_BEFORE="$(git -C "$G40_ROOT" show "$G40_REV_COMMIT^:agents/task-reviewer.md" | wc -c | tr -d ' ')"
+    assert_eq "40c: the parent of $G40_REV_COMMIT held the start-of-task reviewer ($G40_REV_START B)" "$G40_REV_START" "$G40_REV_BEFORE"
+    assert_eq "40c: $G40_REV_COMMIT made the reviewer smaller" "yes" \
+      "$([ "$G40_REV_AT" -lt "$G40_REV_BEFORE" ] && echo yes || echo no)"
+  else
+    echo "  SKIP: 40c reviewer shrink (git history for $G40_REV_COMMIT not available)"
+  fi
 
   # --- the docs: no rule, no anchor, no fence, and neither is an agent or skill ---
   for G40_PAIR in "completion-rationale|skills/stride-completing-tasks/SKILL.md" "task-reviewer-rationale|agents/task-reviewer.md"; do
@@ -7487,8 +7497,8 @@ fi
 # whether the diff carried "appropriate tests"; it now maps each unit_tests,
 # integration_tests and edge_cases entry to the test that exercises it. 44 was
 # the number the goal planned for this task, and it was still free. The
-# step-4 voicing is terse because Group 40c holds the reviewer under its
-# pre-W2470 size.
+# step-4 voicing is terse because Group 40c held the reviewer under its
+# pre-W2470 size when this was written.
 #
 # This port's reviewer returns one inline response (summary line, prose, then
 # the fenced block) rather than separate report and block files, so the carrier
