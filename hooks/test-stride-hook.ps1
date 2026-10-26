@@ -3090,6 +3090,58 @@ $g15Perm3 = (Invoke-G15Gate -ProjectDir $d3).Stdout
 Assert-Eq "15av: three different permit paths each write zero bytes, untrimmed" "" `
     ($g15Perm1 + $g15Perm2 + $g15Perm3)
 
+# 15aw (W2468): the queue question asks for the slim view. The shared listener
+# records nothing, so this one writes the request's RawUrl to a file before it
+# answers; .Url.AbsolutePath would drop the query string this case is about.
+$port = New-G15Port; $d = New-G15Proj -Port $port
+Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
+$g15UrlFile = Join-Path $d 'request-url.txt'
+$job = Start-Job -ArgumentList $port, $G15Ok, $g15UrlFile -ScriptBlock {
+    param($Port, $Body, $UrlFile)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start()
+        $ctx = $l.GetContext()
+        [System.IO.File]::WriteAllText($UrlFile, $ctx.Request.RawUrl)
+        $ctx.Response.StatusCode = 200
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+        $ctx.Response.ContentType = 'application/json'
+        $ctx.Response.ContentLength64 = $bytes.Length
+        $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+        $ctx.Response.Close()
+    } catch {
+    } finally {
+        if ($l.IsListening) { $l.Stop() }
+    }
+}
+$null = Wait-ForListener -Port $port
+$r = Invoke-G15Gate -ProjectDir $d
+Stop-G15Listener $job
+$g15Url = if (Test-Path -LiteralPath $g15UrlFile) { [System.IO.File]::ReadAllText($g15UrlFile) } else { '' }
+Assert-Eq "15aw: the non-held request is the slim next call" '/api/tasks/next?response_view=slim' $g15Url
+Assert-Contains "15aw: and the gate still denies" '"deny"' $r.Stdout
+Assert-Contains "15aw: naming the identifier" 'W2145' $r.Stdout
+
+# 15aw2 (W2468): the 11-key slim summary decides exactly as the minimal body
+# does, because this half too reads only the status code and the identifier.
+$g15Slim = '{"data":{"id":1,"identifier":"W2145","title":"t","type":"work","status":"open","priority":"high","complexity":"small","dependencies":[],"created_by_agent":null,"parent_id":null,"claim_expires_at":null}}'
+$port = New-G15Port; $d = New-G15Proj -Port $port
+Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false
+$job = Start-G15Listener -Port $port -Code 200 -Body $g15Slim
+$r = Invoke-G15Gate -ProjectDir $d
+Stop-G15Listener $job
+Assert-Contains "15aw2: a slim body denies" '"deny"' $r.Stdout
+Assert-Contains "15aw2: on its identifier" 'W2145' $r.Stdout
+
+# 15aw3 (W2468): in source, the queue URL is slim and the held line is untouched.
+$g15SlimSrc = Get-Content -Raw -LiteralPath $G15Gate
+Assert-Contains "15aw3: the queue URL literal is slim" '"$apiBase/api/tasks/next?response_view=slim"' $g15SlimSrc
+$g15HeldLine = (Get-Content -LiteralPath $G15Gate | Where-Object { $_ -match 'HeldIdent" \+' } | Select-Object -First 1)
+if ($null -eq $g15HeldLine) { $g15HeldLine = '' }
+Assert-Contains "15aw3: the held request keeps its projection" '?fields=status,claim_expires_at,completed_by_id' $g15HeldLine
+Assert-NotContains "15aw3: without the slim view" 'response_view' $g15HeldLine
+
 # 15q extension: bash 19q runs two malformed override values; this half ran one.
 $port = New-G15Port; $d = New-G15Proj -Port $port
 Set-G15State -Dir $d -Ident 'W2144' -NeedsReview $false

@@ -10,8 +10,10 @@ Before ANY Stride API call, activate the corresponding skill. These skills conta
 | `PATCH /api/tasks/:id/complete` | `stride-completing-tasks` |
 | `POST /api/tasks` (work/defect) | `stride-creating-tasks` |
 | `POST /api/tasks` (goal) or `POST /api/tasks/batch` | `stride-creating-goals` |
-| Task has empty key_files/testing_strategy/verification_steps | `stride-enriching-tasks` |
+| Claimed task (claim response) has empty key_files/testing_strategy/verification_steps | `stride-enriching-tasks` |
 | After claiming, before implementation | `stride-subagent-workflow` |
+
+Discovery is `GET /api/tasks/next?response_view=slim`: a short summary that names the next task, which an older server answers with the whole task instead. The body you work from comes with the claim, so the sparse-field check reads what the claim sent back, never what discovery returned.
 
 ## Custom Agents
 
@@ -19,7 +21,7 @@ Five custom agents are available for task lifecycle support. Use them per the de
 
 - **task-explorer** — Explore key_files and patterns before coding (medium+ complexity or 2+ key_files)
 - **task-reviewer** — Review changes against acceptance criteria before completion (medium+ complexity or 2+ key_files). Emits a structured `reviewer_result` block (`schema_version` 1.7: `status`, `issue_counts`, `issues[]`, `acceptance_criteria[]`, `project_checks[]` from a project-root `CODE-REVIEW.md` with per-entry `status` enum `met`/`not_met`/`not_applicable` and full-checklist emission, and per-section `testing_strategy`/`patterns`/`pitfalls`/`security_considerations` verdicts, plus an OPTIONAL `behaviour_test_matrix` verdict with a per-row breakdown, emitted only when the task supplies a matrix). Persist it verbatim per `stride-workflow` Step 5; schema owned by `agents/task-reviewer.md`.
-- **task-enricher** — Populate sparse tasks (empty key_files/testing_strategy/verification_steps) before claiming
+- **task-enricher** — Populate sparse tasks (empty key_files/testing_strategy/verification_steps) right after the claim, before implementation starts
 - **task-decomposer** — Break goals into dependency-ordered child tasks
 - **hook-diagnostician** — Diagnose hook failures (structured JSON from stride-hook.sh or raw text) with prioritized fix plans
 

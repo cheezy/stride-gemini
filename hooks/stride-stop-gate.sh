@@ -424,7 +424,10 @@ esac
 if [ "$GATE_MODE" = "held" ]; then
   _req_url="$_api_base/api/tasks/$HELD_IDENT?fields=status,claim_expires_at,completed_by_id"
 else
-  _req_url="$_api_base/api/tasks/next"
+  # The slim view answers with an 11-key summary rather than the task body, and
+  # an older server that does not know the parameter sends the body instead.
+  # Either suits this gate, which reads only the status code and the identifier.
+  _req_url="$_api_base/api/tasks/next?response_view=slim"
 fi
 
 # -s and 2>/dev/null together: no progress meter, and no curl error line

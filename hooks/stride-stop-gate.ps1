@@ -386,7 +386,9 @@ try {
     $reqUri = if ($GateMode -eq 'held') {
         "$apiBase/api/tasks/$HeldIdent" + '?fields=status,claim_expires_at,completed_by_id'
     } else {
-        "$apiBase/api/tasks/next"
+        # Slim summary, or the whole task from a server too old to know the
+        # parameter; only the status code and the identifier are read either way.
+        "$apiBase/api/tasks/next?response_view=slim"
     }
     $resp = Invoke-WebRequest -Uri $reqUri `
         -Headers @{ Authorization = "Bearer $apiToken" } `

@@ -3554,6 +3554,31 @@ G19STUB
   assert_eq "19a: the decision is deny" "deny" "$(printf '%s' "$G19_OUT" | jq -r '.decision' 2>/dev/null)"
   assert_eq "19a: exactly one /api/tasks/next call was made" "1" \
     "$(grep -c 'api/tasks/next' "$S/curl.log" 2>/dev/null || true)"
+  # W2468: the queue question asks for the slim view. The URL is the stub's last
+  # argument, so the anchor pins the whole tail; a bare /api/tasks/next fails it.
+  assert_eq "19a: the non-held request URL ends in the slim next call" "1" \
+    "$(grep -c '/api/tasks/next?response_view=slim$' "$S/curl.log" 2>/dev/null || true)"
+
+  # 19a3 (W2468): whatever shape the server answers with, only the status code and
+  # .data.identifier decide. A current server sends the 11-key summary, an older
+  # one the full task, and the minimal fixture above carries just the identifier;
+  # all three must deny on the same identifier, from one request.
+  G19_SLIM='{"data":{"id":1,"identifier":"W2145","title":"t","type":"work","status":"open","priority":"high","complexity":"small","dependencies":[],"created_by_agent":null,"parent_id":null,"claim_expires_at":null}}'
+  G19_FULL='{"data":{"id":1,"identifier":"W2145","title":"t","type":"work","description":"d","key_files":[],"testing_strategy":{},"acceptance_criteria":"a","complexity":"small"}}'
+  for G19_SHAPE in slim full minimal; do
+    case "$G19_SHAPE" in
+      (slim) G19_BODY="$G19_SLIM" ;;
+      (full) G19_BODY="$G19_FULL" ;;
+      (*)    G19_BODY='{"data":{"identifier":"W2145"}}' ;;
+    esac
+    D=$(g19_proj); S="$D/stub"; g19_stub "$S" "$G19_BODY" 200; g19_state "$D" "W2144" false
+    g19_run "$D" "$S"
+    assert_eq "19a3: a $G19_SHAPE body still denies" "deny" "$(printf '%s' "$G19_OUT" | jq -r '.decision' 2>/dev/null)"
+    assert_eq "19a3: a $G19_SHAPE body names the identifier" "yes" \
+      "$(printf '%s' "$G19_OUT" | jq -r '.reason' 2>/dev/null | grep -qF 'W2145' && echo yes || echo no)"
+    assert_eq "19a3: a $G19_SHAPE body costs one request" "1" \
+      "$(grep -c '^ARGS:' "$S/curl.log" 2>/dev/null || echo 0)"
+  done
 
   # 19a2: the value is deny and NOT block — the wrong token means no block at all
   assert_eq "19a2: the decision is not the Codex/Copilot spelling" "false" \
@@ -5649,6 +5674,9 @@ else
     "$(grep -c '^ARGS:' "$S/curl.log" 2>/dev/null || echo 0)"
   assert_eq "24a: and asks about the held task, not the queue" "yes" \
     "$(grep -qF 'api/tasks/W2183?fields=' "$S/curl.log" && echo yes || echo no)"
+  # W2468 slimmed only the queue call; the held request keeps its projection.
+  assert_eq "24a: the held request carries no response_view" "0" \
+    "$(grep -c 'response_view' "$S/curl.log" 2>/dev/null || true)"
   assert_eq "24a: the budget is namespaced held:<IDENT>" "held:W2183" \
     "$(cut -d' ' -f1 "$D/.stride/.stop-gate-blocks" 2>/dev/null)"
   # It must not tell a session still holding a task to go claim another, and must
@@ -6180,6 +6208,159 @@ else
   assert_eq "35p: no PLAN_REPORT_PATH in the workflow skill" "0" "$(grep -c 'PLAN_REPORT_PATH' "$G35_WF" || true)"
   assert_eq "35p: no PLAN_REPORT_PATH in the subagent-workflow skill" "0" "$(grep -c 'PLAN_REPORT_PATH' "$G35_SAW" || true)"
   assert_eq "35p: the inline planning item names no TASK_FILE" "missing" "$(g35_in 'TASK_FILE' "$G35_ITEM2")"
+fi
+
+# ============================================================
+# Test Group 38: slim discovery, enrichment after the claim (W2468)
+# ============================================================
+# Ports stride W2256. Contract text only, so this half carries it alone, as
+# Groups 20-22 and 35 do; the gate's URL itself is driven live in Group 19 (19a,
+# 19a3) and Group 24 (24a), and pinned in source here for both halves. 38 was the
+# number the goal reserved for this task, and it was still free.
+echo ""
+echo "=== Test Group 38: slim discovery, enrichment after the claim (W2468) ==="
+
+G38_WF="$SCRIPT_DIR/../skills/stride-workflow/SKILL.md"
+G38_CLM="$SCRIPT_DIR/../skills/stride-claiming-tasks/SKILL.md"
+G38_SAW="$SCRIPT_DIR/../skills/stride-subagent-workflow/SKILL.md"
+G38_ENR="$SCRIPT_DIR/../skills/stride-enriching-tasks/SKILL.md"
+G38_GEM="$SCRIPT_DIR/../GEMINI.md"
+G38_SH="$SCRIPT_DIR/stride-stop-gate.sh"
+G38_PS="$SCRIPT_DIR/stride-stop-gate.ps1"
+
+if [ ! -f "$G38_WF" ] || [ ! -f "$G38_CLM" ] || [ ! -f "$G38_SAW" ] || [ ! -f "$G38_ENR" ] \
+   || [ ! -f "$G38_GEM" ] || [ ! -f "$G38_SH" ] || [ ! -f "$G38_PS" ]; then
+  echo "  SKIP: Test Group 38 (contract files not found relative to the hooks directory)"
+else
+  # Group 35's two helpers, same guards: no pipe over a whole file, and an empty
+  # needle reports itself rather than matching everything.
+  g38_has() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    if grep -qF -- "$1" "$2"; then echo "found"; else echo "missing"; fi
+  }
+  g38_in() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    case "$2" in (*"$1"*) echo "found" ;; (*) echo "missing" ;; esac
+  }
+  # How many lines of a slice name the discovery call WITHOUT the slim view.
+  g38_bare() {
+    if [ -z "$1" ]; then echo "empty-slice"; return; fi
+    printf '%s\n' "$1" | grep -F '/api/tasks/next' | grep -cvF 'response_view=slim' || true
+  }
+  # Whether the second needle's first line falls after the first needle's.
+  g38_order() {
+    if [ -z "$2" ] || [ -z "$3" ]; then echo "empty-needle"; return; fi
+    local a b
+    a=$(printf '%s\n' "$1" | grep -nF -m1 -- "$2" | cut -d: -f1)
+    b=$(printf '%s\n' "$1" | grep -nF -m1 -- "$3" | cut -d: -f1)
+    if [ -z "$a" ] || [ -z "$b" ]; then echo "absent"
+    elif [ "$b" -gt "$a" ]; then echo "after"
+    else echo "before"; fi
+  }
+
+  G38_S1="$(awk '/^## Step 1: Task Discovery/{f=1} /^## Step 2:/{f=0} f' "$G38_WF")"
+  G38_S2="$(awk '/^## Step 2: Claim the Task/{f=1} /^## Step 3:/{f=0} f' "$G38_WF")"
+  G38_ENRL="$(printf '%s\n' "$G38_S2" | grep -F '**Enrichment check' | head -1)"
+  G38_FLOW="$(awk '/^## Complete Workflow Flowchart/{f=1} /^STEP 3: Explore/{f=0} f' "$G38_WF")"
+  G38_QRC="$(awk '/^## Quick Reference Card/{f=1} f' "$G38_WF")"
+  G38_QRC1="$(printf '%s\n' "$G38_QRC" | grep -F '├─ 1. Discovery:' | head -1)"
+  G38_QRC2="$(printf '%s\n' "$G38_QRC" | grep -F '├─ 2. Claim:' | head -1)"
+  G38_CW="$(awk '/^### With Extension Installed/{f=1} /^### Without Extension/{f=0} f' "$G38_CLM")"
+  G38_CWO="$(awk '/^### Without Extension \(Manual Hooks\)/{n++; if(n==1)f=1} /^## Claiming Workflow Flowchart/{f=0} f' "$G38_CLM")"
+  G38_CF="$(awk '/^## Claiming Workflow Flowchart/{f=1} /^## Enrichment Check/{f=0} f' "$G38_CLM")"
+  G38_CFW="$(printf '%s\n' "$G38_CF" | awk '/^### With Extension/{f=1} /^### Without Extension/{f=0} f')"
+  G38_CFWO="$(printf '%s\n' "$G38_CF" | awk '/^### Without Extension/{f=1} f')"
+  G38_CENR="$(awk '/^## Enrichment Check/{f=1} /^## Hook Execution Pattern/{f=0} f' "$G38_CLM")"
+  G38_CIMPL="$(awk '/^## Implementation Workflow/{f=1} /^## Quick Reference Card/{f=0} f' "$G38_CLM")"
+  G38_CQRC="$(awk '/^## Quick Reference Card/{f=1} /^API ENDPOINT:/{f=0} f' "$G38_CLM")"
+  G38_SLIM='GET /api/tasks/next?response_view=slim'
+
+  # 38a: every slice was found, so no assertion below can pass on an empty string
+  for G38_NAME in S1 S2 ENRL FLOW QRC1 QRC2 CW CWO CFW CFWO CENR CIMPL CQRC; do
+    eval "G38_V=\$G38_$G38_NAME"
+    assert_eq "38a: slice $G38_NAME is non-empty" "yes" "$([ -n "$G38_V" ] && echo yes || echo no)"
+  done
+
+  # --- UT1 / matrix row 0: Step 1 names the slim call ---
+  assert_eq "38b: Step 1 calls the slim view" "found" "$(g38_in "Call \`$G38_SLIM\`" "$G38_S1")"
+  assert_eq "38c: Step 1 says an older server returns the full task" "found" \
+    "$(g38_in 'A server too old to recognise the parameter ignores it and sends the whole task' "$G38_S1")"
+  assert_eq "38d: Step 1 says the body comes from the claim" "found" \
+    "$(g38_in 'the full body the Step 2 claim response returns' "$G38_S1")"
+  assert_eq "38e: Step 1 names no bare discovery call" "0" "$(g38_bare "$G38_S1")"
+  assert_eq "38f: no dispatcher size gate was ported" "missing" "$(g38_in 'size gate' "$G38_S1")"
+
+  # --- UT2 / matrix row 3: the enrichment check reads the claim body ---
+  assert_eq "38g: the pre-claim wording is gone" "missing" "$(g38_has 'needs enrichment before claiming' "$G38_WF")"
+  assert_eq "38h: exactly one enrichment check in the workflow" "1" \
+    "$(grep -cF '**Enrichment check' "$G38_WF" || true)"
+  assert_eq "38h: and it is not in Step 1" "missing" "$(g38_in '**Enrichment check' "$G38_S1")"
+  assert_eq "38i: the check comes after the claim call" "after" \
+    "$(g38_order "$G38_S2" 'Call `POST /api/tasks/claim`' '**Enrichment check')"
+  assert_eq "38j: the check names the claim response's body" "found" "$(g38_in "on the claim response's body" "$G38_ENRL")"
+  assert_eq "38j: and refuses the discovery summary" "found" "$(g38_in 'never on the discovery summary' "$G38_ENRL")"
+  assert_eq "38k: it says why the summary cannot be checked" "found" \
+    "$(g38_in 'The slim summary leaves every one of those fields out' "$G38_S2")"
+  assert_eq "38l: the field list moved to Step 2" "found" "$(g38_in '`acceptance_criteria` -- your definition of done' "$G38_S2")"
+  assert_eq "38l: and left Step 1" "missing" "$(g38_in '`acceptance_criteria` --' "$G38_S1")"
+  assert_eq "38m: the re-fetch follows a PATCH only" "found" "$(g38_in 'After that PATCH succeeds' "$G38_S2")"
+  assert_eq "38m: and hands on to Step 3" "found" "$(g38_in 'before proceeding to Step 3' "$G38_S2")"
+  assert_eq "38m: the old hand-on to Step 2 is gone" "missing" "$(g38_has 'before proceeding to Step 2' "$G38_WF")"
+  assert_eq "38n: the stale task file is removed after enrichment" "found" \
+    "$(g38_in 'rm -f "$PROJECT_DIR/.stride/.task-$IDENTIFIER.json"' "$G38_S2")"
+  assert_eq "38n: Step 7 names that one exception" "found" "$(g38_has 'except in the one case Step 2 names' "$G38_WF")"
+  # security_considerations: the enricher's JSON stays data, PATCHed, never run
+  assert_eq "38o: the enricher JSON is still submitted by PATCH" "found" \
+    "$(g38_in 'Submit the returned JSON via `PATCH /api/tasks/:id`' "$G38_S2")"
+  assert_eq "38o: and the agent still makes no API call" "found" "$(g38_in 'The agent does NOT call the API itself' "$G38_S2")"
+  assert_eq "38o: and it is data, never commands" "found" "$(g38_in 'never commands you run' "$G38_S2")"
+  assert_eq "38p: the manual path fetches the body before its hook" "found" \
+    "$(g38_in '**Manual setup (no extension):**' "$G38_S1")"
+  assert_eq "38p: by GET /api/tasks/:id" "found" "$(g38_in 'fetch it with `GET /api/tasks/:id`' "$G38_S1")"
+  assert_eq "38p: the claiming skill's manual list agrees" "found" "$(g38_in 'then `GET /api/tasks/:id` for the body' "$G38_CWO")"
+  # No sibling skill still places enrichment ahead of the claim.
+  assert_eq "38q: subagent-workflow no longer says before claiming" "missing" "$(g38_has 'before claiming' "$G38_SAW")"
+  assert_eq "38q: nor BEFORE claiming" "missing" "$(g38_has 'BEFORE claiming' "$G38_SAW")"
+  assert_eq "38q: nor proceeds to claim after enriching" "missing" "$(g38_has 'Proceed to claim the task as normal' "$G38_SAW")"
+  assert_eq "38q: its section is the post-claim one" "found" "$(g38_has '## Post-Claim: Enrichment (Sparse Tasks)' "$G38_SAW")"
+  assert_eq "38q: enriching-tasks no longer runs before the claim" "missing" "$(g38_has 'Enrichment runs **before the claim**' "$G38_ENR")"
+  assert_eq "38q: GEMINI.md no longer says before claiming" "missing" "$(g38_has 'before claiming' "$G38_GEM")"
+  assert_eq "38q: claiming-tasks drops the before-the-hook rule" "missing" \
+    "$(g38_has 'Enrichment happens BEFORE the before_doing hook' "$G38_CLM")"
+
+  # --- UT3 / matrix row 5: every mirror agrees ---
+  assert_eq "38r: the flowchart names the slim call" "found" "$(g38_in '/api/tasks/next?response_view=slim' "$G38_FLOW")"
+  assert_eq "38r: and no bare one" "0" "$(g38_bare "$G38_FLOW")"
+  assert_eq "38r: enrichment sits under STEP 2" "after" "$(g38_order "$G38_FLOW" 'STEP 2: Claim' 'Needs enrichment?')"
+  assert_eq "38s: the card's discovery line is slim" "found" "$(g38_in '/api/tasks/next?response_view=slim' "$G38_QRC1")"
+  assert_eq "38s: and does not enrich" "missing" "$(g38_in 'enrich' "$G38_QRC1")"
+  assert_eq "38s: the card's claim line enriches" "found" "$(g38_in 'enrich if needed' "$G38_QRC2")"
+  for G38_NAME in CW CWO CFW CFWO CIMPL CQRC; do
+    eval "G38_V=\$G38_$G38_NAME"
+    assert_eq "38t: claiming-tasks $G38_NAME names the slim call" "found" "$(g38_in '/api/tasks/next?response_view=slim' "$G38_V")"
+    assert_eq "38t: claiming-tasks $G38_NAME names no bare one" "0" "$(g38_bare "$G38_V")"
+  done
+  assert_eq "38u: the extension list claims before checking completeness" "after" \
+    "$(g38_order "$G38_CW" 'Call `POST /api/tasks/claim` directly' '**Check task completeness**')"
+  assert_eq "38u: so does the extension flowchart" "after" \
+    "$(g38_order "$G38_CFW" 'Call POST /api/tasks/claim directly' 'Task well-specified?')"
+  assert_eq "38u: and the extension card" "after" \
+    "$(g38_order "$G38_CQRC" 'Call POST /api/tasks/claim directly' 'Check completeness')"
+  assert_eq "38v: the enrichment check refuses the slim summary" "found" \
+    "$(g38_in 'never on the slim discovery summary' "$G38_CENR")"
+  assert_eq "38w: GEMINI.md names the slim call" "found" "$(g38_has "$G38_SLIM" "$G38_GEM")"
+
+  # --- matrix row 6: both gate halves, in source ---
+  assert_eq "38x: the bash gate's queue URL is slim" "found" \
+    "$(g38_has '_req_url="$_api_base/api/tasks/next?response_view=slim"' "$G38_SH")"
+  assert_eq "38x: the PowerShell gate's queue URL is slim" "found" \
+    "$(g38_has '"$apiBase/api/tasks/next?response_view=slim"' "$G38_PS")"
+  G38_HSH="$(grep -F 'HELD_IDENT?fields=status,claim_expires_at,completed_by_id' "$G38_SH" | head -1)"
+  G38_HPS="$(grep -F "'?fields=status,claim_expires_at,completed_by_id'" "$G38_PS" | head -1)"
+  assert_eq "38y: the bash held request keeps its projection" "yes" "$([ -n "$G38_HSH" ] && echo yes || echo no)"
+  assert_eq "38y: without the slim view" "missing" "$(g38_in 'response_view' "$G38_HSH")"
+  assert_eq "38y: the PowerShell held request keeps its projection" "yes" "$([ -n "$G38_HPS" ] && echo yes || echo no)"
+  assert_eq "38y: without the slim view either" "missing" "$(g38_in 'response_view' "$G38_HPS")"
 fi
 
 # ============================================================

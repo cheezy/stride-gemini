@@ -16,7 +16,7 @@ Sub-skills are dispatched by the orchestrator only.
 **If you just claimed a Stride task and are about to start implementation, you MUST activate this skill first.**
 
 This skill contains the decision matrix that determines which custom agents to invoke:
-- `task-enricher` — Enrich a sparse task with key_files, patterns, testing strategy, etc. **before claiming**
+- `task-enricher` — Enrich a sparse task with key_files, patterns, testing strategy, etc. **right after the claim, before implementation**
 - `task-explorer` — Read key_files and discover patterns before coding
 - `task-reviewer` — Review your changes against acceptance criteria before completion
 - `task-decomposer` — Break goals into properly-sized subtasks
@@ -93,9 +93,9 @@ Use this matrix to determine which custom agents to invoke based on task attribu
 - If the task is small with 0-1 key_files, skip all custom agents and code directly.
 - Otherwise, at minimum run the explorer and reviewer.
 
-## Pre-Claim: Enrichment (Sparse Tasks)
+## Post-Claim: Enrichment (Sparse Tasks)
 
-**When:** During the orchestrator's Step 1 enrichment check, BEFORE claiming. Triggered when the task has empty `key_files` OR missing `testing_strategy` OR empty `verification_steps` OR blank `acceptance_criteria`.
+**When:** During the orchestrator's enrichment check, which `stride-workflow` Step 2 applies to the complete task the claim returned (the slim discovery summary carries none of the trigger fields). Triggered when the task has empty `key_files` OR missing `testing_strategy` OR empty `verification_steps` OR blank `acceptance_criteria`.
 
 **What to do:** Invoke the `task-enricher` custom agent (`agents/task-enricher.md`), passing the sparse task fields.
 
@@ -109,7 +109,7 @@ The enricher will return a single JSON object containing the enriched fields: `k
 **After enrichment:**
 1. Submit the returned JSON via `PATCH /api/tasks/:id` to populate the missing fields on the existing task
 2. Re-fetch the task with `GET /api/tasks/:id` to verify all required fields are populated
-3. Proceed to claim the task as normal — the rest of the matrix below applies once it's claimed
+3. Remove the claimed task file as `stride-workflow` Step 2 directs, since the hook wrote it from the sparse body, then carry on with the matrix below — the task is already claimed
 
 **Skip enrichment when:**
 - The task is already well-specified (all four trigger fields populated)
@@ -502,7 +502,7 @@ CUSTOM AGENT WORKFLOW:
 └─ 7. Proceed to after_doing hook (stride-completing-tasks)
 
 CUSTOM AGENTS (defined in agents/ directory):
-  task-enricher      - Enriches sparse tasks before claiming (Pre-Claim phase)
+  task-enricher      - Enriches sparse tasks right after the claim (Post-Claim phase)
   task-decomposer    - Breaks goals into dependency-ordered child tasks
   task-explorer      - Reads key_files, finds tests, searches patterns
   task-reviewer      - Reviews diff against acceptance criteria & pitfalls
