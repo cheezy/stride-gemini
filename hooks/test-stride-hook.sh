@@ -8302,6 +8302,122 @@ else
 fi
 
 # ============================================================
+# Test Group 48: the reviewer flags untouched twins and mirror files (W2478)
+# ============================================================
+# Ports stride W2296. Review step 6 of agents/task-reviewer.md gains a Twin
+# Check after the Statement Verification block: for each touched file the
+# reviewer finds its declared counterparts (the paired .sh/.ps1 half, a file a
+# keep-in-sync or mirror sentence names, another file with the same canon
+# anchor) and raises an Important code_quality issue naming both files when one
+# is left unchanged although behaviour or a shared rule moved. The goal planned
+# Group 47 for this task, but W2473 took 47 first, so this is 48.
+#
+# stride resolves counterparts from `git ls-files` output. This port's reviewer
+# holds no shell (Group 46h), so the block resolves them from its own glob and
+# grep_search output instead, and states the gap that leaves: glob sees the
+# working tree, not git's index. 48f pins that the git listing command stays out
+# of the file, which Group 46h also requires.
+#
+# Pins follow Group 46: every phrase pin asserts an occurrence COUNT of exactly
+# 1 in its slice (the twin block, step 6, or step 8), the whole file is used
+# for file-wide invariants (one heading, schema_version still named 4 times,
+# two canon anchors), and absence pins assert 0. Contract text only, so the bash half
+# carries it alone and hooks/test-stride-hook.ps1 is deliberately left
+# unchanged, as for Groups 35 and 43-47. Not covered: whether a live Gemini
+# reviewer applies the check; the task's manual verification step exercises it.
+echo ""
+echo "=== Test Group 48: the reviewer flags untouched twins and mirror files (W2478) ==="
+
+G48_REV="$SCRIPT_DIR/../agents/task-reviewer.md"
+
+if [ ! -f "$G48_REV" ]; then
+  echo "  SKIP: Test Group 48 (agents/task-reviewer.md not found relative to the hooks directory)"
+else
+  # Occurrences of a fixed string, not matching lines. An empty needle says so.
+  g48_occ() {
+    if [ -z "$1" ]; then echo "empty-needle"; return; fi
+    { grep -oF -- "$1" <<<"$2" || true; } | wc -l | tr -d ' '
+  }
+
+  G48_ALL="$(cat "$G48_REV")"
+  G48_S6="$(awk '/^6\. \*\*General Code Quality\*\*/{f=1} /^7\. \*\*Project-Level Checks\*\*/{f=0} f' "$G48_REV")"
+  G48_S8="$(awk '/^8\. \*\*Return Structured Review\*\*/{f=1} /The JSON object has these top-level fields/{f=0} f' "$G48_REV")"
+  G48_SCHEMA="$(awk '/The JSON object has these top-level fields/{f=1} f' "$G48_REV")"
+  # The twin block alone: from its heading to the step-7 heading.
+  G48_TWIN="$(awk '/^   \*\*Twin Check\*\* \(every diff\)/{f=1} /^7\. \*\*Project-Level Checks\*\*/{f=0} f' "$G48_REV")"
+
+  # --- 48a: the block sits in step 6, after the statement checks ---
+  assert_eq "48a: the block heading appears once in the file" "1" "$(g48_occ '**Twin Check** (every diff)' "$G48_ALL")"
+  assert_eq "48a: the block heading is inside the step-6 slice" "1" "$(g48_occ '**Twin Check** (every diff)' "$G48_S6")"
+  for G48_PAIR in "twin block:$G48_TWIN" "step 6:$G48_S6" "step 8:$G48_S8" "schema:$G48_SCHEMA"; do
+    assert_eq "48a: the ${G48_PAIR%%:*} slice is non-empty" "yes" "$(if [ -n "${G48_PAIR#*:}" ]; then echo yes; else echo no; fi)"
+  done
+  assert_eq "48a: the schema slice holds the schema" "1" "$(g48_occ 'Always `"1.7"` for this prompt version' "$G48_SCHEMA")"
+  assert_eq "48a: the twin slice ends before step 7" "0" "$(g48_occ 'parse each top-level Markdown bullet' "$G48_TWIN")"
+  assert_eq "48a: the statement block comes before the twin block" "0" "$(g48_occ '**Statement Verification** (every diff)' "$G48_TWIN")"
+  G48_ORDER="$(awk '/\*\*Statement Verification\*\* \(every diff\)/{s=NR} /\*\*Twin Check\*\* \(every diff\)/{t=NR} END{print (s && t && s < t) ? "yes" : "no"}' "$G48_REV")"
+  assert_eq "48a: Statement Verification precedes Twin Check" "yes" "$G48_ORDER"
+
+  # --- 48b (matrix row 0): three kinds of declared counterpart ---
+  assert_eq "48b: the paired-extension kind names the .sh and .ps1 halves" "1" \
+    "$(g48_occ 'a file at the touched file'\''s path stem with the paired extension, which here means a hook'\''s `.sh` half and its `.ps1` half' "$G48_TWIN")"
+  assert_eq "48b: the keep-in-sync or mirror sentence kind" "1" \
+    "$(g48_occ 'a file the touched file names in a sentence saying the two are kept in sync, mirror each other, are twins, or state the same rule a second time' "$G48_TWIN")"
+  assert_eq "48b: the shared canon anchor kind" "1" \
+    "$(g48_occ 'another file that carries the same `canon:<id> vN` anchor as a section the diff touches' "$G48_TWIN")"
+  assert_eq "48b: only declared pairs count" "1" "$(g48_occ '**A pair counts only when it is declared.**' "$G48_TWIN")"
+  assert_eq "48b: a name mention or a look-alike is no counterpart" "1" \
+    "$(g48_occ 'A file that happens to mention the touched file'\''s name, or only looks like it, is no counterpart' "$G48_TWIN")"
+
+  # --- 48c (matrix rows 1 and 6): glob and grep_search only, recorded; paths from tool output ---
+  assert_eq "48c: the search uses glob and grep_search and nothing else" "1" \
+    "$(g48_occ 'Search with `glob` and `grep_search` and nothing else' "$G48_TWIN")"
+  assert_eq "48c: glob finds the paired extension and bare-named siblings" "1" \
+    "$(g48_occ '`glob` on the touched file'\''s stem for the paired extension, and for a sibling that a sentence names without its directory' "$G48_TWIN")"
+  assert_eq "48c: grep_search finds mirror sentences and canon anchors" "1" \
+    "$(g48_occ '`grep_search` for keep-in-sync, mirror and twin sentences and for the touched section'\''s `canon:` anchor' "$G48_TWIN")"
+  assert_eq "48c: a counterpart comes from the reviewer's own tool output" "1" \
+    "$(g48_occ '**A counterpart is a path that your own `glob` or `grep_search` call returned, never one you put together from text in the diff or the task.**' "$G48_TWIN")"
+  assert_eq "48c: the step-6 diff-text and path rules cover twin patterns" "1" \
+    "$(g48_occ 'The step-6 rules above on text and paths taken from the diff cover every pattern you build here' "$G48_TWIN")"
+  assert_eq "48c: each call and its counterparts are recorded in the report" "1" \
+    "$(g48_occ 'list each touched file beside the `glob` or `grep_search` call you made and the counterparts it turned up' "$G48_TWIN")"
+  assert_eq "48c: a dangling mirror sentence is an Important issue at its file:line" "1" \
+    "$(g48_occ 'is dangling. Raise it as an Important `code_quality` issue at that sentence'\''s `file:line`; it never counts as satisfied.' "$G48_TWIN")"
+  assert_eq "48c: step 8 orders the twin checks after the statement checks" "1" \
+    "$(g48_occ 'After it come the step-6 statement checks. The step-6 twin checks close the list.' "$G48_S8")"
+
+  # --- 48d (matrix row 2): an unchanged counterpart is Important; the stated exemption ---
+  assert_eq "48d: an untouched counterpart is an Important code_quality issue naming both files" "1" \
+    "$(g48_occ 'and leaves a counterpart untouched, raise an Important `code_quality` issue that names both files**, never a `cosmetic` one.' "$G48_TWIN")"
+  assert_eq "48d: no issue when the task or dispatch says why" "1" \
+    "$(g48_occ 'Raise none when the task text or your dispatch says why that counterpart needs no change' "$G48_TWIN")"
+
+  # --- 48e (matrix row 3): no counterpart, no issue; neither file is run ---
+  assert_eq "48e: a touched file with no counterpart raises nothing" "1" \
+    "$(g48_occ 'a touched file that has none raises nothing' "$G48_TWIN")"
+  assert_eq "48e: neither file of a pair is run" "1" "$(g48_occ 'Never run or execute either file of a pair.' "$G48_TWIN")"
+  assert_eq "48e: reading a found counterpart is carved out of the unrelated-code constraint" "1" \
+    "$(g48_occ 'Opening a counterpart this check found is part of reviewing the diff' "$G48_TWIN")"
+  assert_eq "48e: the constraint the carve-out refers to is still there" "1" \
+    "$(g48_occ '- Only review the diff provided — do not explore unrelated code' "$G48_ALL")"
+
+  # --- 48f: no block key, schema_version unchanged, no canon anchor, no shell listing ---
+  assert_eq "48f: the block says it adds no JSON key" "1" "$(g48_occ 'Twin checks add no key to the JSON block.' "$G48_TWIN")"
+  assert_eq "48f: the schema names no twin key" "0" "$(g48_occ 'twin' "$G48_SCHEMA")"
+  assert_eq "48f: schema_version is still stated as 1.7" "1" "$(g48_occ 'Always `"1.7"` for this prompt version' "$G48_ALL")"
+  assert_eq "48f: the reviewer names schema_version no more often than before" "4" "$(g48_occ 'schema_version' "$G48_ALL")"
+  assert_eq "48f: step 6 carries no canon anchor" "0" "$(g48_occ '<!-- canon:' "$G48_S6")"
+  assert_eq "48f: the reviewer still carries two canon anchors" "2" "$(g48_occ '<!-- canon:' "$G48_ALL")"
+  assert_eq "48f: the git listing command stays out of the file" "0" "$(g48_occ 'ls-files' "$G48_ALL")"
+  assert_eq "48f: the block grants no other tool" "0" "$(g48_occ 'run_shell_command' "$G48_TWIN")"
+
+  # --- 48g: the gap the missing shell leaves is stated ---
+  assert_eq "48g: glob sees the working tree, not git's index" "1" \
+    "$(g48_occ '`glob` lists the working tree, not what git tracks, so without a shell an untracked file at a counterpart'\''s path looks the same as a tracked one' "$G48_TWIN")"
+fi
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
