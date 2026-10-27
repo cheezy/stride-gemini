@@ -23,6 +23,8 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.53.0] - 2026-10-26
+
 ### Changed — every explorer dispatch carries the two lines that authorize it (port of stride W2264)
 
 `stride-gemini-exploratory-testing` 0.3.0's `explorer` runs nothing, and ends
@@ -49,7 +51,7 @@ now each list both lines as a dispatch input and point to the new
 `GEMINI.md` and `README.md` say the same in brief. The rules sit in a sibling
 file because `SKILL.md` has no room under the Group 39c and 45j size ceilings;
 three unpinned clauses in Step 5.5 were tightened to fit the pointer, and the
-file is exactly at 45j's 159964 bytes. Bash Group 49
+file is exactly at 45j's 159964 bytes. Pinned by bash Group 49
 and PowerShell Group 22. An older explorer ignores the lines.
 
 ## [1.52.0] - 2026-10-26
