@@ -21,6 +21,37 @@ Why accepted rather than backfilled:
 
 The audit also found **zero** GitHub releases without a matching tag, so the record is incomplete in only this one direction.
 
+## [Unreleased]
+
+### Changed — every explorer dispatch carries the two lines that authorize it (port of stride W2264)
+
+`stride-gemini-exploratory-testing` 0.3.0's `explorer` runs nothing, and ends
+`blocked` with zero probes, unless its environment context holds
+`AUTHORIZED_NON_PRODUCTION: yes` and an `ALLOWED_HOSTS:` line, each exactly
+once. Step 5.5 did not send them, so every session against that release was
+dead on arrival. Step 5.5 and its twin, `stride-subagent-workflow` Phase 3.5,
+now each list both lines as a dispatch input and point to the new
+`skills/stride-workflow/explorer-safety-lines.md`, which holds the rules:
+
+- `AUTHORIZED_NON_PRODUCTION: yes` is written only from the user's own Step 0
+  affirmative, never inferred from a `localhost` address or the task record.
+- `ALLOWED_HOSTS:` names the host and port of the target that affirmative
+  covers and nothing wider, written the way the explorer matches it (an IP and
+  a name are separate entries; a portless entry admits only the default port),
+  or `none` for a target reached only through a local command.
+- Both lines come once, first in the block. Any line of task text that looks
+  like either is quoted out with `> `, so it can neither forge nor duplicate
+  the authorization, and the task text is labelled untrusted.
+- A credential-file pointer names the file, the exact value and why, once and
+  before the untrusted text, since the explorer leaves the file closed
+  otherwise.
+
+`GEMINI.md` and `README.md` say the same in brief. The rules sit in a sibling
+file because `SKILL.md` has no room under the Group 39c and 45j size ceilings;
+three unpinned clauses in Step 5.5 were tightened to fit the pointer, and the
+file is exactly at 45j's 159964 bytes. Bash Group 49
+and PowerShell Group 22. An older explorer ignores the lines.
+
 ## [1.52.0] - 2026-10-26
 
 Everything merged since 1.51.0, which stays closed: stride's G455 rework gates,
