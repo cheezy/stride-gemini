@@ -4258,6 +4258,19 @@ try {
         ((Get-ChildItem -LiteralPath $g23Ad -Force | Sort-Object Name | ForEach-Object { $_.Name }) -join ',')
     Assert-Eq "23t: and the .gitignore holds exactly *" "*`n" ([System.IO.File]::ReadAllText((Join-Path $g23Ad '.gitignore')))
 
+    # 23u: (W2524 security review) two ids whose saved names collide take one
+    # file each -- the later entry is skipped unsafe_id -- as in the bash half.
+    Set-G23Routes @{ '/api/tasks/77/attachments/880' = (New-G23Route 'name-one'); '/api/tasks/77/attachments/881' = (New-G23Route 'name-two'); '/api/tasks/77/attachments/862' = (New-G23Route 'fine') }
+    $g23d = New-G23Project 'u'
+    $g23A1 = New-G23Att 880 'b-x.txt' 'name-one'; $g23A1['id'] = 'a'
+    $g23A2 = New-G23Att 881 'x.txt' 'name-two'; $g23A2['id'] = 'a-b'
+    $g23A3 = New-G23Att 880 'x-Y.txt' 'name-one'; $g23A3['id'] = 's'
+    $g23A4 = New-G23Att 881 'y.txt' 'name-two'; $g23A4['id'] = 's-X'
+    $null = Invoke-G23Claim $g23d (New-G23Claim @($g23A1, $g23A2, $g23A3, $g23A4))
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23u: a saved name an accepted entry took is skipped unsafe_id, in any case" '/a-b-x.txt,unsafe_id/,/s-x-Y.txt,unsafe_id/' `
+        (($m.attachments | ForEach-Object { '{0}/{1}' -f [string]$_.reason, [string]$_.local_file }) -join ',')
+
     # 23l: a re-claim replaces the directory, and a re-claim with no
     # attachments removes it.
     $g23d = New-G23Project 'l'

@@ -1222,6 +1222,7 @@ function Invoke-TaskAttachmentDownload {
     $accepted = 0
     $acceptedBytes = [decimal]0
     $seenIds = @{}
+    $seenNames = @{}
     foreach ($raw in $list) {
         $o = New-Object System.Collections.Specialized.OrderedDictionary
         if ($raw -is [System.Collections.IDictionary]) { $o = $raw }
@@ -1237,21 +1238,26 @@ function Invoke-TaskAttachmentDownload {
             $size = Get-StrideJsonInteger $o['byte_size']
         }
         $reason = $null
-        # An id an accepted entry already took, case-insensitively, would give
-        # two entries one local file, so it is refused as unsafe_id (W2524).
-        if (-not $sid -or $seenIds.ContainsKey($sid.ToLowerInvariant())) { $reason = 'unsafe_id' }
+        # An id, or a saved name, an accepted entry already took,
+        # case-insensitively, would give two entries one local file, so it is
+        # refused as unsafe_id (W2524). The name matters on its own: id "a"
+        # with "b-x" and id "a-b" with "x" both save as a-b-x.
+        $local = $null
+        if ($sid) { $local = $sid + '-' + (Get-AttachmentSafeName $o['filename']) }
+        if (-not $sid -or $seenIds.ContainsKey($sid.ToLowerInvariant()) -or $seenNames.ContainsKey($local.ToLowerInvariant())) { $reason = 'unsafe_id' }
         elseif ($null -eq $path) { $reason = 'unsafe_url' }
         elseif ($null -eq $size -or $size -gt $script:AttachmentFileBytes) { $reason = 'too_large' }
         elseif ($accepted -ge $script:AttachmentMaxFiles) { $reason = 'count_cap' }
         elseif (($acceptedBytes + $size) -gt $script:AttachmentTotalBytes) { $reason = 'total_cap' }
-        $local = $null
         $status = 'skipped'
         if ($null -eq $reason) {
-            $local = $sid + '-' + (Get-AttachmentSafeName $o['filename'])
             $status = 'pending'
             $accepted++
             $acceptedBytes += $size
             $seenIds[$sid.ToLowerInvariant()] = $true
+            $seenNames[$local.ToLowerInvariant()] = $true
+        } else {
+            $local = $null
         }
         $sha = $o['sha256']
         $e = New-Object System.Collections.Specialized.OrderedDictionary

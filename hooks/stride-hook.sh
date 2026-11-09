@@ -1302,9 +1302,10 @@ def att_id:
 (.id | if type == "number" then (tostring | if test("\\A[0-9]{1,20}\\z") then . else null end)
        elif type == "string" and test("\\A[0-9]{1,20}\\z") then . else null end) as $tid
 | (.attachments | if type == "array" then . else [] end) as $list
-| reduce range(0; $list | length) as $i ({n: 0, total: 0, seen: {}, out: []};
+| reduce range(0; $list | length) as $i ({n: 0, total: 0, seen: {}, names: {}, out: []};
     ($list[$i] | if type == "object" then . else {} end) as $o
     | ($o.id | att_id) as $sid
+    | (if $sid == null then null else ($sid + "-" + ($o.filename | att_name)) end) as $local
     | ($o.download_url
        | if $tid != null and type == "string"
             and test("\\A/api/tasks/" + $tid + "/attachments/[0-9]{1,20}\\z")
@@ -1314,9 +1315,12 @@ def att_id:
     # is refused here exactly as the PowerShell half refuses it (W2524).
     | ($o.byte_size
        | if type == "number" and (tostring | test("\\A[0-9]{1,20}\\z")) then . else null end) as $size
-    # An id already taken by an accepted entry, case-insensitively, would
-    # give two entries one local file, so it is refused as unsafe_id (W2524).
-    | (if $sid == null or (.seen[$sid | ascii_downcase] // false) then "unsafe_id"
+    # An id, or a saved name, already taken by an accepted entry,
+    # case-insensitively, would give two entries one local file, so it is
+    # refused as unsafe_id (W2524). The name matters on its own: id "a" with
+    # "b-x" and id "a-b" with "x" both save as a-b-x.
+    | (if $sid == null or (.seen[$sid | ascii_downcase] // false)
+          or (.names[$local | ascii_downcase] // false) then "unsafe_id"
        elif $path == null then "unsafe_url"
        elif $size == null or $size > $file_bytes then "too_large"
        elif .n >= $max_files then "count_cap"
@@ -1324,11 +1328,12 @@ def att_id:
        else null end) as $reason
     | .out += [{
         id: $o.id, filename: $o.filename,
-        local_file: (if $reason == null then $sid + "-" + ($o.filename | att_name) else null end),
+        local_file: (if $reason == null then $local else null end),
         content_type: $o.content_type, byte_size: $o.byte_size, sha256: $o.sha256,
         comment_id: $o.comment_id, uploaded_at: $o.uploaded_at, download_path: $path,
         status: (if $reason == null then "pending" else "skipped" end), reason: $reason }]
-    | if $reason == null then .n += 1 | .total += $size | .seen[$sid | ascii_downcase] = true else . end)
+    | if $reason == null then .n += 1 | .total += $size | .seen[$sid | ascii_downcase] = true
+        | .names[$local | ascii_downcase] = true else . end)
 | .out'
 
 # The wall-clock budget. STRIDE_ATTACHMENT_BUDGET_SECONDS may only SHORTEN it

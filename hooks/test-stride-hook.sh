@@ -8556,7 +8556,7 @@ mkdir -p "$G50_DIR"
 
 if ! command -v jq > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1 \
    || ! command -v curl > /dev/null 2>&1; then
-  echo "  SKIP: 50a-50u: jq, python3 or curl missing -- Group 50 needs all three"
+  echo "  SKIP: 50a-50v: jq, python3 or curl missing -- Group 50 needs all three"
 else
   # The stand-in API: serves $1/<path> as a file; <path>.status holds a status
   # (and an optional Location) to answer instead; <path>.extra holds bytes to
@@ -9127,6 +9127,24 @@ G50WRAP
   else
     echo "  SKIP: 50u: pwsh not installed"
   fi
+
+  # 50v: (W2524 security review) two ids whose saved names collide -- "a"
+  # with "b-x.txt" and "a-b" with "x.txt" both save as a-b-x.txt, and "s" with
+  # "x-Y.txt" against "s-X" with "y.txt" differ only in letter case -- take one
+  # file each: the later entry is skipped unsafe_id, never overwriting a file
+  # the manifest says was verified.
+  g50_body 880 'name-one'
+  g50_body 881 'name-two'
+  G50_NAMES=$(jq -nc --argjson a "$(g50_att 880 b-x.txt)" --argjson b "$(g50_att 881 x.txt)" '[
+      ($a | .id = "a"), ($b | .id = "a-b"),
+      ($a | .id = "s" | .filename = "x-Y.txt"), ($b | .id = "s-X" | .filename = "y.txt")]')
+  G50_D=$(g50_proj v)
+  g50_claim "$G50_D" "$(g50_task "$G50_NAMES")"
+  assert_eq "50v: a saved name an accepted entry took is skipped unsafe_id, in any case" \
+    '[[null,"a-b-x.txt"],["unsafe_id",null],[null,"s-x-Y.txt"],["unsafe_id",null]]' \
+    "$(g50_m "$G50_D" '[.attachments[] | [.reason, .local_file]]')"
+  assert_eq "50v: and each saved file is the one its entry verified" "2" \
+    "$(cd "$G50_D/.stride/attachments/W5001" && jq -r '.attachments[] | select(.status == "downloaded") | "\(.sha256)  \(.local_file)"' manifest.json | shasum -a 256 -c - 2>/dev/null | grep -c ': OK$')"
 
   # 50p: the two halves write byte-identical manifests for the same claim,
   # with filenames that carry every escaping hazard a serialiser varies on.
