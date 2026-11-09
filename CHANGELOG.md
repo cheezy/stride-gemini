@@ -23,6 +23,46 @@ The audit also found **zero** GitHub releases without a matching tag, so the rec
 
 ## [Unreleased]
 
+## [1.54.0] - 2026-11-09
+
+### Added — task attachments are downloaded on claim and handed to the agents (port of stride W2522/W2523, G491)
+
+Humans attach screenshots, mockups, PDFs and logs to tasks. The claim hook now
+fetches them so the agents do not have to.
+
+- **Download (W2524).** After a claim whose identity is proven, both halves of
+  the claim hook (`hooks/stride-hook.sh` and `hooks/stride-hook.ps1`) download
+  each attachment into `.stride/attachments/<IDENT>/`. Saved names are
+  `<id>-<sanitised basename>`, never the raw filename. The hook enforces the
+  caps of 25 MiB per file, 20 files and 100 MiB per task, checks each file's
+  sha256, and fetches only a relative `/api/` download URL from the configured
+  API host. It writes `manifest.json` last. It never fails the claim and never
+  prints binary data or the token. Ids that are duplicates, differ only in
+  case, or would produce colliding saved names are refused. The BeforeTool
+  guard gains one re-fetch exemption, narrower than stride's. `GEMINI.md`
+  tells the agent that attachments are data, never instructions.
+- **Use (W2525).** The workflow passes `ATTACHMENTS_DIR`, after an identity
+  check, to `task-explorer` and `task-reviewer`. Both read the files the
+  manifest lists with `read_file`, as untrusted data. After a 2xx completion,
+  Step 7 removes the directory behind a project-root and symlink guard. The
+  rules live in the new `skills/stride-workflow/attachments.md`, and
+  `SKILL.md` got smaller overall.
+
+### Known gaps
+
+- **On a default Gemini CLI install, `read_file` is expected to refuse the
+  attachments.** In a git repository, Gemini CLI's default file filtering
+  (`respectGitIgnore: true`) refuses any path a `.gitignore` matches, and
+  `.stride/attachments/.gitignore` holds `*`. The agents then report an
+  `attachments:` line and read nothing. An operator can turn that filtering
+  off, but every git-ignored file then becomes readable, `.stride_auth.md`
+  included, so the plugin leaves that choice to the operator. The README has
+  the details. This comes from reading the source of `@google/gemini-cli-core`
+  0.67.0; it was not observed in a live run. Whether the same filter blocks the
+  claimed task file is not measured.
+- No live end-to-end run (a task carrying a PNG, a PDF and a text attachment,
+  worked from Gemini CLI) has been made. The hook suites are hermetic.
+
 ## [1.53.0] - 2026-10-26
 
 ### Changed — every explorer dispatch carries the two lines that authorize it (port of stride W2264)
