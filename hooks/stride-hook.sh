@@ -1249,6 +1249,359 @@ write_task_file() {
   return 0
 }
 
+# (W2524) Task attachments: download each file the proven claim lists into
+# .stride/attachments/<STEM>/, then write manifest.json LAST. A port of
+# stride's download_task_attachments (W2522), which is the source of record;
+# the contract is stride's docs/porting-attachments.md, and every name, cap,
+# reason code and manifest field below comes from it. The two halves of this
+# port write byte-identical manifests for the same claim.
+#
+# Runs only from the claim route, only when THIS call's own response proved the
+# task identity (claim_identity_proven, the same gate write_task_file sits
+# behind), and only after the ## before_doing section has finished, so a slow download can neither shrink
+# that section's budget nor change its blocking result. Never fatal: every
+# failure is a manifest entry or one stderr line, the hook's exit code and its
+# stdout are never touched, and nothing here prints to stdout.
+#
+# The bearer token reaches curl on STDIN (`-H @-`, fed by the printf builtin),
+# so it never appears in an argv that `ps` can read. It is never logged and
+# never written to a file. Redirects are NOT followed (no -L): a 3xx is
+# recorded as http_<code>, which is how the token is kept off every other host.
+ATTACHMENT_FILE_BYTES=26214400
+ATTACHMENT_MAX_FILES=20
+ATTACHMENT_TOTAL_BYTES=104857600
+ATTACHMENT_BUDGET_SECONDS=120
+
+# The plan: one entry per server entry, in server order, with the five
+# pre-download checks applied in the contract's order. count_cap and total_cap
+# count ACCEPTED entries only. `pending` marks an accepted entry; the download
+# loop settles it. $tid is the claimed task's numeric id as a string, or null.
+ATTACHMENT_PLAN_JQ='
+def att_name:
+  (if type == "string" then . else "" end)
+  | (split("/") | last // "") | (split("\\") | last // "")
+  | explode
+  | map(if (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122)
+           or . == 45 or . == 46 or . == 95 then . else 95 end)
+  | implode
+  | sub("\\A\\.+"; "")
+  | if length > 100 then
+      (rindex(".")) as $d
+      | if $d != null and $d > 0 and (length - $d) <= 16
+        then .[0:(100 - (length - $d))] + .[$d:]
+        else .[0:100] end
+    else . end
+  | if . == "" then "attachment" else . end;
+def att_id:
+  # A number id must render as plain digits: jq 1.7 prints 1e3 as "1E+3" where
+  # the PowerShell half would keep the literal, so anything else is refused in
+  # both halves rather than kept in one.
+  if type == "number" then (tostring | if test("\\A[0-9]{1,64}\\z") then . else null end)
+  elif type == "string" and test("\\A[A-Za-z0-9-]{1,64}\\z") then .
+  else null end;
+(.id | if type == "number" then (tostring | if test("\\A[0-9]{1,20}\\z") then . else null end)
+       elif type == "string" and test("\\A[0-9]{1,20}\\z") then . else null end) as $tid
+| (.attachments | if type == "array" then . else [] end) as $list
+| reduce range(0; $list | length) as $i ({n: 0, total: 0, seen: {}, out: []};
+    ($list[$i] | if type == "object" then . else {} end) as $o
+    | ($o.id | att_id) as $sid
+    | ($o.download_url
+       | if $tid != null and type == "string"
+            and test("\\A/api/tasks/" + $tid + "/attachments/[0-9]{1,20}\\z")
+         then . else null end) as $path
+    # A byte_size must be written as plain digits. jq 1.7 keeps the literal
+    # of a number, so 64.0 or 64.00000000000000001 (which a double rounds to 64)
+    # is refused here exactly as the PowerShell half refuses it (W2524).
+    | ($o.byte_size
+       | if type == "number" and (tostring | test("\\A[0-9]{1,20}\\z")) then . else null end) as $size
+    # An id already taken by an accepted entry, case-insensitively, would
+    # give two entries one local file, so it is refused as unsafe_id (W2524).
+    | (if $sid == null or (.seen[$sid | ascii_downcase] // false) then "unsafe_id"
+       elif $path == null then "unsafe_url"
+       elif $size == null or $size > $file_bytes then "too_large"
+       elif .n >= $max_files then "count_cap"
+       elif .total + $size > $total_bytes then "total_cap"
+       else null end) as $reason
+    | .out += [{
+        id: $o.id, filename: $o.filename,
+        local_file: (if $reason == null then $sid + "-" + ($o.filename | att_name) else null end),
+        content_type: $o.content_type, byte_size: $o.byte_size, sha256: $o.sha256,
+        comment_id: $o.comment_id, uploaded_at: $o.uploaded_at, download_path: $path,
+        status: (if $reason == null then "pending" else "skipped" end), reason: $reason }]
+    | if $reason == null then .n += 1 | .total += $size | .seen[$sid | ascii_downcase] = true else . end)
+| .out'
+
+# The wall-clock budget. STRIDE_ATTACHMENT_BUDGET_SECONDS may only SHORTEN it
+# (tests use 0); anything else, including a larger value, is ignored, so no
+# environment can push the download past the AfterTool timeout.
+attachment_budget_seconds() {
+  local _b="${STRIDE_ATTACHMENT_BUDGET_SECONDS:-}"
+  case "$_b" in
+    '' | *[!0-9]*) printf '%s' "$ATTACHMENT_BUDGET_SECONDS"; return 0 ;;
+  esac
+  if [ "${#_b}" -gt 3 ] || [ "$((10#$_b))" -gt "$ATTACHMENT_BUDGET_SECONDS" ]; then
+    printf '%s' "$ATTACHMENT_BUDGET_SECONDS"
+  else
+    printf '%s' "$((10#$_b))"
+  fi
+}
+
+# SHA-256 of $1 as 64 lowercase hex characters, or empty when no tool exists.
+attachment_sha256() {
+  local _out=""
+  if command -v shasum > /dev/null 2>&1; then
+    _out=$(shasum -a 256 "$1" 2>/dev/null) || _out=""
+  elif command -v sha256sum > /dev/null 2>&1; then
+    _out=$(sha256sum "$1" 2>/dev/null) || _out=""
+  elif command -v openssl > /dev/null 2>&1; then
+    _out=$(openssl dgst -sha256 -r "$1" 2>/dev/null) || _out=""
+  fi
+  _out="${_out%%[!0-9a-fA-F]*}"
+  [ "${#_out}" -eq 64 ] || return 0
+  printf '%s' "$_out" | tr 'A-F' 'a-f'
+}
+
+# A directory this function may write into: absent, or a real directory that
+# is not a symlink. Anything else refuses the whole download.
+attachment_dir_ok() {
+  [ -L "$1" ] && return 1
+  [ -e "$1" ] && [ ! -d "$1" ] && return 1
+  return 0
+}
+
+download_task_attachments() {
+  local _task="${1:-}" _stem _root _adir _tdir _plan _count _api _tok _proto _ua
+  local _budget _deadline _left _results="" _idx _path _size _sha _local _part
+  local _code _codef _rc _reason _got _actual _ok=0 _skip=0 _fail=0 _tmp _tmeta
+  [ "${HAS_JQ:-false}" = "true" ] || return 0
+  [ -n "$_task" ] || return 0
+  _stem=$(task_file_stem "$_task")
+  [ -n "$_stem" ] || return 0
+  _root="$PROJECT_DIR/.stride"
+  _adir="$_root/attachments"
+  _tdir="$_adir/$_stem"
+  _count=$(printf '%s' "$_task" | jq -r '.attachments | if type == "array" then length else 0 end' 2>/dev/null)
+  case "$_count" in '' | *[!0-9]*) _count=0 ;; esac
+  if ! attachment_dir_ok "$_root" || ! attachment_dir_ok "$_adir" || ! attachment_dir_ok "$_tdir"; then
+    [ "$_count" -eq 0 ] || printf 'stride: attachments %s: a .stride, .stride/attachments or task directory is a symlink or not a directory; nothing written\n' "$_stem" >&2
+    return 0
+  fi
+  if [ "$_count" -eq 0 ]; then
+    # No attachments: create nothing. A directory left by an EARLIER claim of
+    # this task is removed, manifest first, so its manifest can never describe
+    # this claim.
+    if [ -d "$_tdir" ]; then
+      rm -f "$_tdir/manifest.json" 2>/dev/null
+      rm -rf "$_tdir" 2>/dev/null
+    fi
+    return 0
+  fi
+  _plan=$(printf '%s' "$_task" | jq -c \
+    --argjson file_bytes "$ATTACHMENT_FILE_BYTES" --argjson max_files "$ATTACHMENT_MAX_FILES" \
+    --argjson total_bytes "$ATTACHMENT_TOTAL_BYTES" "$ATTACHMENT_PLAN_JQ" 2>/dev/null)
+  if [ -z "$_plan" ]; then
+    printf 'stride: attachments %s: could not read the attachment list; nothing written\n' "$_stem" >&2
+    return 0
+  fi
+  # .gitignore first, staged and renamed so a symlinked .gitignore is replaced
+  # rather than written through.
+  if ! mkdir -p "$_adir" 2>/dev/null || ! attachment_dir_ok "$_adir"; then
+    printf 'stride: attachments %s: could not create .stride/attachments; nothing written\n' "$_stem" >&2
+    return 0
+  fi
+  # A .gitignore that is a symlink is removed rather than renamed onto (mv
+  # onto a link to a directory would move the temp INTO that directory); one
+  # that is a directory refuses the run.
+  [ -L "$_adir/.gitignore" ] && rm -f "$_adir/.gitignore" 2>/dev/null
+  if [ -e "$_adir/.gitignore" ] && [ ! -f "$_adir/.gitignore" ]; then
+    printf 'stride: attachments %s: .stride/attachments/.gitignore is not a regular file; nothing downloaded\n' "$_stem" >&2
+    return 0
+  fi
+  # A staging file an interrupted earlier run left is not ignored until the
+  # .gitignore exists, so a later git add -A would commit it: sweep both
+  # halves' staging names (regular files only; find -type f skips links).
+  find "$_adir" -maxdepth 1 -type f \( -name '.gitignore.??????' -o -name '.stage.????????.???' \) \
+    -exec rm -f {} + 2>/dev/null
+  # A missing .gitignore is created in place with noclobber (O_EXCL, never
+  # through a link), so no staging file exists in the window before it; one
+  # that already holds exactly '*' is left alone. Only a wrong one is staged.
+  if [ ! -e "$_adir/.gitignore" ] && [ ! -L "$_adir/.gitignore" ]; then
+    ( set -C; printf '*\n' > "$_adir/.gitignore" ) 2>/dev/null
+  fi
+  _tmp=""
+  if printf '*\n' | cmp -s - "$_adir/.gitignore" 2>/dev/null && [ ! -L "$_adir/.gitignore" ]; then
+    :
+  elif ! _tmp=$(mktemp "$_adir/.gitignore.XXXXXX" 2>/dev/null) || ! printf '*\n' > "$_tmp" 2>/dev/null || ! mv -f "$_tmp" "$_adir/.gitignore" 2>/dev/null; then
+    [ -n "$_tmp" ] && rm -f "$_tmp" 2>/dev/null
+    printf 'stride: attachments %s: could not write .stride/attachments/.gitignore; nothing downloaded\n' "$_stem" >&2
+    return 0
+  fi
+  # A re-claim replaces the directory. The old manifest goes FIRST, so a
+  # reader never sees a manifest naming files that are already gone.
+  if [ -d "$_tdir" ]; then
+    rm -f "$_tdir/manifest.json" 2>/dev/null
+    rm -rf "$_tdir" 2>/dev/null
+  fi
+  if ! mkdir "$_tdir" 2>/dev/null || ! attachment_dir_ok "$_tdir"; then
+    printf 'stride: attachments %s: could not create the task directory; nothing downloaded\n' "$_stem" >&2
+    return 0
+  fi
+
+  # The URL and token come from .stride_auth.md ONLY. Both resolvers fall
+  # back to text in the intercepted command, which is right for the
+  # changed_files upload but not here: the contract joins download paths to
+  # the configured API URL and nothing else. Plain http is allowed only for a
+  # loopback API URL; anything else, or no token, fetches nothing.
+  _api=$(COMMAND='' resolve_stride_api_url)
+  _api="${_api%/}"
+  _tok=$(COMMAND='' resolve_stride_api_token)
+  _proto=''
+  case "$_api" in
+    https://?*) _proto='=https' ;;
+    http://*)
+      if printf '%s' "$_api" | grep -Eq '^http://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]*)?$'; then
+        _proto='=http'
+      fi
+      ;;
+  esac
+  [ -n "$_tok" ] || _proto=
+  _ua=$(curl --version 2>/dev/null | head -n 1)
+  _ua="${_ua#curl }"; _ua="${_ua%% *}"
+  case "$_ua" in '' | *[!0-9.]*) _ua='8' ;; esac
+  _ua="curl/$_ua"
+
+  _budget=$(attachment_budget_seconds)
+  # The manifest reports the contract budget; the deadline is ALSO held inside
+  # Gemini's 300 s AfterTool timeout (hooks/hooks.json; $SECONDS is this
+  # hook's own age), because the before_doing section has no timeout of its
+  # own here and may have used most of it, and a hook killed mid-download
+  # loses its stdout -- the structured result Gemini reads.
+  _left=$(( 285 - SECONDS ))
+  [ "$_left" -lt "$_budget" ] || _left="$_budget"
+  _deadline=$(( $(date +%s) + _left ))
+  while IFS="$(printf '\t')" read -r _idx _path _size _sha _local; do
+    [ -n "$_idx" ] || continue
+    _left=$(( _deadline - $(date +%s) ))
+    if [ "$_left" -le 0 ]; then
+      _results="${_results}${_idx} skipped time_budget"$'\n'
+      continue
+    fi
+    _part=$(mktemp "$_tdir/.part.XXXXXX" 2>/dev/null) || _part=""
+    if [ -z "$_part" ]; then
+      _results="${_results}${_idx} failed transport"$'\n'
+      continue
+    fi
+    # The body goes through `head -c <byte_size + 1>`, so no more than one
+    # byte past the declared size ever reaches the disk, whatever curl's
+    # version: before curl 8.4.0, --max-filesize does nothing for a body whose
+    # length is not announced (chunked). The extra byte is how an over-long
+    # body is told from an exact one. -w writes the status to curl's stderr
+    # (%{stderr}), captured in its own file because stdout is the body; -s
+    # without -S keeps curl's error text out of that file. A 0-byte entry
+    # still gets --max-filesize 1, so no entry runs uncapped.
+    if [ -z "$_proto" ]; then
+      _code=000; _rc=6
+    else
+      _codef=$(mktemp "$_tdir/.code.XXXXXX" 2>/dev/null) || _codef=""
+      if [ -z "$_codef" ]; then
+        _code=000; _rc=6
+      else
+        printf 'Authorization: Bearer %s\n' "$_tok" | curl -q -s --globoff --proto "$_proto" \
+          --max-time "$_left" --max-filesize "$(( _size > 0 ? _size : 1 ))" -A "$_ua" -H @- \
+          -w '%{stderr}%{http_code}' -o - "$_api$_path" 2> "$_codef" \
+          | head -c "$(( _size + 1 ))" > "$_part" 2>/dev/null
+        _rc=${PIPESTATUS[1]}
+        _code=$(cat "$_codef" 2>/dev/null)
+        rm -f "$_codef" 2>/dev/null
+      fi
+    fi
+    # The status decides first, so a 500 whose error body is longer than the
+    # file is http_500 rather than size_mismatch (curl's --max-filesize trips
+    # on the error body's Content-Length too). Within a 200, a body past
+    # byte_size is size_mismatch however curl stopped (exit 63 is its own cap,
+    # 23 the write error once head has closed the pipe); then 28 is the
+    # per-request limit, which is whatever was left of the budget.
+    _reason=""
+    case "$_code" in
+      200)
+        _got=$(wc -c < "$_part" 2>/dev/null | tr -d ' ')
+        case "$_got" in '' | *[!0-9]*) _got=0 ;; esac
+        if [ "$_rc" -eq 63 ] || [ "$_got" -gt "$_size" ]; then
+          _reason=size_mismatch
+        elif [ "$_rc" -eq 28 ]; then
+          _reason=time_budget
+        elif [ "$_rc" -ne 0 ]; then
+          _reason=transport
+        elif [ "$_got" != "$_size" ]; then
+          _reason=size_mismatch
+        else
+          _actual=$(attachment_sha256 "$_part")
+          # No hash tool at all fails closed: an unverified file is never kept.
+          [ -n "$_actual" ] && [ "$_actual" = "$_sha" ] || _reason=sha256_mismatch
+        fi
+        ;;
+      [1-9][0-9][0-9]) _reason="http_$_code" ;;
+      *)
+        if [ "$_rc" -eq 28 ]; then _reason=time_budget; else _reason=transport; fi
+        ;;
+    esac
+    if [ -z "$_reason" ] && mv -f "$_part" "$_tdir/$_local" 2>/dev/null; then
+      _results="${_results}${_idx} downloaded -"$'\n'
+    else
+      rm -f "$_part" 2>/dev/null
+      _results="${_results}${_idx} failed ${_reason:-transport}"$'\n'
+    fi
+  done <<EOF_PLAN
+$(printf '%s' "$_plan" | jq -r 'to_entries[] | select(.value.status == "pending")
+  | [(.key | tostring), .value.download_path, (.value.byte_size | floor | tostring),
+     (.value.sha256 | if type == "string" and test("\\A[0-9a-f]{64}\\z") then . else "-" end),
+     .value.local_file] | @tsv' 2>/dev/null)
+EOF_PLAN
+
+  # The manifest, LAST: staged in the task directory and renamed into place,
+  # so its presence means every entry is settled. Compact, key order fixed by
+  # the contract, one trailing LF, no timestamp of its own, no URL, no token.
+  _tmeta=$(printf '%s' "$_task" | jq -c '{
+      id: (.id | if type == "number" then . else null end),
+      identifier: (.identifier | if type == "string" then . else null end)}' 2>/dev/null)
+  [ -n "$_tmeta" ] || _tmeta='{"id":null,"identifier":null}'
+  _tmp=$(mktemp "$_tdir/.manifest.XXXXXX" 2>/dev/null) || _tmp=""
+  if [ -z "$_tmp" ]; then
+    printf 'stride: attachments %s: could not stage manifest.json\n' "$_stem" >&2
+    return 0
+  fi
+  if printf '%s' "$_plan" | jq -c \
+      --arg results "$_results" --argjson task "$_tmeta" --argjson budget "$_budget" \
+      --argjson file_bytes "$ATTACHMENT_FILE_BYTES" --argjson max_files "$ATTACHMENT_MAX_FILES" \
+      --argjson total_bytes "$ATTACHMENT_TOTAL_BYTES" '
+      ($results | split("\n") | map(select(length > 0) | split(" ")
+        | {key: .[0], value: {status: .[1], reason: (if .[2] == "-" then null else .[2] end)}})
+        | from_entries) as $r
+      | {manifest_version: 1, task: $task,
+         caps: {file_bytes: $file_bytes, files: $max_files, total_bytes: $total_bytes,
+                budget_seconds: $budget},
+         attachments: (to_entries | map(
+           (.key | tostring) as $k
+           | .value
+           | if .status != "pending" then .
+             elif $r[$k] then . + $r[$k]
+             else . + {status: "failed", reason: "transport"} end
+           | if .status == "downloaded" then . else .local_file = null end))}' \
+      > "$_tmp" 2>/dev/null && mv -f "$_tmp" "$_tdir/manifest.json" 2>/dev/null; then
+    :
+  else
+    rm -f "$_tmp" 2>/dev/null
+    printf 'stride: attachments %s: could not write manifest.json\n' "$_stem" >&2
+    return 0
+  fi
+  _ok=$(jq '[.attachments[] | select(.status == "downloaded")] | length' "$_tdir/manifest.json" 2>/dev/null)
+  _skip=$(jq '[.attachments[] | select(.status == "skipped")] | length' "$_tdir/manifest.json" 2>/dev/null)
+  _fail=$(jq '[.attachments[] | select(.status == "failed")] | length' "$_tdir/manifest.json" 2>/dev/null)
+  printf 'stride: attachments %s: %s downloaded, %s skipped, %s failed\n' \
+    "$_stem" "${_ok:-0}" "${_skip:-0}" "${_fail:-0}" >&2
+  return 0
+}
+
 # Self-gates on before_review - the hook that fires AFTER a /complete succeeds
 # (the routing below maps post + /api/tasks/:id/complete to it). Never writes
 # to stdout: Gemini CLI parses this script's stdout as one JSON document, so
@@ -1452,6 +1805,13 @@ ${_key}=''"
 # because there is no such file to read back -- do not import that reasoning,
 # and do not copy that port's messages, which name a path this port never
 # touches.
+#
+# (W2524) The one -o this guard allows is unrelated to that reasoning: a GET of
+# a task ATTACHMENT, /api/tasks/<id>/attachments/<id>, into this project's
+# .stride/attachments/<dir>/<file> (gemini_guard_attachment_exempt). An
+# attachment body is not a Stride response the recorder reads, and the
+# exemption exists for an operator's manual re-fetch only: the claim hook
+# downloads attachments itself, never through this guard.
 #
 # SCOPE. The routing case further down routes exactly three endpoints:
 # /api/tasks/claim, /api/tasks/<id>/complete and /api/tasks/<id>/mark_reviewed.
@@ -1730,6 +2090,197 @@ gemini_guard_split_pairs() {
   ' 2>/dev/null
 }
 
+# (W2524) The ONE exemption from the -o/--output refusal: a GET of a task
+# attachment, /api/tasks/<id>/attachments/<id>, whose -o/--output target is an
+# absolute path under this project's .stride/attachments/<dir>/<file>. Ported
+# from stride's stride_guard_attachment_exempt (W2522) and DELIBERATELY
+# NARROWER than it (W2524 exploratory findings): this port also refuses
+# -w/--write-out, an @file header value, manifest.json in any letter case, a
+# target that is itself a symlink, and a tree with no .gitignore yet. Never
+# re-sync it to stride's rules without keeping those five refusals. The
+# contract is stride's docs/porting-attachments.md, "Curl-guard exemption". It
+# exists for an operator's manual re-fetch only: the claim hook downloads
+# attachments itself, and the agent rules forbid an agent from running curl -o
+# at all. An attachment body is not a Stride response the recorder reads, so
+# sending it to a file hides nothing this guard protects.
+#
+# Deliberately narrow, and judged on the WHOLE command rather than a segment,
+# so nothing else can ride along with it:
+#   * one simple command and nothing else: no pipe, redirect, `;`, `&`, `(`,
+#     `)`, newline, backtick or command substitution anywhere (even inside
+#     double quotes), no unquoted glob or brace character (`* ? [ ] { } ~`),
+#     no unquoted `$` (a $NAME base must be double-quoted, so the shell
+#     cannot split its value into extra words), no `$` inside double quotes
+#     except a plain $NAME or ${NAME} (a quoted "$@", "${a[@]}" or "$*" can
+#     expand to zero or several words and re-pair the words after it), and no
+#     empty word, so every word judged here is exactly one word the shell will
+#     pass. The flag, pipe and redirect rules therefore have nothing left to
+#     judge, so returning early cannot hide a pipe or a redirect;
+#   * the command word is curl itself, with no wrapper or assignment before it;
+#   * every option is on an ALLOWLIST, so an option this code does not know
+#     (--location-trusted, --proxy, -K, --next, -v, ...) means no exemption
+#     rather than a pass. Flags: -s -S -f -g, --silent --show-error --fail
+#     --fail-with-body --globoff --no-progress-meter --compressed
+#     --create-dirs. Options with a value: -o/--output, -H/--header (never
+#     an @file value), -A/--user-agent, -m/--max-time, --connect-timeout,
+#     --retry, --max-filesize, --proto, and -X/--request only as GET.
+#     -w/--write-out is NOT allowed: its %output{} directive writes a second
+#     file anywhere (W2524 exploratory finding);
+#   * exactly one -o/--output, and exactly one other word: the attachments
+#     path with no query, fragment or percent-encoding, after a scheme and host
+#     (an optional port) or a double-quoted $NAME / ${NAME} base; no other word mentions /api/;
+#   * the target is an ABSOLUTE literal path: the project root as this hook
+#     sees it, then .stride/attachments/<dir>/<file>, <dir> matching
+#     [A-Za-z0-9_-]{1,64} and <file> [A-Za-z0-9_-][A-Za-z0-9._-]{0,163}, not
+#     manifest.json in any letter case (APFS and NTFS fold case). A $NAME prefix is refused: the guard cannot know what the
+#     shell running the command will expand it to (an unset $GEMINI_PROJECT_DIR
+#     writes to /.stride/...), so it cannot say where the file lands;
+#   * neither .stride, .stride/attachments, <dir> nor the <file> itself is a
+#     symlink, and .stride/attachments/.gitignore already exists as a regular
+#     file, so a re-fetch never creates a tree that git would commit.
+# Anything that misses a single rule is judged by gemini_guard_reason exactly
+# as before. Prints nothing; returns 0 only for an exempt command.
+# stride-hook.ps1's Test-GeminiGuardAttachmentExempt is its twin, rule for rule.
+#
+# The body is a SUBSHELL: it changes IFS and noglob, and its caller runs the
+# whole scan under `set -f`, so restoring either by hand on every return path
+# would turn globbing back ON for the rest of the guard.
+gemini_guard_attachment_exempt() (
+  local _cmd="$1" _words _w _expect="" _outs=0 _target="" _api=0 _pos=0 _url_ok=0
+  local _root _rest _dir _file _cluster _ch _first=1 _oldifs="$IFS"
+  [ "${#_cmd}" -le 4000 ] || return 1
+  # Tokenise quote-aware. Exit status 1 means a shape this exemption never
+  # admits (an operator, a substitution, a glob, an unterminated quote).
+  _words=$(GEMINI_GX="$_cmd" LC_ALL=C awk '
+    BEGIN {
+      s = ENVIRON["GEMINI_GX"]; n = length(s); w = ""; have = 0; q = ""; bad = 0
+      for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c == "\n" || c == "\r" || c == "`") { bad = 1; break }
+        if (q == "s") { if (c == "\047") q = ""; else w = w c; continue }
+        if (q == "d") {
+          if (c == "\"") { q = ""; continue }
+          if (c == "\\" && i < n) { d = substr(s, i + 1, 1)
+            if (d == "\"" || d == "\\" || d == "$") { w = w d; i++; continue } }
+          # Inside double quotes only a plain $NAME or ${NAME} is one word
+          # for certain; "$@", "${a[@]}", "$*" and the rest are refused.
+          if (c == "$" && substr(s, i + 1) !~ /^([A-Za-z_]|\{[A-Za-z_][A-Za-z0-9_]*\})/) { bad = 1; break }
+          w = w c; continue
+        }
+        if (c == " " || c == "\t") {
+          # An empty word ('' or "") is refused: the loop below could not
+          # see it, and curl would treat it as a second URL.
+          if (have && w == "") { bad = 1; break }
+          if (have) { print w; w = ""; have = 0 }
+          continue
+        }
+        have = 1
+        if (c == "\047") { q = "s"; continue }
+        if (c == "\"") { q = "d"; continue }
+        if (c == "\\") { if (i < n) { w = w substr(s, i + 1, 1); i++ }; continue }
+        # An unquoted $ is refused: the shell would split its expansion into
+        # words this function never sees. A variable base must be quoted.
+        if (index("|&;<>()*?[]{}~$", c) > 0) { bad = 1; break }
+        w = w c
+      }
+      if (q != "") bad = 1
+      if (have && w == "") bad = 1
+      if (bad) exit 1
+      if (have) print w
+    }') || return 1
+  _root=$(cd "${PROJECT_DIR:-.}" 2>/dev/null && pwd) || return 1
+  IFS='
+'
+  set -f
+  for _w in $_words; do
+    IFS="$_oldifs"
+    if [ "$_first" = "1" ]; then
+      _first=0
+      [ "$_w" = "curl" ] || return 1
+      continue
+    fi
+    case "$_w" in */api/*) _api=$((_api + 1)) ;; esac
+    if [ -n "$_expect" ]; then
+      case "$_expect" in
+        output) _target="$_w" ;;
+        method) [ "$_w" = "GET" ] || return 1 ;;
+        # curl reads -H @file as headers FROM that file; never allowed.
+        header) case "$_w" in @*) return 1 ;; esac ;;
+      esac
+      _expect=""
+      continue
+    fi
+    case "$_w" in
+      --output) _outs=$((_outs + 1)); _expect=output ;;
+      --output=*) _outs=$((_outs + 1)); _target="${_w#--output=}" ;;
+      --request) _expect=method ;;
+      --request=*) [ "${_w#--request=}" = "GET" ] || return 1 ;;
+      --silent | --show-error | --fail | --fail-with-body | --globoff \
+        | --no-progress-meter | --compressed | --create-dirs) : ;;
+      --header) _expect=header ;;
+      --header=@*) return 1 ;;
+      --user-agent | --max-time | --connect-timeout \
+        | --retry | --max-filesize | --proto) _expect=value ;;
+      --header=* | --user-agent=* | --max-time=* | --connect-timeout=* \
+        | --retry=* | --max-filesize=* | --proto=*) : ;;
+      -) return 1 ;;
+      -*)
+        _cluster="${_w#-}"
+        case "$_cluster" in -*) return 1 ;; esac
+        while [ -n "$_cluster" ]; do
+          _ch="${_cluster%"${_cluster#?}"}"
+          _cluster="${_cluster#?}"
+          case "$_ch" in
+            s | S | f | g) : ;;
+            o) _outs=$((_outs + 1))
+               if [ -n "$_cluster" ]; then _target="$_cluster"; else _expect=output; fi
+               break ;;
+            X) if [ -n "$_cluster" ]; then
+                 [ "$_cluster" = "GET" ] || return 1
+               else _expect=method; fi
+               break ;;
+            # A value-taking short option consumes the rest of the cluster, or
+            # the next word, so a value is never read as an option.
+            H) case "$_cluster" in @*) return 1 ;; esac
+               [ -n "$_cluster" ] || _expect=header
+               break ;;
+            A | m) [ -n "$_cluster" ] || _expect=value
+               break ;;
+            *) return 1 ;;
+          esac
+        done
+        ;;
+      *)
+        _pos=$((_pos + 1))
+        if printf '%s' "$_w" | grep -Eq '^(https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?|\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\})/api/tasks/[0-9]{1,20}/attachments/[0-9]{1,20}$'; then
+          _url_ok=1
+        fi
+        ;;
+    esac
+    IFS='
+'
+  done
+  IFS="$_oldifs"
+  [ "$_first" = "0" ] && [ -z "$_expect" ] || return 1
+  [ "$_outs" -eq 1 ] && [ "$_api" -eq 1 ] && [ "$_pos" -eq 1 ] && [ "$_url_ok" = "1" ] || return 1
+  case "$_target" in
+    "$_root"/.stride/attachments/*) _rest="${_target#"$_root"/.stride/attachments/}" ;;
+    *) return 1 ;;
+  esac
+  _dir="${_rest%%/*}"
+  _file="${_rest#*/}"
+  [ "$_dir" != "$_rest" ] || return 1
+  printf '%s' "$_dir" | grep -Eq '^[A-Za-z0-9_-]{1,64}$' || return 1
+  printf '%s' "$_file" | grep -Eq '^[A-Za-z0-9_-][A-Za-z0-9._-]{0,163}$' || return 1
+  [ "$(printf '%s' "$_file" | tr 'A-Z' 'a-z')" != "manifest.json" ] || return 1
+  [ ! -L "$_root/.stride" ] && [ ! -L "$_root/.stride/attachments" ] \
+    && [ ! -L "$_root/.stride/attachments/$_dir" ] \
+    && [ ! -L "$_root/.stride/attachments/$_dir/$_file" ] || return 1
+  [ -f "$_root/.stride/attachments/.gitignore" ] \
+    && [ ! -L "$_root/.stride/attachments/.gitignore" ] || return 1
+  return 0
+)
+
 # The decider. Prints one of flag|remote|pipe|redirect, or nothing.
 gemini_guard_reason() {
   local _raw="$1" _joined _scan _seg _seg_raw _pair _stage _rest _word _first _sawcurl _target _next
@@ -1746,6 +2297,15 @@ gemini_guard_reason() {
   # an operator cannot act on is barely better than a silent permit.
   if [ "${GEMINI_GUARD_HAS_AWK:-false}" != "true" ]; then
     printf 'noawk'
+    return 0
+  fi
+
+  # (W2524) The one sanctioned -o: a manual re-fetch of a task attachment into
+  # .stride/attachments/. Judged on the RAW whole command (the blanked view
+  # hides a quoted target), and only a single simple curl with no pipe or
+  # redirect can pass, so the rules below have nothing left to judge when this
+  # returns early. Printing nothing is the permit.
+  if gemini_guard_attachment_exempt "$_raw"; then
     return 0
   fi
 
@@ -1997,6 +2557,10 @@ esac
 # response and cache it. All subsequent hooks load the cache so .stride.md
 # commands can reference $TASK_IDENTIFIER, $TASK_TITLE, etc.
 
+# (W2524) Assigned unconditionally, so a value inherited from the environment
+# can never stand in for a proven claim and trigger the attachment download.
+ATTACHMENT_TASK_JSON=""
+
 if [ "$HOOK_NAME" = "before_doing" ]; then
   # (D142) This block refreshes IDENTITY only. TASK_BASE_REF is deliberately
   # NOT written here: the ## before_doing section has not run yet, and its
@@ -2078,6 +2642,9 @@ if [ "$HOOK_NAME" = "before_doing" ]; then
     [ -n "$_task_from_persisted" ] && _task_file_need="require"
     if printf '%s' "$COMMAND" | claim_identity_proven "$TASK_JSON" "$_task_file_need"; then
       write_task_file "$TASK_JSON" > /dev/null
+      # (W2524) The attachment list is read from this same proven object, and
+      # only here: a claim whose response is not proven downloads nothing.
+      ATTACHMENT_TASK_JSON="$TASK_JSON"
     else
       printf 'stride-hook: the claim response is not proven to be the task this claim asked for; not writing the task file\n' >&2
     fi
@@ -2191,6 +2758,19 @@ PRIMARY_RC=$?
 # cannot veto it) and a partially-run section still leaves HEAD more accurate
 # than the pre-pull value. No-op for every other hook route.
 finalize_before_doing
+
+# (W2524) Download the claimed task's attachments only NOW, after the
+# ## before_doing section has finished, so a slow download can neither shrink
+# that section's budget nor change its blocking result; and whatever the
+# section returned, because AfterTool cannot veto a claim that already
+# succeeded. Only a claim whose own response proved the task identity
+# (ATTACHMENT_TASK_JSON, set beside write_task_file) downloads. Stdout is
+# discarded because Gemini parses this hook's stdout as one JSON document; the
+# summary goes to stderr.
+if [ "$PHASE" = "post" ] && [ "$HOOK_NAME" = "before_doing" ] \
+   && [ -n "${ATTACHMENT_TASK_JSON:-}" ]; then
+  download_task_attachments "$ATTACHMENT_TASK_JSON" > /dev/null || true
+fi
 
 if [ "$PRIMARY_RC" -ne 0 ]; then
   exit "$PRIMARY_RC"

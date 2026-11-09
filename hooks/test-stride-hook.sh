@@ -8535,6 +8535,830 @@ else
 fi
 
 # ============================================================
+# Test Group 50: task attachments downloaded by the claim hook (W2524)
+# ============================================================
+# A proven claim downloads every listed attachment into
+# .stride/attachments/<STEM>/ and writes manifest.json LAST, under the contract
+# in stride's docs/porting-attachments.md. A port of stride's Group 75 (W2522).
+# Hermetic: a python3 HTTP server on 127.0.0.1 stands in for the API (the
+# contract allows plain http only for a loopback API URL), so real curl runs and
+# no request leaves the machine. A PATH stub for curl would not do: the
+# download feeds the token on stdin (-H @-) and reads the status from
+# -w '%{stderr}', which only a real curl honours. The PowerShell half is Test
+# Group 23 of its suite; the cross-half byte comparison lives here (50p).
+echo ""
+echo "=== Test Group 50: task attachments (W2524) ==="
+
+G50_DIR="$TMPDIR_TEST/w2524"
+G50_TOKEN="g50_fake_tok_7f3a9c"
+G50_SRV_PID=""
+mkdir -p "$G50_DIR"
+
+if ! command -v jq > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1 \
+   || ! command -v curl > /dev/null 2>&1; then
+  echo "  SKIP: 50a-50u: jq, python3 or curl missing -- Group 50 needs all three"
+else
+  # The stand-in API: serves $1/<path> as a file; <path>.status holds a status
+  # (and an optional Location) to answer instead; <path>.extra holds bytes to
+  # send AFTER the declared Content-Length body (a server that lies about the
+  # length); <path>.chunked sends the body chunked, with no length at all,
+  # and <path>.drip with it keeps streaming 1 KiB chunks for ~10 s more;
+  # <path>.sleep holds seconds to stall after the headers; every request's
+  # path, User-Agent and Authorization are logged.
+  cat > "$G50_DIR/srv.py" <<'G50PY'
+import http.server, json, os, socketserver, sys, time
+root, portfile, logfile = sys.argv[1], sys.argv[2], sys.argv[3]
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        with open(logfile, "a") as f:
+            f.write(json.dumps({"path": self.path, "ua": self.headers.get("User-Agent"),
+                                "auth": self.headers.get("Authorization")}) + "\n")
+        p = os.path.normpath(os.path.join(root, self.path.lstrip("/").split("?")[0]))
+        status, loc, body = 200, None, b""
+        if os.path.isfile(p + ".status"):
+            spec = open(p + ".status").read().split()
+            status = int(spec[0])
+            loc = spec[1] if len(spec) > 1 else None
+        if p.startswith(root) and os.path.isfile(p):
+            body = open(p, "rb").read()
+        elif status == 200:
+            status = 404
+        extra = open(p + ".extra", "rb").read() if os.path.isfile(p + ".extra") else b""
+        if os.path.isfile(p + ".chunked"):
+            self.protocol_version = "HTTP/1.1"
+            self.send_response(status)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                for part in (body, extra):
+                    if part: self.wfile.write(b"%x\r\n%s\r\n" % (len(part), part))
+                if os.path.isfile(p + ".drip"):
+                    # Keep streaming for ~10 s after the declared body.
+                    for _ in range(200):
+                        self.wfile.write(b"400\r\n" + b"d" * 1024 + b"\r\n")
+                        self.wfile.flush()
+                        time.sleep(0.05)
+                self.wfile.write(b"0\r\n\r\n")
+            except OSError:
+                pass
+            return
+        self.send_response(status)
+        if loc: self.send_header("Location", loc)
+        self.send_header("Content-Length", str(len(body) + len(extra)))
+        self.end_headers()
+        if os.path.isfile(p + ".sleep"):
+            self.wfile.flush()
+            time.sleep(float(open(p + ".sleep").read().strip()))
+        try:
+            self.wfile.write(body + extra)
+        except OSError:
+            pass
+class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+s = S(("127.0.0.1", 0), H)
+with open(portfile + ".tmp", "w") as f: f.write(str(s.server_address[1]))
+os.replace(portfile + ".tmp", portfile)
+s.serve_forever()
+G50PY
+  G50_SRV="$G50_DIR/srv"
+  G50_LOG="$G50_DIR/requests.log"
+  mkdir -p "$G50_SRV/api/tasks/77/attachments"
+  python3 "$G50_DIR/srv.py" "$G50_SRV" "$G50_DIR/port" "$G50_LOG" > /dev/null 2>&1 &
+  G50_SRV_PID=$!
+  for _g50_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -s "$G50_DIR/port" ] && break
+    sleep 0.25
+  done
+  G50_PORT=$(cat "$G50_DIR/port" 2>/dev/null)
+  G50_API="http://127.0.0.1:$G50_PORT"
+  G50_CLAIM_CMD="curl -sS -X POST $G50_API/api/tasks/claim -d @c.json | tee r.json"
+
+  g50_body() { # $1=attachment id $2=bytes (printf format, no newline added)
+    printf "$2" > "$G50_SRV/api/tasks/77/attachments/$1"
+  }
+  g50_sha() { # $1=file -> lowercase sha256
+    local _s
+    _s=$(shasum -a 256 "$1" 2>/dev/null || sha256sum "$1" 2>/dev/null)
+    printf '%s' "${_s%% *}"
+  }
+  g50_att() { # $1=id $2=filename -> one server-shaped entry for the served body
+    local _f="$G50_SRV/api/tasks/77/attachments/$1"
+    jq -nc --argjson id "$1" --arg fn "$2" --argjson size "$(wc -c < "$_f" | tr -d ' ')" \
+      --arg sha "$(g50_sha "$_f")" \
+      '{id: $id, filename: $fn, content_type: "application/octet-stream", byte_size: $size,
+        sha256: $sha, comment_id: null, uploaded_at: "2026-11-08T10:00:00Z",
+        download_url: ("/api/tasks/77/attachments/" + ($id | tostring))}'
+  }
+  g50_task() { # $1=JSON array of entries -> the claim response
+    jq -nc --argjson a "$1" '{data: {id: 77, identifier: "W5001", title: "attach", attachments: $a}}'
+  }
+  g50_proj() { # $1=name -> a project whose API URL is the stand-in server
+    local _d="$G50_DIR/proj-$1"
+    rm -rf "$_d"; mkdir -p "$_d/.stride"
+    printf '## before_doing\n```bash\necho ready\n```\n\n## before_review\n```bash\n```\n' > "$_d/.stride.md"
+    printf -- '- **API URL:** `%s`\n- **API Token:** `%s`\n' "$G50_API" "$G50_TOKEN" > "$_d/.stride_auth.md"
+    printf '%s' "$_d"
+  }
+  g50_claim() { # $1=project $2=stdout payload [$3=hook script] -> sets G50_RC/OUT/ERR
+    local _script="${3:-$HOOK_SCRIPT}" _runner=bash
+    case "$_script" in *.ps1) _runner="pwsh -NoProfile -File" ;; esac
+    : > "$G50_LOG"
+    jq -nc --arg c "${G50_CMD:-$G50_CLAIM_CMD}" --arg r "$2" \
+      '{session_id:"s",tool_input:{command:$c},tool_response:{stdout:$r}}' \
+      | GEMINI_PROJECT_DIR="$1" $_runner "$_script" post > "$G50_DIR/out" 2> "$G50_DIR/err"
+    G50_RC=$?
+    G50_OUT=$(cat "$G50_DIR/out")
+    G50_ERR=$(cat "$G50_DIR/err")
+  }
+  g50_m() { # $1=project $2=jq filter -> the filter applied to the W5001 manifest
+    jq -c "$2" "$1/.stride/attachments/W5001/manifest.json" 2>/dev/null
+  }
+  g50_requested() { # $1=path -> yes when the stand-in server saw that path
+    grep -qF "\"path\": \"$1\"" "$G50_LOG" 2>/dev/null && echo yes || echo no
+  }
+
+  g50_body 812 '\x89PNG\r\n\x1a\nfake-png'
+  g50_body 813 '%%PDF-1.4 fake pdf'
+  g50_body 814 'plain text notes\n'
+  G50_THREE="[$(g50_att 812 screenshot.png),$(g50_att 813 spec.pdf),$(g50_att 814 notes.txt)]"
+
+  # 50a: the happy path -- three files, verified, manifest last, .gitignore.
+  G50_D=$(g50_proj a)
+  g50_claim "$G50_D" "$(g50_task "$G50_THREE")"
+  assert_eq "50a: the claim hook still exits 0" "0" "$G50_RC"
+  assert_eq "50a: each file is saved as <id>-<sanitised name>" \
+    "812-screenshot.png 813-spec.pdf 814-notes.txt manifest.json" \
+    "$(ls "$G50_D/.stride/attachments/W5001" | tr '\n' ' ' | sed 's/ $//')"
+  assert_eq "50a: the saved bytes are the served bytes" "same" \
+    "$(cmp -s "$G50_SRV/api/tasks/77/attachments/812" "$G50_D/.stride/attachments/W5001/812-screenshot.png" && echo same || echo differ)"
+  assert_eq "50a: every entry is downloaded with a null reason" \
+    '[["downloaded",null],["downloaded",null],["downloaded",null]]' \
+    "$(g50_m "$G50_D" '[.attachments[] | [.status, .reason]]')"
+  assert_eq "50a: manifest top-level keys are in contract order" \
+    '["manifest_version","task","caps","attachments"]' "$(g50_m "$G50_D" 'keys_unsorted')"
+  assert_eq "50a: entry keys are in contract order" \
+    '["id","filename","local_file","content_type","byte_size","sha256","comment_id","uploaded_at","download_path","status","reason"]' \
+    "$(g50_m "$G50_D" '.attachments[0] | keys_unsorted')"
+  assert_eq "50a: task and caps carry the contract values" \
+    '{"task":{"id":77,"identifier":"W5001"},"caps":{"file_bytes":26214400,"files":20,"total_bytes":104857600,"budget_seconds":120}}' \
+    "$(g50_m "$G50_D" '{task, caps}')"
+  assert_eq "50a: download_path is the relative server path, never an absolute URL" \
+    '"/api/tasks/77/attachments/812"' "$(g50_m "$G50_D" '.attachments[0].download_path')"
+  assert_eq "50a: manifest.json is compact with exactly one trailing LF" "1 0a" \
+    "$(wc -l < "$G50_D/.stride/attachments/W5001/manifest.json" | tr -d ' ') $(tail -c 1 "$G50_D/.stride/attachments/W5001/manifest.json" | od -An -tx1 | tr -d ' ')"
+  assert_eq "50a: .stride/attachments/.gitignore holds exactly *" "*" \
+    "$(cat "$G50_D/.stride/attachments/.gitignore" 2>/dev/null)"
+  assert_eq "50a: no staging temp survives" "0" \
+    "$(find "$G50_D/.stride/attachments" -name '.part.*' -o -name '.manifest.*' -o -name '.gitignore.*' | wc -l | tr -d ' ')"
+  assert_contains "50a: one summary line on stderr" \
+    "stride: attachments W5001: 3 downloaded, 0 skipped, 0 failed" "$G50_ERR"
+
+  # 50b: hook stdout is the same single JSON document with or without the
+  # download -- budget 0 downloads nothing and is otherwise the same claim.
+  G50_D=$(g50_proj b)
+  STRIDE_ATTACHMENT_BUDGET_SECONDS=0 g50_claim "$G50_D" "$(g50_task "$G50_THREE")"
+  G50_OUT_NONE=$(printf '%s' "$G50_OUT" | sed -E 's/"duration_ms": *[0-9]+/"duration_ms":0/g; s/"duration_seconds": *[0-9]+/"duration_seconds":0/g')
+  G50_D=$(g50_proj b2)
+  g50_claim "$G50_D" "$(g50_task "$G50_THREE")"
+  # duration_ms and duration_seconds are the section's own wall clock, so they
+  # are the fields that may differ between two runs (a run that straddles a
+  # second boundary reports 1); everything else must be identical.
+  # Compared as raw text, so a stray line on stdout is a difference rather
+  # than a parse error that empties both sides.
+  assert_eq "50b: hook stdout is unchanged by the download" "$G50_OUT_NONE" \
+    "$(printf '%s' "$G50_OUT" | sed -E 's/"duration_ms": *[0-9]+/"duration_ms":0/g; s/"duration_seconds": *[0-9]+/"duration_seconds":0/g')"
+  assert_eq "50b: and it is exactly one JSON document" "ok" \
+    "$(printf '%s' "$G50_OUT" | python3 -c 'import json,sys; json.loads(sys.stdin.read()); print("ok")' 2>/dev/null)"
+
+  # 50c: no attachments key, null, [] or a non-array -> no directory at all.
+  for g50_case in '{"data":{"id":77,"identifier":"W5001"}}' \
+                  '{"data":{"id":77,"identifier":"W5001","attachments":null}}' \
+                  '{"data":{"id":77,"identifier":"W5001","attachments":[]}}' \
+                  '{"data":{"id":77,"identifier":"W5001","attachments":"x"}}'; do
+    G50_D=$(g50_proj c)
+    g50_claim "$G50_D" "$g50_case"
+    assert_eq "50c: $(printf '%s' "$g50_case" | jq -c '.data.attachments') creates no attachments directory" \
+      "absent" "$([ -e "$G50_D/.stride/attachments" ] && echo present || echo absent)"
+  done
+
+  # 50d: caps, judged on the declared byte_size before any request.
+  G50_D=$(g50_proj d)
+  G50_CAPS=$(jq -nc '[{id: 901, filename: "big.bin", byte_size: 26214401, sha256: ("0" * 64),
+                        download_url: "/api/tasks/77/attachments/901"}]
+                     + [range(0; 21) | {id: (920 + .), filename: "f", byte_size: 1, sha256: ("0" * 64),
+                        download_url: ("/api/tasks/77/attachments/" + ((920 + .) | tostring))}]')
+  STRIDE_ATTACHMENT_BUDGET_SECONDS=0 g50_claim "$G50_D" "$(g50_task "$G50_CAPS")"
+  assert_eq "50d: a file over 26,214,400 bytes is skipped too_large" '["skipped","too_large"]' \
+    "$(g50_m "$G50_D" '.attachments[0] | [.status, .reason]')"
+  assert_eq "50d: the 21st accepted-size entry is skipped count_cap" '["skipped","count_cap"]' \
+    "$(g50_m "$G50_D" '.attachments[21] | [.status, .reason]')"
+  g50_claim "$G50_D" "$(g50_task "$G50_CAPS")"
+  assert_eq "50d: a too_large file is never requested" "no" \
+    "$(g50_requested /api/tasks/77/attachments/901)"
+  assert_eq "50d: nor a count_cap one" "no" "$(g50_requested /api/tasks/77/attachments/940)"
+  G50_SIZES='[{"id":905,"filename":"s","byte_size":"12","sha256":"x","download_url":"/api/tasks/77/attachments/905"},{"id":906,"filename":"s","byte_size":-1,"sha256":"x","download_url":"/api/tasks/77/attachments/906"},{"id":907,"filename":"s","byte_size":1.5,"sha256":"x","download_url":"/api/tasks/77/attachments/907"},{"id":908,"filename":"s","sha256":"x","download_url":"/api/tasks/77/attachments/908"}]'
+  g50_claim "$G50_D" "$(g50_task "$G50_SIZES")"
+  assert_eq "50d: a string, negative, fractional or missing byte_size is skipped too_large" \
+    '["too_large","too_large","too_large","too_large"]' "$(g50_m "$G50_D" '[.attachments[].reason]')"
+  assert_eq "50d: and none of them is requested" "0" "$(wc -l < "$G50_LOG" | tr -d ' ')"
+  G50_D=$(g50_proj d2)
+  # total_cap counts ACCEPTED entries only: four 25 MiB entries fill the 100
+  # MiB exactly, so the fifth and a 1-byte sixth are over; a skipped entry adds
+  # nothing, so a 0-byte seventh is still accepted.
+  G50_TOT=$(jq -nc '[range(0; 5) | {id: (950 + .), filename: "t", byte_size: 26214400, sha256: ("0" * 64),
+                      download_url: ("/api/tasks/77/attachments/" + ((950 + .) | tostring))}]
+                    + [{id: 960, filename: "one", byte_size: 1, sha256: ("0" * 64), download_url: "/api/tasks/77/attachments/960"},
+                       {id: 961, filename: "zero", byte_size: 0, sha256: ("0" * 64), download_url: "/api/tasks/77/attachments/961"}]')
+  STRIDE_ATTACHMENT_BUDGET_SECONDS=0 g50_claim "$G50_D" "$(g50_task "$G50_TOT")"
+  assert_eq "50d: past 104,857,600 bytes in total the rest are skipped total_cap, counting accepted entries only" \
+    '["time_budget","time_budget","time_budget","time_budget","total_cap","total_cap","time_budget"]' \
+    "$(g50_m "$G50_D" '[.attachments[].reason]')"
+
+  # 50e: the time budget. 0 skips every accepted entry; a larger override is
+  # ignored, so nothing can push the download past the hook timeout.
+  G50_D=$(g50_proj e)
+  STRIDE_ATTACHMENT_BUDGET_SECONDS=0 g50_claim "$G50_D" "$(g50_task "$G50_THREE")"
+  assert_eq "50e: an exhausted budget skips every accepted entry time_budget" \
+    '[["skipped","time_budget"],["skipped","time_budget"],["skipped","time_budget"]]' \
+    "$(g50_m "$G50_D" '[.attachments[] | [.status, .reason]]')"
+  assert_eq "50e: and records the budget it ran with" "0" "$(g50_m "$G50_D" '.caps.budget_seconds')"
+  assert_eq "50e: nothing was requested" "0" "$(wc -l < "$G50_LOG" | tr -d ' ')"
+  STRIDE_ATTACHMENT_BUDGET_SECONDS=999 g50_claim "$G50_D" "$(g50_task "$G50_THREE")"
+  assert_eq "50e: a budget over 120 s is ignored" "120" "$(g50_m "$G50_D" '.caps.budget_seconds')"
+
+  # 50f: a body longer or shorter than byte_size, and a sha256 mismatch, are
+  # removed and recorded as failed.
+  g50_body 830 'abc'
+  printf 'TRAILING' > "$G50_SRV/api/tasks/77/attachments/830.extra"
+  g50_body 831 'short'
+  g50_body 833 'abc'
+  printf 'MORE-THAN-DECLARED' > "$G50_SRV/api/tasks/77/attachments/833.extra"
+  : > "$G50_SRV/api/tasks/77/attachments/833.chunked"
+  g50_body 832 'right size, wrong hash'
+  G50_BAD=$(jq -nc --argjson a "$(g50_att 830 long.bin)" --argjson b "$(g50_att 831 short.bin)" \
+    --argjson c "$(g50_att 832 hash.bin)" --argjson d "$(g50_att 833 chunked.bin)" \
+    '[$a, ($b | .byte_size = 50), ($c | .sha256 = ("0" * 64)), $d]')
+  G50_D=$(g50_proj f)
+  g50_claim "$G50_D" "$(g50_task "$G50_BAD")"
+  assert_eq "50f: longer, shorter and over-long chunked bodies fail size_mismatch, a bad hash sha256_mismatch" \
+    '[["failed","size_mismatch",null],["failed","size_mismatch",null],["failed","sha256_mismatch",null],["failed","size_mismatch",null]]' \
+    "$(g50_m "$G50_D" '[.attachments[] | [.status, .reason, .local_file]]')"
+  assert_eq "50f: and no file is left for any of them" "manifest.json" \
+    "$(ls -A "$G50_D/.stride/attachments/W5001" | tr '\n' ' ' | sed 's/ $//')"
+  # A curl older than 8.4.0 ignores --max-filesize for a chunked body. The
+  # wrapper drops the option to stand in for one: the body must still be cut
+  # one byte past byte_size, so a server that keeps streaming cannot hold the
+  # download until --max-time.
+  g50_body 834 'abc'
+  printf 'MORE' > "$G50_SRV/api/tasks/77/attachments/834.extra"
+  : > "$G50_SRV/api/tasks/77/attachments/834.chunked"
+  : > "$G50_SRV/api/tasks/77/attachments/834.drip"
+  G50_OLD="$G50_DIR/oldcurl"; mkdir -p "$G50_OLD"
+  G50_REAL_CURL=$(command -v curl)
+  cat > "$G50_OLD/curl" <<G50OLD
+#!/usr/bin/env bash
+args=()
+while [ \$# -gt 0 ]; do
+  case "\$1" in --max-filesize) shift 2; continue ;; esac
+  args+=("\$1"); shift
+done
+exec "$G50_REAL_CURL" "\${args[@]}"
+G50OLD
+  chmod +x "$G50_OLD/curl"
+  G50_D=$(g50_proj f2)
+  G50_T0=$(date +%s)
+  PATH="$G50_OLD:$PATH" g50_claim "$G50_D" "$(g50_task "[$(g50_att 834 drip.bin)]")"
+  G50_T1=$(date +%s)
+  assert_eq "50f: without --max-filesize an over-long streamed body still fails size_mismatch" '["failed","size_mismatch"]' \
+    "$(g50_m "$G50_D" '.attachments[0] | [.status, .reason]')"
+  assert_eq "50f: and is cut off at once rather than read for the ~10 s the server streams" "yes" \
+    "$([ $((G50_T1 - G50_T0)) -lt 6 ] && echo yes || echo no)"
+
+  # 50g: unsafe filenames are sanitised inside the task directory.
+  g50_body 840 'x'
+  G50_LONG=$(printf 'a%.0s' $(seq 1 120))
+  G50_NAMES=$(jq -nc --argjson e "$(g50_att 840 x)" --arg long "$G50_LONG" \
+    '[("../../etc/passwd", "..", ".env", "C:\\temp\\.env", "café résumé.pdf", "smile 😀.png",
+       "tab\there", ($long + ".tar.gz"), "same.txt", "same.txt") as $fn
+      | $e | .filename = $fn] | to_entries | map(.value.id = (840 + .key)
+      | .value.download_url = ("/api/tasks/77/attachments/" + ((840 + .key) | tostring)) | .value)')
+  G50_D=$(g50_proj g2)
+  for g50_i in 1 2 3 4 5 6 7 8 9; do cp "$G50_SRV/api/tasks/77/attachments/840" "$G50_SRV/api/tasks/77/attachments/$((840 + g50_i))"; done
+  g50_claim "$G50_D" "$(g50_task "$G50_NAMES")"
+  assert_eq "50g: each name is sanitised per code point, dots stripped, length capped" \
+    "[\"840-passwd\",\"841-attachment\",\"842-env\",\"843-env\",\"844-caf__r_sum_.pdf\",\"845-smile__.png\",\"846-tab_here\",\"847-$(printf 'a%.0s' $(seq 1 97)).gz\",\"848-same.txt\",\"849-same.txt\"]" \
+    "$(g50_m "$G50_D" '[.attachments[].local_file]')"
+  assert_eq "50g: no name left the task directory" "0" \
+    "$(find "$G50_D" -name passwd | wc -l | tr -d ' ')"
+  assert_eq "50g: two attachments with the same filename are two files" "yes" \
+    "$([ -f "$G50_D/.stride/attachments/W5001/848-same.txt" ] && [ -f "$G50_D/.stride/attachments/W5001/849-same.txt" ] && echo yes || echo no)"
+  assert_eq "50g: the original filename is kept as data" '"../../etc/passwd"' \
+    "$(g50_m "$G50_D" '.attachments[0].filename')"
+
+  # 50h: an unsafe id or download_url is refused with no request made.
+  G50_UNSAFE=$(jq -nc --argjson e "$(g50_att 840 x)" '[
+      ($e | .id = "../x"), ($e | .id = "a b"), ($e | .id = 1.5),
+      ($e | .download_url = "https://evil.example/x"), ($e | .download_url = "//evil.example/api/x"),
+      ($e | .download_url = "/api/../x"), ($e | .download_url = "/api/tasks/77/attachments/840?x=y"),
+      ($e | .download_url = "/api/tasks/78/attachments/840"), ($e | .download_url = "/api/tasks/77/attachments/%38%34%30")]')
+  G50_D=$(g50_proj h)
+  g50_claim "$G50_D" "$(g50_task "$G50_UNSAFE")"
+  assert_eq "50h: unsafe ids are skipped unsafe_id, unsafe URLs unsafe_url" \
+    '["unsafe_id","unsafe_id","unsafe_id","unsafe_url","unsafe_url","unsafe_url","unsafe_url","unsafe_url","unsafe_url"]' \
+    "$(g50_m "$G50_D" '[.attachments[].reason]')"
+  assert_eq "50h: an unsafe URL is never recorded as a download_path" "[null]" \
+    "$(g50_m "$G50_D" '[.attachments[3:][].download_path] | unique')"
+  assert_eq "50h: no request was made for any of them" "0" "$(wc -l < "$G50_LOG" | tr -d ' ')"
+  # A number id must be plain digits (1e3 renders differently in the two
+  # halves), and an id longer than 64 characters is refused too.
+  G50_D=$(g50_proj h2)
+  g50_claim "$G50_D" '{"data":{"id":77,"identifier":"W5001","attachments":[{"id":1e3,"filename":"n","byte_size":3,"download_url":"/api/tasks/77/attachments/1000"},{"id":"'"$(printf 'a%.0s' $(seq 1 65))"'","filename":"n","byte_size":3,"download_url":"/api/tasks/77/attachments/840"},{"id":-5,"filename":"n","byte_size":3,"download_url":"/api/tasks/77/attachments/840"}]}}'
+  assert_eq "50h: an exponent id, a 65-character id and a negative id are skipped unsafe_id" \
+    '["unsafe_id","unsafe_id","unsafe_id"]' "$(g50_m "$G50_D" '[.attachments[].reason]')"
+  assert_eq "50h: and none of them is requested" "0" "$(wc -l < "$G50_LOG" | tr -d ' ')"
+
+  # 50i: one server error does not stop the others, and a redirect is not
+  # followed -- so the token never reaches the redirect target.
+  g50_body 850 'ok one'
+  g50_body 851 'never served'
+  printf '500\n' > "$G50_SRV/api/tasks/77/attachments/851.status"
+  g50_body 852 'moved'
+  printf '302 %s/elsewhere/852\n' "$G50_API" > "$G50_SRV/api/tasks/77/attachments/852.status"
+  g50_body 853 'ok two'
+  G50_D=$(g50_proj i)
+  g50_claim "$G50_D" "$(g50_task "[$(g50_att 850 a),$(g50_att 851 b),$(g50_att 852 c),$(g50_att 853 d)]")"
+  assert_eq "50i: a 500 records http_500 and a 302 http_302, the rest still download" \
+    '["downloaded","http_500","http_302","downloaded"]' \
+    "$(g50_m "$G50_D" '[.attachments[] | .reason // .status]')"
+  assert_eq "50i: the hook exit code is unchanged" "0" "$G50_RC"
+  assert_eq "50i: the redirect target is never requested" "no" "$(g50_requested /elsewhere/852)"
+
+  # 50j: a transport failure (nothing listening) is recorded, never fatal.
+  G50_D=$(g50_proj j)
+  printf -- '- **API URL:** `http://127.0.0.1:9`\n- **API Token:** `%s`\n' "$G50_TOKEN" > "$G50_D/.stride_auth.md"
+  g50_claim "$G50_D" "$(g50_task "[$(g50_att 850 a)]")"
+  assert_eq "50j: a refused connection is recorded as transport" '["failed","transport"]' \
+    "$(g50_m "$G50_D" '.attachments[0] | [.status, .reason]')"
+  assert_eq "50j: and the hook still exits 0" "0" "$G50_RC"
+  # A plain-http API URL that is not spelled as loopback is refused. 127.1
+  # reaches the stand-in server, so a request would be visible in its log.
+  printf -- '- **API URL:** `http://127.1:%s`\n- **API Token:** `%s`\n' "$G50_PORT" "$G50_TOKEN" > "$G50_D/.stride_auth.md"
+  g50_claim "$G50_D" "$(g50_task "[$(g50_att 850 a)]")"
+  assert_eq "50j: a non-loopback http API URL is never fetched" '["failed","transport"] 0' \
+    "$(g50_m "$G50_D" '.attachments[0] | [.status, .reason]') $(wc -l < "$G50_LOG" | tr -d ' ')"
+  # No token, or no API URL at all: recorded as transport and nothing is
+  # requested -- the stand-in server sees no request for either.
+  printf -- '- **API URL:** `%s`\n' "$G50_API" > "$G50_D/.stride_auth.md"
+  g50_claim "$G50_D" "$(g50_task "[$(g50_att 850 a)]")"
+  assert_eq "50j: no API token fetches nothing and records transport" '["failed","transport"] 0' \
+    "$(g50_m "$G50_D" '.attachments[0] | [.status, .reason]') $(wc -l < "$G50_LOG" | tr -d ' ')"
+  printf -- '- **API Token:** `%s`\n' "$G50_TOKEN" > "$G50_D/.stride_auth.md"
+  g50_claim "$G50_D" "$(g50_task "[$(g50_att 850 a)]")"
+  assert_eq "50j: no API URL fetches nothing and records transport" '["failed","transport"] 0' \
+    "$(g50_m "$G50_D" '.attachments[0] | [.status, .reason]') $(wc -l < "$G50_LOG" | tr -d ' ')"
+  # A URL in the intercepted command is never a fallback for the auth file.
+  assert_eq "50j: the claim command's own URL is not used instead" "no" \
+    "$(g50_requested /api/tasks/77/attachments/850)"
+
+  # 50k: only a claim whose OWN response proved the identity downloads. A
+  # truncated stdout downloads nothing, even with an earlier response file on
+  # disk (this port never reads one).
+  G50_D=$(g50_proj k)
+  g50_task "$G50_THREE" > "$G50_D/.stride/.last-api-response.json"
+  g50_claim "$G50_D" '{"data":{"id":77,"identifier":"W5001","attach'
+  assert_eq "50k: a claim that does not prove its identity downloads nothing" "absent" \
+    "$([ -e "$G50_D/.stride/attachments" ] && echo present || echo absent)"
+  assert_eq "50k: and requests nothing" "0" "$(wc -l < "$G50_LOG" | tr -d ' ')"
+  # A command that names another identifier than the response carries is not
+  # proven (claim_identity_proven), so nothing is fetched.
+  G50_D=$(g50_proj k2)
+  G50_CMD="curl -sS -X POST $G50_API/api/tasks/claim -d '{\"identifier\":\"W9999\"}'" \
+    g50_claim "$G50_D" "$(g50_task "$G50_THREE")"
+  assert_eq "50k: a response for another identifier than the one asked for downloads nothing" "absent 0" \
+    "$([ -e "$G50_D/.stride/attachments" ] && echo present || echo absent) $(wc -l < "$G50_LOG" | tr -d ' ')"
+  # The persisted-output path (a large response saved to a file by the host)
+  # downloads only when the command names the identifier it asked for, the
+  # same gate the task file sits behind.
+  g50_task "$G50_THREE" > "$G50_DIR/persisted.json"
+  G50_D=$(g50_proj k3)
+  G50_CMD="curl -sS -X POST $G50_API/api/tasks/claim -d '{\"identifier\":\"W5001\"}'" \
+    g50_claim "$G50_D" "Output too large. Full output saved to: $G50_DIR/persisted.json"
+  assert_eq "50k: a persisted-output claim naming its identifier downloads" \
+    '["downloaded","downloaded","downloaded"]' "$(g50_m "$G50_D" '[.attachments[].status]')"
+  G50_D=$(g50_proj k4)
+  g50_claim "$G50_D" "Output too large. Full output saved to: $G50_DIR/persisted.json"
+  assert_eq "50k: a persisted-output claim naming no identifier downloads nothing" "absent 0" \
+    "$([ -e "$G50_D/.stride/attachments" ] && echo present || echo absent) $(wc -l < "$G50_LOG" | tr -d ' ')"
+
+  # 50l: symlinks are refused and nothing is written through them.
+  G50_D=$(g50_proj l); mkdir -p "$G50_DIR/elsewhere-l"
+  ln -s "$G50_DIR/elsewhere-l" "$G50_D/.stride/attachments"
+  g50_claim "$G50_D" "$(g50_task "$G50_THREE")"
+  assert_eq "50l: a symlinked .stride/attachments is refused" "0" \
+    "$(find "$G50_DIR/elsewhere-l" -mindepth 1 | wc -l | tr -d ' ')"
+  assert_contains "50l: and says so on stderr" "symlink" "$G50_ERR"
+  G50_D=$(g50_proj l2); mkdir -p "$G50_DIR/elsewhere-l2" "$G50_D/.stride/attachments"
+  ln -s "$G50_DIR/elsewhere-l2" "$G50_D/.stride/attachments/W5001"
+  g50_claim "$G50_D" "$(g50_task "$G50_THREE")"
+  assert_eq "50l: a symlinked task directory is refused" "0 absent" \
+    "$(find "$G50_DIR/elsewhere-l2" -mindepth 1 | wc -l | tr -d ' ') $([ -e "$G50_D/.stride/attachments/W5001/manifest.json" ] && echo present || echo absent)"
+  assert_eq "50l: and the link itself is left alone" "yes" \
+    "$([ -L "$G50_D/.stride/attachments/W5001" ] && echo yes || echo no)"
+  G50_D=$(g50_proj l3); mkdir -p "$G50_DIR/elsewhere-l3"
+  mv "$G50_D/.stride" "$G50_DIR/elsewhere-l3/stride"; ln -s "$G50_DIR/elsewhere-l3/stride" "$G50_D/.stride"
+  g50_claim "$G50_D" "$(g50_task "$G50_THREE")"
+  assert_eq "50l: a symlinked .stride is refused" "absent" \
+    "$([ -e "$G50_DIR/elsewhere-l3/stride/attachments" ] && echo present || echo absent)"
+
+  # 50m: a re-claim replaces the directory; the manifest is the last write.
+  G50_D=$(g50_proj m)
+  mkdir -p "$G50_D/.stride/attachments/W5001"
+  printf 'stale\n' > "$G50_D/.stride/attachments/W5001/999-stale.txt"
+  printf '{"manifest_version":1,"stale":true}\n' > "$G50_D/.stride/attachments/W5001/manifest.json"
+  g50_claim "$G50_D" "$(g50_task "[$(g50_att 812 screenshot.png)]")"
+  assert_eq "50m: a re-claim replaces the previous directory" "812-screenshot.png manifest.json" \
+    "$(ls "$G50_D/.stride/attachments/W5001" | tr '\n' ' ' | sed 's/ $//')"
+  assert_eq "50m: and its manifest describes this claim" "null" "$(g50_m "$G50_D" '.stale')"
+  # Last write: the manifest's mtime is not older than any saved file.
+  assert_eq "50m: the manifest is written after every file" "0" \
+    "$(find "$G50_D/.stride/attachments/W5001" -type f -newer "$G50_D/.stride/attachments/W5001/manifest.json" | wc -l | tr -d ' ')"
+  g50_claim "$G50_D" '{"data":{"id":77,"identifier":"W5001","attachments":[]}}'
+  assert_eq "50m: a re-claim with no attachments removes the stale directory" "absent" \
+    "$([ -e "$G50_D/.stride/attachments/W5001" ] && echo present || echo absent)"
+
+  # 50n: the token stays in the request header: never in argv, a file, stdout
+  # or stderr, and every request carries a curl-like User-Agent.
+  G50_D=$(g50_proj n)
+  mkdir -p "$G50_D/.stride/attachments/W5001"
+  printf '{"manifest_version":1,"stale":true}\n' > "$G50_D/.stride/attachments/W5001/manifest.json"
+  G50_WRAP="$G50_DIR/wrap"; mkdir -p "$G50_WRAP"
+  G50_REAL_CURL=$(command -v curl)
+  # The wrapper also records whether a manifest exists while each request
+  # runs: the old one must already be gone and the new one not yet written.
+  cat > "$G50_WRAP/curl" <<G50WRAP
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$G50_DIR/argv.log"
+case "\$*" in *attachments/*)
+  if [ -e "$G50_D/.stride/attachments/W5001/manifest.json" ]; then echo present; else echo absent; fi >> "$G50_DIR/manifest-during.log" ;;
+esac
+exec "$G50_REAL_CURL" "\$@"
+G50WRAP
+  chmod +x "$G50_WRAP/curl"; : > "$G50_DIR/argv.log"; : > "$G50_DIR/manifest-during.log"
+  PATH="$G50_WRAP:$PATH" g50_claim "$G50_D" "$(g50_task "$G50_THREE")"
+  assert_eq "50n: the downloads went through the wrapped curl" "yes" \
+    "$(grep -q 'attachments/812' "$G50_DIR/argv.log" && echo yes || echo no)"
+  assert_eq "50n: no manifest exists while any request runs" "absent absent absent" \
+    "$(tr '\n' ' ' < "$G50_DIR/manifest-during.log" | sed 's/ $//')"
+  assert_eq "50n: the token is in no curl argv" "no" \
+    "$(grep -qF "$G50_TOKEN" "$G50_DIR/argv.log" && echo yes || echo no)"
+  assert_eq "50n: nor in any file the hook wrote under .stride/" "no" \
+    "$(grep -rqF "$G50_TOKEN" "$G50_D/.stride" && echo yes || echo no)"
+  assert_eq "50n: nor on stdout or stderr" "no" \
+    "$(printf '%s%s' "$G50_OUT" "$G50_ERR" | grep -qF "$G50_TOKEN" && echo yes || echo no)"
+  assert_eq "50n: but the API did receive it as the Authorization header" "3" \
+    "$(grep -cF "\"auth\": \"Bearer $G50_TOKEN\"" "$G50_LOG")"
+  assert_eq "50n: with a curl-like User-Agent on every request" "3" \
+    "$(grep -c '"ua": "curl/' "$G50_LOG")"
+  assert_eq "50n: the manifest holds no absolute URL" "no" \
+    "$(grep -q 'http' "$G50_D/.stride/attachments/W5001/manifest.json" && echo yes || echo no)"
+
+  # 50o: only the claim downloads; a completion with an attachments-shaped
+  # body never does.
+  G50_D=$(g50_proj o)
+  jq -nc --arg c "curl -sS -X PATCH $G50_API/api/tasks/77/complete -d @p.json | tee r.json" \
+    --arg r "$(g50_task "$G50_THREE")" '{session_id:"s",tool_input:{command:$c},tool_response:{stdout:$r}}' \
+    | GEMINI_PROJECT_DIR="$G50_D" bash "$HOOK_SCRIPT" post > /dev/null 2>&1
+  assert_eq "50o: a completion does not download" "absent" \
+    "$([ -e "$G50_D/.stride/attachments" ] && echo present || echo absent)"
+
+  # 50r: a .gitignore that is a symlink is replaced, never written through;
+  # one that is a directory stops the download.
+  G50_D=$(g50_proj r); mkdir -p "$G50_D/.stride/attachments"
+  printf 'outside\n' > "$G50_DIR/outside-gitignore"
+  ln -s "$G50_DIR/outside-gitignore" "$G50_D/.stride/attachments/.gitignore"
+  g50_claim "$G50_D" "$(g50_task "[$(g50_att 812 screenshot.png)]")"
+  assert_eq "50r: a symlinked .gitignore is replaced by a regular file holding *" "file * outside" \
+    "$([ -f "$G50_D/.stride/attachments/.gitignore" ] && [ ! -L "$G50_D/.stride/attachments/.gitignore" ] && echo file || echo other) $(cat "$G50_D/.stride/attachments/.gitignore") $(cat "$G50_DIR/outside-gitignore")"
+  # A link to a directory is the case a plain rename gets wrong: mv would
+  # move the staged file INTO the directory and leave the link in place.
+  G50_D=$(g50_proj r3); mkdir -p "$G50_D/.stride/attachments" "$G50_DIR/outside-gidir"
+  ln -s "$G50_DIR/outside-gidir" "$G50_D/.stride/attachments/.gitignore"
+  g50_claim "$G50_D" "$(g50_task "[$(g50_att 812 screenshot.png)]")"
+  assert_eq "50r: a .gitignore linked to a directory is replaced, nothing lands inside it" "file 0" \
+    "$([ -f "$G50_D/.stride/attachments/.gitignore" ] && [ ! -L "$G50_D/.stride/attachments/.gitignore" ] && echo file || echo other) $(find "$G50_DIR/outside-gidir" -mindepth 1 | wc -l | tr -d ' ')"
+  G50_D=$(g50_proj r2); mkdir -p "$G50_D/.stride/attachments/.gitignore"
+  g50_claim "$G50_D" "$(g50_task "[$(g50_att 812 screenshot.png)]")"
+  assert_eq "50r: a .gitignore that is a directory downloads nothing" "absent" \
+    "$([ -e "$G50_D/.stride/attachments/W5001" ] && echo present || echo absent)"
+  assert_contains "50r: and says so on stderr" ".gitignore is not a regular file" "$G50_ERR"
+
+  # 50q: the budget is a wall clock across the whole download: a request that
+  # stalls past it is cut off and recorded time_budget, and the entries after
+  # it are skipped time_budget without a request.
+  g50_body 870 'slow body'
+  printf '5\n' > "$G50_SRV/api/tasks/77/attachments/870.sleep"
+  g50_body 871 'never reached'
+  G50_D=$(g50_proj q)
+  G50_T0=$(date +%s)
+  STRIDE_ATTACHMENT_BUDGET_SECONDS=2 g50_claim "$G50_D" "$(g50_task "[$(g50_att 870 slow),$(g50_att 871 next)]")"
+  G50_T1=$(date +%s)
+  assert_eq "50q: a stalled request fails time_budget and the next is skipped time_budget" \
+    '[["failed","time_budget"],["skipped","time_budget"]]' "$(g50_m "$G50_D" '[.attachments[] | [.status, .reason]]')"
+  assert_eq "50q: the download stopped near the 2 s budget, not at the 5 s stall" "yes" \
+    "$([ $((G50_T1 - G50_T0)) -lt 5 ] && echo yes || echo no)"
+  assert_eq "50q: the entry after the deadline was never requested" "no" "$(g50_requested /api/tasks/77/attachments/871)"
+
+  # 50s: (W2524 exploratory findings) an id an accepted entry already took --
+  # the same id, 7 against "7", or one differing only in letter case -- is
+  # refused unsafe_id, so two entries never share one local file; and a
+  # byte_size not written as plain digits (7.0, 7.00000000000000001) is
+  # too_large in both halves, where a double would round it to 7.
+  g50_body 860 'dup-one'
+  g50_body 861 'dup-two'
+  G50_DUP=$(jq -nc --argjson a "$(g50_att 860 a.txt)" --argjson b "$(g50_att 861 a.txt)" '[
+      $a, ($b | .id = 860),
+      ($a | .id = "7" | .download_url = "/api/tasks/77/attachments/860"),
+      ($b | .id = 7 | .download_url = "/api/tasks/77/attachments/861"),
+      ($a | .id = "ab" | .download_url = "/api/tasks/77/attachments/860"),
+      ($b | .id = "AB" | .download_url = "/api/tasks/77/attachments/861")]')
+  G50_D=$(g50_proj s)
+  g50_claim "$G50_D" "$(g50_task "$G50_DUP")"
+  assert_eq "50s: a repeated, 7-vs-\"7\" or case-only id is skipped unsafe_id" \
+    '[[null,"860-a.txt"],["unsafe_id",null],[null,"7-a.txt"],["unsafe_id",null],[null,"ab-a.txt"],["unsafe_id",null]]' \
+    "$(g50_m "$G50_D" '[.attachments[] | [.reason, .local_file]]')"
+  assert_eq "50s: and every downloaded entry's sha256 matches the file it names" "3" \
+    "$(cd "$G50_D/.stride/attachments/W5001" && jq -r '.attachments[] | select(.status == "downloaded") | "\(.sha256)  \(.local_file)"' manifest.json | shasum -a 256 -c - 2>/dev/null | grep -c ': OK$')"
+  G50_FRAC=$(g50_att 860 f.txt | sed 's/"byte_size":7,/"byte_size":7.0,/')
+  G50_FRAC2=$(g50_att 861 g.txt | sed 's/"byte_size":7,/"byte_size":7.00000000000000001,/')
+  G50_D=$(g50_proj s2)
+  g50_claim "$G50_D" "$(g50_task "[$G50_FRAC,$G50_FRAC2]")"
+  assert_eq "50s: a byte_size not written as plain digits is skipped too_large" '["too_large","too_large"]' \
+    "$(g50_m "$G50_D" '[.attachments[].reason]')"
+
+  # 50t: (W2524 exploratory finding) a staging file an interrupted earlier run
+  # left in .stride/attachments/ -- either half's name -- is swept, and a
+  # missing .gitignore is created in place, so no staging file is ever left
+  # where git add -A would commit it. A link that looks like one is left alone.
+  G50_D=$(g50_proj t)
+  mkdir -p "$G50_D/.stride/attachments"
+  printf '*\n' > "$G50_D/.stride/attachments/.gitignore.Ab12Cd"
+  printf '*\n' > "$G50_D/.stride/attachments/.stage.j3v2oj3x.c0l"
+  ln -s "$G50_DIR/nowhere" "$G50_D/.stride/attachments/.gitignore.Zz99Yy"
+  g50_claim "$G50_D" "$(g50_task "[$(g50_att 812 screenshot.png)]")"
+  assert_eq "50t: both halves' leftover staging files are swept, a link is not" ".gitignore .gitignore.Zz99Yy W5001" \
+    "$(ls -A "$G50_D/.stride/attachments" | tr '\n' ' ' | sed 's/ $//')"
+  assert_eq "50t: the .gitignore still holds exactly *" "*" "$(cat "$G50_D/.stride/attachments/.gitignore")"
+  assert_eq "50t: and the download still happened" '["downloaded"]' "$(g50_m "$G50_D" '[.attachments[].status]')"
+
+  # 50u: (W2524 exploratory finding) the PowerShell half reads stdin as UTF-8
+  # whatever the console code page, so a non-ASCII filename gets the bash
+  # half's local name and a byte-identical manifest under a Latin-1 locale.
+  if command -v pwsh > /dev/null 2>&1; then
+    G50_DB=$(g50_proj u-bash); G50_DP=$(g50_proj u-ps)
+    G50_U8="[$(g50_att 812 'café résumé.pdf')]"
+    g50_claim "$G50_DB" "$(g50_task "$G50_U8")"
+    LC_ALL=en_US.ISO8859-1 g50_claim "$G50_DP" "$(g50_task "$G50_U8")" "$SCRIPT_DIR/stride-hook.ps1"
+    assert_eq "50u: under a Latin-1 locale the PowerShell half names the file per code point" '"812-caf__r_sum_.pdf"' \
+      "$(g50_m "$G50_DP" '.attachments[0].local_file')"
+    assert_eq "50u: and writes the same manifest bytes as the bash half" "same" \
+      "$(cmp -s "$G50_DB/.stride/attachments/W5001/manifest.json" "$G50_DP/.stride/attachments/W5001/manifest.json" && echo same || echo differ)"
+  else
+    echo "  SKIP: 50u: pwsh not installed"
+  fi
+
+  # 50p: the two halves write byte-identical manifests for the same claim,
+  # with filenames that carry every escaping hazard a serialiser varies on.
+  if command -v pwsh > /dev/null 2>&1; then
+    G50_ESC=$(jq -nc --argjson e "$(g50_att 840 x)" '[
+        ($e | .filename = "quote\" back\\slash <tag> & apos'"'"' café 😀 \u0001\u007f\u2028.txt"),
+        ($e | .id = 841 | .download_url = "/api/tasks/77/attachments/841" | .filename = "dl.bin"),
+        ($e | .id = "../x"), ($e | .byte_size = 26214401), "not an object",
+        ($e | .id = 851 | .download_url = "/api/tasks/77/attachments/851"),
+        ($e | .id = "ab" | .download_url = "/api/tasks/77/attachments/840"),
+        ($e | .id = "AB" | .download_url = "/api/tasks/77/attachments/841")]')
+    G50_DB=$(g50_proj p-bash); G50_DP=$(g50_proj p-ps)
+    g50_claim "$G50_DB" "$(g50_task "$G50_ESC")"
+    g50_claim "$G50_DP" "$(g50_task "$G50_ESC")" "$SCRIPT_DIR/stride-hook.ps1"
+    assert_eq "50p: the PowerShell half exits 0" "0" "$G50_RC"
+    assert_eq "50p: the PowerShell half writes the same manifest bytes as the bash half" "same" \
+      "$(cmp -s "$G50_DB/.stride/attachments/W5001/manifest.json" "$G50_DP/.stride/attachments/W5001/manifest.json" && echo same || echo differ)"
+    assert_eq "50p: the manifest exercised downloaded, skipped and failed entries" \
+      '["downloaded","downloaded","skipped","skipped","skipped","failed","downloaded","skipped"]' \
+      "$(g50_m "$G50_DP" '[.attachments[].status]')"
+    assert_eq "50p: the PowerShell manifest has no byte-order mark" "no-bom" \
+      "$(head -c 3 "$G50_DP/.stride/attachments/W5001/manifest.json" | od -An -tx1 | tr -d ' \n' | grep -q '^efbbbf' && echo bom || echo no-bom)"
+    assert_eq "50p: and the same .gitignore bytes" "same" \
+      "$(cmp -s "$G50_DB/.stride/attachments/.gitignore" "$G50_DP/.stride/attachments/.gitignore" && echo same || echo differ)"
+    assert_contains "50p: and the same stderr summary" \
+      "stride: attachments W5001: 3 downloaded, 4 skipped, 1 failed" "$G50_ERR"
+  else
+    echo "  SKIP: 50p: pwsh not installed"
+  fi
+
+  kill "$G50_SRV_PID" 2>/dev/null
+  wait "$G50_SRV_PID" 2>/dev/null
+fi
+
+# ============================================================
+# Test Group 51: the curl-guard exemption for an attachment re-fetch (W2524)
+# ============================================================
+# The ONE -o the guard allows: a GET of /api/tasks/<id>/attachments/<id>
+# whose target is an absolute path under <project>/.stride/attachments/. Every
+# other -o, redirect and pipe shape stays refused, Group 23 included. A port of
+# stride's Group 76 (W2522).
+echo ""
+echo "=== Test Group 51: attachment re-fetch guard exemption (W2524) ==="
+
+G51_PROJ="$TMPDIR_TEST/w2524-guard"
+mkdir -p "$G51_PROJ/.stride/attachments/W5001"
+printf '*\n' > "$G51_PROJ/.stride/attachments/.gitignore"
+printf '## after_doing\n```bash\n```\n' > "$G51_PROJ/.stride.md"
+G51_ROOT=$(cd "$G51_PROJ" && pwd)
+G51_T="$G51_ROOT/.stride/attachments/W5001/812-shot.png"
+G51_U="https://www.stridelikeaboss.com/api/tasks/77/attachments/812"
+g51_run() { # $1 = command -> sets G51_RC
+  jq -nc --arg c "$1" '{tool_input:{command:$c}}' \
+    | GEMINI_PROJECT_DIR="$G51_PROJ" bash "$HOOK_SCRIPT" pre > /dev/null 2>&1
+  G51_RC=$?
+}
+if command -v jq > /dev/null 2>&1; then
+  g51_run "curl -sS -H \"Authorization: Bearer \$T\" -o \"$G51_T\" \"$G51_U\""
+  assert_exit "51a: a GET of an attachments path with -o under .stride/attachments/ is allowed" 0 "$G51_RC"
+  g51_run "curl -sSo $G51_T \"\$STRIDE_API_URL/api/tasks/77/attachments/812\""
+  assert_exit "51a: a clustered -o and a quoted \$VAR base are allowed" 0 "$G51_RC"
+  g51_run "curl -sSo $G51_T \$STRIDE_API_URL/api/tasks/77/attachments/812"
+  assert_exit "51b: an unquoted \$VAR base is refused (the shell could split it)" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_T '' $G51_U"
+  assert_exit "51b: an empty word is refused (curl would read it as a second URL)" 2 "$G51_RC"
+  g51_run "curl -sS -A '' -o $G51_T $G51_U"
+  assert_exit "51b: an empty option value is refused too" 2 "$G51_RC"
+  # A quoted "$@", "${a[@]}" or "$*" can expand to zero or several words,
+  # which would re-pair the words after it; only a plain $NAME is allowed.
+  g51_run "curl -sS -A \"\$@\" -o $G51_T $G51_U"
+  assert_exit "51b: a quoted \"\$@\" is refused (it can expand to zero words)" 2 "$G51_RC"
+  g51_run "curl -sS -A \"\${a[@]}\" -o $G51_T $G51_U"
+  assert_exit "51b: a quoted \"\${a[@]}\" is refused" 2 "$G51_RC"
+  g51_run "curl -sS -A \"\$*\" -o $G51_T $G51_U"
+  assert_exit "51b: a quoted \"\$*\" is refused" 2 "$G51_RC"
+  g51_run "curl -sS -A \"\$UA\" -o $G51_T $G51_U"
+  assert_exit "51a: a quoted plain \$NAME option value is allowed" 0 "$G51_RC"
+  g51_run "curl --output=$G51_T -X GET $G51_U"
+  assert_exit "51a: --output=VALUE with an explicit -X GET is allowed" 0 "$G51_RC"
+
+  g51_run "curl -sS -o /tmp/812.png $G51_U"
+  assert_exit "51b: -o outside .stride/attachments/ is still refused" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_ROOT/.stride/812.png $G51_U"
+  assert_exit "51b: -o elsewhere under .stride/ is still refused" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_ROOT/.stride/attachments/.gitignore $G51_U"
+  assert_exit "51b: -o onto the attachments .gitignore is refused" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_ROOT/.stride/attachments/W5001/manifest.json $G51_U"
+  assert_exit "51b: -o onto a manifest is refused" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_ROOT/.stride/attachments/W5001/../../x $G51_U"
+  assert_exit "51b: a .. segment in the target is refused" 2 "$G51_RC"
+  g51_run "curl -sS -o \"\$GEMINI_PROJECT_DIR/.stride/attachments/W5001/812-shot.png\" $G51_U"
+  assert_exit "51b: a \$VAR-prefixed target is refused (where it lands is unknowable)" 2 "$G51_RC"
+  g51_run "curl -sS -X POST -o $G51_T $G51_U"
+  assert_exit "51b: a non-GET with -o is refused" 2 "$G51_RC"
+  g51_run "curl -sS -d x=1 -o $G51_T $G51_U"
+  assert_exit "51b: a data flag with -o is refused" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_T -o /tmp/y $G51_U"
+  assert_exit "51b: a second -o is refused" 2 "$G51_RC"
+  g51_run "curl -sS -O $G51_U"
+  assert_exit "51b: -O on an attachments path is refused" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_T https://www.stridelikeaboss.com/api/tasks/77/complete"
+  assert_exit "51b: -o under .stride/attachments/ on a non-attachments path is refused" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_T '$G51_U?x=1'"
+  assert_exit "51b: a query on the attachments path is refused" 2 "$G51_RC"
+  g51_run "curl -sS $G51_U | jq ."
+  assert_exit "51b: a pipe into jq on an attachments path is still refused" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_T $G51_U | jq ."
+  assert_exit "51b: an exempt -o with a jq pipe is refused" 2 "$G51_RC"
+  g51_run "curl -sS $G51_U > $G51_T"
+  assert_exit "51b: a stdout redirect on an attachments path is still refused" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_T $G51_U; curl -sS -o out.json https://www.stridelikeaboss.com/api/tasks/1/complete"
+  assert_exit "51b: an exempt curl cannot carry a second, unsafe one" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_T \"\$(cat u)/api/tasks/77/attachments/812\""
+  assert_exit "51b: a command substitution is never exempt" 2 "$G51_RC"
+  # Every option must be on the allowlist, so one this exemption does not
+  # know means the ordinary rules judge the command.
+  g51_run "curl -sS --location-trusted -o $G51_T $G51_U"
+  assert_exit "51b: --location-trusted is not on the allowlist" 2 "$G51_RC"
+  g51_run "curl -v -o $G51_T $G51_U"
+  assert_exit "51b: -v is not on the allowlist" 2 "$G51_RC"
+  g51_run "curl -sS --proxy=http://127.0.0.1:1 -o $G51_T $G51_U"
+  assert_exit "51b: --proxy is not on the allowlist" 2 "$G51_RC"
+  g51_run "curl -sS -o .stride/attachments/W5001/812-shot.png $G51_U"
+  assert_exit "51b: a relative target is refused" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_T $G51_U https://www.stridelikeaboss.com/x"
+  assert_exit "51b: a second URL is refused" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_T $G51_U | tee x"
+  assert_exit "51b: a pipe into tee is refused" 2 "$G51_RC"
+  g51_run "curl -sS -o $G51_T $G51_U && echo done"
+  assert_exit "51b: a && list is refused" 2 "$G51_RC"
+  # Glob, brace and operator characters inside an option's VALUE, where no
+  # other rule would see them: the shell would split or expand that word.
+  g51_run "curl -sS -H X:* -o $G51_T $G51_U"
+  assert_exit "51b: an unquoted glob in an option value is refused" 2 "$G51_RC"
+  g51_run "curl -sS -A a{b,c} -o $G51_T $G51_U"
+  assert_exit "51b: an unquoted brace expansion is refused" 2 "$G51_RC"
+  # The operator sits inside the option's value, so the curl stage keeps the
+  # attachments URL and its -o. (stride's own case, `-A x|tee -o T U`, moves
+  # the URL into the tee stage, which this port's guard judges out of scope
+  # because no curl stage carries an endpoint: a permit before W2524 as well.)
+  g51_run "curl -sS -o $G51_T $G51_U -A x|cat"
+  assert_exit "51b: an operator inside an option value is refused" 2 "$G51_RC"
+  g51_run "curl -sS -o ~/x/.stride/attachments/W5001/812-shot.png $G51_U"
+  assert_exit "51b: a tilde target is refused" 2 "$G51_RC"
+  g51_run "curl -sS --fail --max-time 30 -A curl/8 -o $G51_T \"\${STRIDE_API_URL}/api/tasks/77/attachments/812\""
+  assert_exit "51a: allowlisted options and a quoted \${VAR} base are allowed" 0 "$G51_RC"
+  mkdir -p "$TMPDIR_TEST/w2524-guard-elsewhere"
+  ln -s "$TMPDIR_TEST/w2524-guard-elsewhere" "$G51_PROJ/.stride/attachments/W5002"
+  g51_run "curl -sS -o $G51_ROOT/.stride/attachments/W5002/812-shot.png $G51_U"
+  assert_exit "51b: a symlinked task directory target is refused" 2 "$G51_RC"
+else
+  echo "  SKIP: 51a-51b: jq not installed"
+fi
+
+# 51f: (W2524 exploratory findings) shapes the exemption admitted that it must
+# not: -w/--write-out (its %output{} directive writes a second file
+# anywhere), an @file header (curl reads headers from that file), manifest.json
+# in another letter case (APFS and NTFS fold it), a target that is itself a
+# symlink, and a tree with no .gitignore yet (the download could be committed).
+if command -v jq > /dev/null 2>&1; then
+  g51_run "curl -sS -w '%output{/tmp/elsewhere.txt}x' -o $G51_T $G51_U"
+  assert_eq "51f: -w with %output{} is refused" "2" "$G51_RC"
+  g51_run "curl -sS --write-out=x -o $G51_T $G51_U"
+  assert_eq "51f: --write-out is refused" "2" "$G51_RC"
+  g51_run "curl -sSw x -o $G51_T $G51_U"
+  assert_eq "51f: a clustered -w is refused" "2" "$G51_RC"
+  g51_run "curl -sS -H @$G51_ROOT/.stride_auth.md -o $G51_T $G51_U"
+  assert_eq "51f: an @file header is refused" "2" "$G51_RC"
+  g51_run "curl -sS --header=@h.txt -o $G51_T $G51_U"
+  assert_eq "51f: an --header=@file is refused" "2" "$G51_RC"
+  g51_run "curl -sSH@h.txt -o $G51_T $G51_U"
+  assert_eq "51f: a clustered -H@file is refused" "2" "$G51_RC"
+  g51_run "curl -sS -o $G51_ROOT/.stride/attachments/W5001/MANIFEST.JSON $G51_U"
+  assert_eq "51f: manifest.json in another case is refused" "2" "$G51_RC"
+  ln -s "$TMPDIR_TEST/w2524-outside" "$G51_ROOT/.stride/attachments/W5001/9-link.txt"
+  g51_run "curl -sS -o $G51_ROOT/.stride/attachments/W5001/9-link.txt $G51_U"
+  assert_eq "51f: a target that is a symlink is refused" "2" "$G51_RC"
+  rm -f "$G51_ROOT/.stride/attachments/W5001/9-link.txt"
+  mv "$G51_ROOT/.stride/attachments/.gitignore" "$G51_ROOT/.stride/attachments/gi.saved"
+  g51_run "curl -sS -o $G51_T $G51_U"
+  assert_eq "51f: no .gitignore yet means no exemption" "2" "$G51_RC"
+  mv "$G51_ROOT/.stride/attachments/gi.saved" "$G51_ROOT/.stride/attachments/.gitignore"
+  g51_run "curl -sS -H \"Authorization: Bearer \$T\" -o $G51_T $G51_U"
+  assert_eq "51f: and the documented re-fetch is still allowed" "0" "$G51_RC"
+fi
+
+# 51c: the exemption runs in its own subshell, so the caller's noglob survives
+# it on every return path -- the guard scans under `set -f` and must keep it.
+G51_NOGLOB=$(
+  # shellcheck disable=SC1090
+  source "$HOOK_SCRIPT" 2>/dev/null
+  set -f
+  gemini_guard_attachment_exempt "curl -sS -X POST -o $G51_T $G51_U"
+  case $- in (*f*) printf 'kept ' ;; (*) printf 'lost ' ;; esac
+  gemini_guard_attachment_exempt "curl -sS -o $G51_T $G51_U"
+  case $- in (*f*) printf 'kept' ;; (*) printf 'lost' ;; esac
+)
+assert_eq "51c: noglob survives a refused and an exempt verdict" "kept kept" "$G51_NOGLOB"
+
+# 51d: the PowerShell half reaches the same verdict on the same shapes.
+if command -v jq > /dev/null 2>&1 && command -v pwsh > /dev/null 2>&1; then
+  g51_ps() { # $1 = command -> prints the PowerShell half's exit code
+    jq -nc --arg c "$1" '{tool_input:{command:$c}}' \
+      | GEMINI_PROJECT_DIR="$G51_PROJ" pwsh -NoProfile -File "$SCRIPT_DIR/stride-hook.ps1" pre > /dev/null 2>&1
+    echo $?
+  }
+  for g51_pair in "0|curl -sS -H \"Authorization: Bearer \$T\" -o \"$G51_T\" \"$G51_U\"" \
+                  "0|curl --output=$G51_T -X GET $G51_U" \
+                  "2|curl -sS -o /tmp/812.png $G51_U" \
+                  "2|curl -sS -X POST -o $G51_T $G51_U" \
+                  "2|curl -sS -A \"\$@\" -o $G51_T $G51_U" \
+                  "2|curl -sS -o $G51_T $G51_U | tee x" \
+                  "2|curl -sS -w '%output{/tmp/x}y' -o $G51_T $G51_U" \
+                  "2|curl -sS -H @h.txt -o $G51_T $G51_U" \
+                  "2|curl -sS -o $G51_ROOT/.stride/attachments/W5001/Manifest.Json $G51_U" \
+                  "2|curl -sS -o '$G51_ROOT/.stride\\attachments\\W5001\\9.txt' $G51_U"; do
+    g51_want="${g51_pair%%|*}"; g51_cmd="${g51_pair#*|}"
+    g51_run "$g51_cmd"
+    assert_eq "51d: bash and pwsh agree ($g51_want): $g51_cmd" "$g51_want $g51_want" "$G51_RC $(g51_ps "$g51_cmd")"
+  done
+else
+  echo "  SKIP: 51d: jq or pwsh not installed"
+fi
+
+# 51e: the README documents the download and the exemption. Each needle occurs
+# once, in the paragraph it names, so losing that paragraph fails the check.
+assert_contains "51e: README documents the attachment download" \
+  "**Task attachments (since W2524).** When a proven claim lists" "$(cat "$SCRIPT_DIR/../README.md")"
+assert_contains "51e: README documents the re-fetch exemption" \
+  "**Attachment re-fetch exemption (since W2524).** The one \`-o\` the guard allows" "$(cat "$SCRIPT_DIR/../README.md")"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

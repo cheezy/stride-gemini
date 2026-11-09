@@ -3835,6 +3835,584 @@ if (-not (Test-Path -LiteralPath $g22Wf) -or -not (Test-Path -LiteralPath $g22Sa
 }
 
 # ============================================================
+# Test Group 23: task attachments downloaded by the claim hook (W2524), PowerShell half
+# ============================================================
+# The twin of the bash suite's Group 50 (download) and Group 51 (guard), and a
+# port of stride's PowerShell Group 48 (W2522). A looping HttpListener on
+# localhost stands in for the API: a plain-http API URL is allowed only for
+# loopback, so nothing leaves the machine. The cross-half byte-identical
+# manifest check runs in the bash suite (50p), which can run both halves; 23q
+# below repeats it from this side when bash, jq and curl are on PATH. Needles
+# stay ASCII: Windows PowerShell 5.1 can misread a BOM-less UTF-8 script, so
+# non-ASCII test text is built from [char] codes.
+Write-Host ""
+Write-Host "=== Test Group 23: task attachments (W2524) ==="
+
+$g23Port = 18985
+$g23Dir = Join-Path $TmpDir 'w2522'
+New-Item -ItemType Directory -Path $g23Dir -Force | Out-Null
+$g23Routes = Join-Path $g23Dir 'routes.json'
+$g23Log = Join-Path $g23Dir 'requests.log'
+$g23Token = 'g23_fake_tok_5d1e'
+$g23Api = "http://localhost:$g23Port"
+$g23ClaimCmd = "curl -sS -X POST $g23Api/api/tasks/claim -d @c.json | tee r.json"
+
+# path -> { status, body (base64), location, sleep (seconds to stall before
+# answering) }. Re-read on every request, so a
+# case can change the routes without restarting the listener.
+function Set-G23Routes {
+    param([hashtable]$Routes)
+    $o = [ordered]@{}
+    foreach ($k in $Routes.Keys) { $o[$k] = $Routes[$k] }
+    [System.IO.File]::WriteAllText($g23Routes, ($o | ConvertTo-Json -Depth 5 -Compress))
+}
+function New-G23Route {
+    param([string]$Body, [int]$Status = 200, [string]$Location = '', [int]$Sleep = 0, [switch]$Chunked, [switch]$Drip)
+    return @{ status = $Status; body = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Body)); location = $Location; sleep = $Sleep; chunked = [bool]($Chunked -or $Drip); drip = [bool]$Drip }
+}
+function Get-G23Sha {
+    param([string]$Body)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Body))
+        return (($h | ForEach-Object { $_.ToString('x2') }) -join '')
+    } finally { $sha.Dispose() }
+}
+function New-G23Att {
+    param([int]$Id, [string]$Filename, [string]$Body)
+    return [ordered]@{
+        id = $Id; filename = $Filename; content_type = 'text/plain'
+        byte_size = [System.Text.Encoding]::UTF8.GetByteCount($Body); sha256 = (Get-G23Sha $Body)
+        comment_id = $null; uploaded_at = '2026-11-08T10:00:00Z'
+        download_url = "/api/tasks/77/attachments/$Id"
+    }
+}
+function New-G23Claim {
+    param($Attachments)
+    $data = [ordered]@{ id = 77; identifier = 'W5001'; title = 'attach' }
+    if ($null -ne $Attachments) { $data['attachments'] = @($Attachments) }
+    return ([ordered]@{ data = $data } | ConvertTo-Json -Depth 8 -Compress)
+}
+function New-G23Project {
+    param([string]$Name)
+    $d = Join-Path $g23Dir "proj-$Name"
+    if (Test-Path $d) { Remove-Item -Recurse -Force $d }
+    New-Item -ItemType Directory -Path (Join-Path $d '.stride') -Force | Out-Null
+    Set-Content -Path (Join-Path $d '.stride.md') -Encoding UTF8 -Value @"
+## before_doing
+
+``````bash
+``````
+"@
+    [System.IO.File]::WriteAllText((Join-Path $d '.stride_auth.md'),
+        ("- **API URL:** ``{0}```n- **API Token:** ``{1}```n" -f $g23Api, $g23Token))
+    return $d
+}
+function Invoke-G23Claim {
+    param([string]$Dir, [string]$Stdout)
+    if (Test-Path $g23Log) { Remove-Item -Force $g23Log }
+    $in = New-G20Input -Command $g23ClaimCmd -Payload $Stdout
+    return (Invoke-HookScript -InputJson $in -Phase 'post' -ProjectDir $Dir)
+}
+function Get-G23Manifest {
+    param([string]$Dir)
+    $p = Join-Path $Dir '.stride/attachments/W5001/manifest.json'
+    if (-not (Test-Path -LiteralPath $p)) { return $null }
+    return ([System.IO.File]::ReadAllText($p) | ConvertFrom-Json)
+}
+function Get-G23Requested {
+    if (-not (Test-Path $g23Log)) { return @() }
+    return @(Get-Content -LiteralPath $g23Log | ForEach-Object { ($_ | ConvertFrom-Json).path })
+}
+
+Set-G23Routes @{}
+$g23Job = Start-Job -ArgumentList $g23Port, $g23Routes, $g23Log -ScriptBlock {
+    param($Port, $Routes, $Log)
+    $l = [System.Net.HttpListener]::new()
+    $l.Prefixes.Add("http://localhost:$Port/")
+    try {
+        $l.Start()
+        while ($l.IsListening) {
+            $ctx = $l.GetContext()
+            $req = $ctx.Request
+            $resp = $ctx.Response
+            $entry = @{ path = $req.RawUrl; auth = $req.Headers['Authorization']; ua = $req.UserAgent } | ConvertTo-Json -Compress
+            Add-Content -LiteralPath $Log -Value $entry
+            $map = [System.IO.File]::ReadAllText($Routes) | ConvertFrom-Json
+            $route = $null
+            if ($map.PSObject.Properties.Name -contains $req.RawUrl) { $route = $map.($req.RawUrl) }
+            if ($null -eq $route) {
+                $resp.StatusCode = 404
+            } else {
+                if ([int]$route.sleep -gt 0) { Start-Sleep -Seconds ([int]$route.sleep) }
+                $resp.StatusCode = [int]$route.status
+                if ($route.location) { $resp.RedirectLocation = $route.location }
+                $bytes = [Convert]::FromBase64String($route.body)
+                if ($route.chunked) { $resp.SendChunked = $true } else { $resp.ContentLength64 = $bytes.Length }
+                $resp.OutputStream.Write($bytes, 0, $bytes.Length)
+                if ($route.drip) {
+                    # ~10 s more of 1 KiB chunks; a client that stopped
+                    # reading closes the socket and the write throws.
+                    $chunk = New-Object byte[] 1024
+                    try {
+                        for ($j = 0; $j -lt 200; $j++) {
+                            $resp.OutputStream.Write($chunk, 0, $chunk.Length)
+                            $resp.OutputStream.Flush()
+                            Start-Sleep -Milliseconds 50
+                        }
+                    } catch { }
+                }
+            }
+            try { $resp.OutputStream.Close() } catch { }
+        }
+    } catch {
+    } finally {
+        if ($l.IsListening) { $l.Stop() }
+    }
+}
+
+try {
+    $null = Wait-ForListener -Port $g23Port
+
+    # 23a: several files download; oversize-by-metadata and bad-sha files are
+    # skipped or removed; the hook exits 0.
+    $g23Bodies = @{ 812 = 'png-ish bytes'; 813 = 'pdf-ish bytes'; 814 = 'plain notes'; 816 = 'wrong hash body' }
+    $g23Map = @{}
+    foreach ($k in $g23Bodies.Keys) { $g23Map["/api/tasks/77/attachments/$k"] = (New-G23Route $g23Bodies[$k]) }
+    Set-G23Routes $g23Map
+    $g23Big = New-G23Att 815 'big.bin' 'x'
+    $g23Big['byte_size'] = 26214401
+    $g23BadSha = New-G23Att 816 'hash.bin' $g23Bodies[816]
+    $g23BadSha['sha256'] = ('0' * 64)
+    $g23Atts = @((New-G23Att 812 'screenshot.png' $g23Bodies[812]), (New-G23Att 813 'spec.pdf' $g23Bodies[813]),
+        (New-G23Att 814 'notes.txt' $g23Bodies[814]), $g23Big, $g23BadSha)
+    $g23d = New-G23Project 'a'
+    $r = Invoke-G23Claim $g23d (New-G23Claim $g23Atts)
+    Assert-Exit "23a: the claim hook still exits 0" 0 $r.ExitCode
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23a: statuses follow the contract" 'downloaded,downloaded,downloaded,skipped,failed' (($m.attachments | ForEach-Object { $_.status }) -join ',')
+    Assert-Eq "23a: reasons follow the contract" ',,,too_large,sha256_mismatch' (($m.attachments | ForEach-Object { [string]$_.reason }) -join ',')
+    Assert-Eq "23a: files are saved as <id>-<name> and the bad one removed" '812-screenshot.png,813-spec.pdf,814-notes.txt,manifest.json' `
+        ((Get-ChildItem -LiteralPath (Join-Path $g23d '.stride/attachments/W5001') -Force | Sort-Object Name | ForEach-Object { $_.Name }) -join ',')
+    Assert-Eq "23a: the saved bytes are the served bytes" $g23Bodies[812] ([System.IO.File]::ReadAllText((Join-Path $g23d '.stride/attachments/W5001/812-screenshot.png')))
+    Assert-Eq "23a: a too_large file is never requested" 'False' ([string]((Get-G23Requested) -contains '/api/tasks/77/attachments/815'))
+    Assert-Eq "23a: .gitignore holds exactly *" "*`n" ([System.IO.File]::ReadAllText((Join-Path $g23d '.stride/attachments/.gitignore')))
+    $g23Raw = [System.IO.File]::ReadAllBytes((Join-Path $g23d '.stride/attachments/W5001/manifest.json'))
+    Assert-Eq "23a: manifest.json has no byte-order mark" 'False' ([string]($g23Raw.Length -ge 3 -and $g23Raw[0] -eq 0xEF -and $g23Raw[1] -eq 0xBB -and $g23Raw[2] -eq 0xBF))
+    Assert-Eq "23a: manifest.json ends in exactly one LF" '10,125' ("{0},{1}" -f $g23Raw[$g23Raw.Length - 1], $g23Raw[$g23Raw.Length - 2])
+    Assert-Contains "23a: one summary line on stderr" 'stride: attachments W5001: 3 downloaded, 1 skipped, 1 failed' $r.Stderr
+
+    # 23b: unsafe filenames, ids and download_url values are refused or
+    # sanitised exactly as the bash half does them.
+    $g23Map = @{}
+    foreach ($i in 840..846) { $g23Map["/api/tasks/77/attachments/$i"] = (New-G23Route 'x') }
+    Set-G23Routes $g23Map
+    $g23Emoji = [char]::ConvertFromUtf32(0x1F600)
+    $g23Names = @('../../etc/passwd', '..', 'C:\temp\.env', ("caf{0} r{0}sum{0}.pdf" -f [char]0x00E9), ("smile {0}.png" -f $g23Emoji), 'same.txt', 'same.txt')
+    $g23Atts = @()
+    for ($i = 0; $i -lt $g23Names.Count; $i++) { $g23Atts += (New-G23Att (840 + $i) $g23Names[$i] 'x') }
+    $g23UnsafeId = New-G23Att 847 'x' 'x'; $g23UnsafeId['id'] = '../x'
+    $g23Off = New-G23Att 848 'x' 'x'; $g23Off['download_url'] = 'https://evil.example/x'
+    $g23Dot = New-G23Att 849 'x' 'x'; $g23Dot['download_url'] = '/api/../x'
+    $g23Other = New-G23Att 850 'x' 'x'; $g23Other['download_url'] = '/api/tasks/78/attachments/850'
+    $g23Atts += @($g23UnsafeId, $g23Off, $g23Dot, $g23Other)
+    $g23d = New-G23Project 'b'
+    $r = Invoke-G23Claim $g23d (New-G23Claim $g23Atts)
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23b: names are sanitised per code point inside the task directory" `
+        '840-passwd,841-attachment,842-env,843-caf__r_sum_.pdf,844-smile__.png,845-same.txt,846-same.txt,,,,' `
+        (($m.attachments | ForEach-Object { [string]$_.local_file }) -join ',')
+    Assert-Eq "23b: an unsafe id is unsafe_id and unsafe URLs unsafe_url" 'unsafe_id,unsafe_url,unsafe_url,unsafe_url' `
+        (($m.attachments[7..10] | ForEach-Object { $_.reason }) -join ',')
+    Assert-Eq "23b: no request was made for a refused entry" '7' ([string]@(Get-G23Requested).Count)
+
+    # 23c: a redirect is not followed, so the Authorization header never
+    # reaches the redirect target; it is recorded as http_302.
+    $g23Map = @{}
+    $g23Map['/api/tasks/77/attachments/860'] = (New-G23Route -Body 'moved' -Status 302 -Location "$g23Api/elsewhere/860")
+    $g23Map['/api/tasks/77/attachments/861'] = (New-G23Route -Body 'boom' -Status 500)
+    $g23Map['/api/tasks/77/attachments/862'] = (New-G23Route 'fine')
+    $g23Map['/elsewhere/860'] = (New-G23Route 'moved')
+    Set-G23Routes $g23Map
+    $g23d = New-G23Project 'c'
+    $r = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 860 'a' 'moved'), (New-G23Att 861 'b' 'boom'), (New-G23Att 862 'c' 'fine')))
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23c: a 302 is http_302 and a 500 http_500, the rest still download" 'http_302,http_500,' `
+        (($m.attachments | ForEach-Object { [string]$_.reason }) -join ',')
+    Assert-Eq "23c: the redirect target is never requested" 'False' ([string]((Get-G23Requested) -contains '/elsewhere/860'))
+    Assert-Exit "23c: the hook exit code is unchanged" 0 $r.ExitCode
+
+    # 23d: the token stays in the header, with a curl-like User-Agent.
+    $g23Lines = @(Get-Content -LiteralPath $g23Log | ForEach-Object { $_ | ConvertFrom-Json })
+    Assert-Eq "23d: every request carried the token as its Authorization header" 'True' `
+        ([string](@($g23Lines | Where-Object { $_.auth -ceq "Bearer $g23Token" }).Count -eq $g23Lines.Count))
+    Assert-Eq "23d: and a curl-like User-Agent" 'True' ([string](@($g23Lines | Where-Object { $_.ua -clike 'curl/*' }).Count -eq $g23Lines.Count))
+    $g23Leak = @(Get-ChildItem -LiteralPath (Join-Path $g23d '.stride') -Recurse -File -Force | Where-Object {
+        [System.IO.File]::ReadAllText($_.FullName).Contains($g23Token) })
+    Assert-Eq "23d: the token is in no file under .stride/" '0' ([string]$g23Leak.Count)
+    Assert-NotContains "23d: nor on stdout" $g23Token $r.Stdout
+    Assert-NotContains "23d: nor on stderr" $g23Token $r.Stderr
+
+    # 23e: no attachments key, null or [] creates no directory.
+    foreach ($g23Case in @('{"data":{"id":77,"identifier":"W5001"}}', '{"data":{"id":77,"identifier":"W5001","attachments":null}}',
+                           '{"data":{"id":77,"identifier":"W5001","attachments":[]}}')) {
+        $g23d = New-G23Project 'e'
+        $null = Invoke-G23Claim $g23d $g23Case
+        Assert-Eq "23e: $g23Case creates no attachments directory" 'False' ([string](Test-Path (Join-Path $g23d '.stride/attachments')))
+    }
+
+    # 23f: a claim whose own response does not prove the identity downloads nothing.
+    $g23d = New-G23Project 'f'
+    [System.IO.File]::WriteAllText((Join-Path $g23d '.stride/.last-api-response.json'), (New-G23Claim @((New-G23Att 862 'c' 'fine'))))
+    $null = Invoke-G23Claim $g23d '{"data":{"id":77,"identifier":"W5001","attach'
+    Assert-Eq "23f: a truncated claim downloads nothing" 'False' ([string](Test-Path (Join-Path $g23d '.stride/attachments')))
+
+    # 23g: a symlinked .stride/attachments is refused and nothing written through it.
+    $g23d = New-G23Project 'g'
+    $g23Else = Join-Path $g23Dir 'elsewhere-g'
+    New-Item -ItemType Directory -Path $g23Else -Force | Out-Null
+    $g23Linked = $true
+    try { New-Item -ItemType SymbolicLink -Path (Join-Path $g23d '.stride/attachments') -Target $g23Else -ErrorAction Stop | Out-Null } catch { $g23Linked = $false }
+    if ($g23Linked) {
+        $r = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine')))
+        Assert-Eq "23g: a symlinked .stride/attachments is refused" '0' ([string]@(Get-ChildItem -LiteralPath $g23Else -Force).Count)
+        Assert-Contains "23g: and says so on stderr" 'symlink' $r.Stderr
+    } else {
+        Write-Host "  SKIP: 23g: this host cannot create a symbolic link"
+    }
+
+    # 23g2: a symlinked task directory and a symlinked .stride are refused
+    # too, and nothing lands through either.
+    if ($g23Linked) {
+        $g23Map = @{}
+        $g23Map['/api/tasks/77/attachments/862'] = (New-G23Route 'fine')
+        Set-G23Routes $g23Map
+        $g23d = New-G23Project 'g2'
+        $g23Else2 = Join-Path $g23Dir 'elsewhere-g2'
+        New-Item -ItemType Directory -Path $g23Else2 -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $g23d '.stride/attachments') -Force | Out-Null
+        New-Item -ItemType SymbolicLink -Path (Join-Path $g23d '.stride/attachments/W5001') -Target $g23Else2 | Out-Null
+        $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine')))
+        Assert-Eq "23g: a symlinked task directory is refused" '0/True' `
+            ("{0}/{1}" -f @(Get-ChildItem -LiteralPath $g23Else2 -Force).Count, [bool]((Get-Item -LiteralPath (Join-Path $g23d '.stride/attachments/W5001') -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint))
+        $g23d = New-G23Project 'g3'
+        $g23Else3 = Join-Path $g23Dir 'elsewhere-g3'
+        if (Test-Path $g23Else3) { Remove-Item -Recurse -Force $g23Else3 }
+        Move-Item -LiteralPath (Join-Path $g23d '.stride') -Destination $g23Else3
+        New-Item -ItemType SymbolicLink -Path (Join-Path $g23d '.stride') -Target $g23Else3 | Out-Null
+        $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine')))
+        Assert-Eq "23g: a symlinked .stride is refused" 'False' ([string](Test-Path (Join-Path $g23Else3 'attachments')))
+    }
+
+    # 23n: the half's own size enforcement: a declared length past byte_size,
+    # a short body, and a chunked body that runs past byte_size are each
+    # removed and recorded size_mismatch.
+    $g23Map = @{}
+    $g23Map['/api/tasks/77/attachments/880'] = (New-G23Route 'longer than three')
+    $g23Map['/api/tasks/77/attachments/881'] = (New-G23Route 'short')
+    $g23Map['/api/tasks/77/attachments/882'] = (New-G23Route 'chunked and longer' -Chunked)
+    Set-G23Routes $g23Map
+    $g23Long = New-G23Att 880 'long' 'abc'
+    $g23Short = New-G23Att 881 'short' 'short'; $g23Short['byte_size'] = 50
+    $g23Chunk = New-G23Att 882 'chunk' 'abc'
+    $g23d = New-G23Project 'n'
+    $null = Invoke-G23Claim $g23d (New-G23Claim @($g23Long, $g23Short, $g23Chunk))
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23n: longer, shorter and chunked over-long bodies fail size_mismatch" `
+        'failed/size_mismatch,failed/size_mismatch,failed/size_mismatch' (($m.attachments | ForEach-Object { "{0}/{1}" -f $_.status, $_.reason }) -join ',')
+    Assert-Eq "23n: and no file is left for any of them" 'manifest.json' `
+        ((Get-ChildItem -LiteralPath (Join-Path $g23d '.stride/attachments/W5001') -Force | ForEach-Object { $_.Name }) -join ',')
+
+    # 23n2: an over-long streamed body is cut off as soon as it passes
+    # byte_size, not read for the ~10 s the server keeps sending.
+    $g23Map = @{}
+    $g23Map['/api/tasks/77/attachments/883'] = (New-G23Route 'drip' -Drip)
+    Set-G23Routes $g23Map
+    $g23d = New-G23Project 'n2'
+    $g23Sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 883 'drip' 'abc')))
+    $g23Sw.Stop()
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23n: an over-long streamed body fails size_mismatch" 'failed/size_mismatch' (($m.attachments | ForEach-Object { "{0}/{1}" -f $_.status, $_.reason }) -join ',')
+    Assert-Eq "23n: and is cut off at once rather than read to the end" 'True' ([string]($g23Sw.Elapsed.TotalSeconds -lt 6))
+
+    # 23p: a .gitignore that is a link is replaced, never written through;
+    # one that is a directory stops the download.
+    $g23Map = @{}
+    $g23Map['/api/tasks/77/attachments/862'] = (New-G23Route 'fine')
+    Set-G23Routes $g23Map
+    if ($g23Linked) {
+        $g23d = New-G23Project 'p'
+        New-Item -ItemType Directory -Path (Join-Path $g23d '.stride/attachments') -Force | Out-Null
+        $g23Out = Join-Path $g23Dir 'outside-gitignore'
+        [System.IO.File]::WriteAllText($g23Out, "outside`n")
+        New-Item -ItemType SymbolicLink -Path (Join-Path $g23d '.stride/attachments/.gitignore') -Target $g23Out | Out-Null
+        $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine')))
+        $g23Gi = Get-Item -LiteralPath (Join-Path $g23d '.stride/attachments/.gitignore') -Force
+        Assert-Eq "23p: a linked .gitignore is replaced by a regular file holding *" "False|*`n|outside`n" `
+            ("{0}|{1}|{2}" -f [bool]($g23Gi.Attributes -band [System.IO.FileAttributes]::ReparsePoint), [System.IO.File]::ReadAllText($g23Gi.FullName), [System.IO.File]::ReadAllText($g23Out))
+        # A link to a directory is the case a plain move gets wrong.
+        $g23d = New-G23Project 'p3'
+        New-Item -ItemType Directory -Path (Join-Path $g23d '.stride/attachments') -Force | Out-Null
+        $g23OutDir = Join-Path $g23Dir 'outside-gidir'
+        if (Test-Path $g23OutDir) { Remove-Item -Recurse -Force $g23OutDir }
+        New-Item -ItemType Directory -Path $g23OutDir -Force | Out-Null
+        New-Item -ItemType SymbolicLink -Path (Join-Path $g23d '.stride/attachments/.gitignore') -Target $g23OutDir | Out-Null
+        $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine')))
+        $g23Gi = Get-Item -LiteralPath (Join-Path $g23d '.stride/attachments/.gitignore') -Force -ErrorAction SilentlyContinue
+        Assert-Eq "23p: a .gitignore linked to a directory is replaced, nothing lands inside it" 'True|0' `
+            ("{0}|{1}" -f [bool]($null -ne $g23Gi -and -not $g23Gi.PSIsContainer -and -not ($g23Gi.Attributes -band [System.IO.FileAttributes]::ReparsePoint)), @(Get-ChildItem -LiteralPath $g23OutDir -Force).Count)
+    }
+    $g23d = New-G23Project 'p2'
+    New-Item -ItemType Directory -Path (Join-Path $g23d '.stride/attachments/.gitignore') -Force | Out-Null
+    $r = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine')))
+    Assert-Eq "23p: a .gitignore that is a directory downloads nothing" 'False' ([string](Test-Path (Join-Path $g23d '.stride/attachments/W5001')))
+    Assert-Contains "23p: and says so on stderr" '.gitignore is not a regular file' $r.Stderr
+
+    # 23h: the budget override only shortens it; 0 skips every accepted entry.
+    $g23d = New-G23Project 'h'
+    $env:STRIDE_ATTACHMENT_BUDGET_SECONDS = '0'
+    try { $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine'))) } finally { Remove-Item Env:STRIDE_ATTACHMENT_BUDGET_SECONDS -ErrorAction SilentlyContinue }
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23h: an exhausted budget skips the entry time_budget" 'skipped/time_budget/0' ("{0}/{1}/{2}" -f $m.attachments[0].status, $m.attachments[0].reason, $m.caps.budget_seconds)
+    $env:STRIDE_ATTACHMENT_BUDGET_SECONDS = '999'
+    try { $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine'))) } finally { Remove-Item Env:STRIDE_ATTACHMENT_BUDGET_SECONDS -ErrorAction SilentlyContinue }
+    Assert-Eq "23h: a budget over 120 s is ignored" '120' ([string](Get-G23Manifest $g23d).caps.budget_seconds)
+
+    # 23j: number ids must be plain digits, ids are at most 64 characters, and
+    # a byte_size that is not a non-negative integer is too_large -- all
+    # without a request. The claim text is written by hand so 1e3 and 1.5 stay
+    # literal.
+    $g23d = New-G23Project 'j'
+    $g23LongId = 'a' * 65
+    $g23Text = '{"data":{"id":77,"identifier":"W5001","attachments":[' +
+        '{"id":1e3,"filename":"n","byte_size":3,"download_url":"/api/tasks/77/attachments/1000"},' +
+        '{"id":"' + $g23LongId + '","filename":"n","byte_size":3,"download_url":"/api/tasks/77/attachments/862"},' +
+        '{"id":-5,"filename":"n","byte_size":3,"download_url":"/api/tasks/77/attachments/862"},' +
+        '{"id":905,"filename":"s","byte_size":"12","download_url":"/api/tasks/77/attachments/905"},' +
+        '{"id":906,"filename":"s","byte_size":-1,"download_url":"/api/tasks/77/attachments/906"},' +
+        '{"id":907,"filename":"s","byte_size":1.5,"download_url":"/api/tasks/77/attachments/907"}]}}'
+    $null = Invoke-G23Claim $g23d $g23Text
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23j: exponent, long and negative ids are unsafe_id; bad sizes too_large" `
+        'unsafe_id,unsafe_id,unsafe_id,too_large,too_large,too_large' (($m.attachments | ForEach-Object { $_.reason }) -join ',')
+    Assert-Eq "23j: and none of them is requested" '0' ([string]@(Get-G23Requested).Count)
+
+    # 23k: no token, or no API URL, fetches nothing and records transport; the
+    # URL in the intercepted command is never a fallback.
+    $g23d = New-G23Project 'k'
+    [System.IO.File]::WriteAllText((Join-Path $g23d '.stride_auth.md'), ("- **API URL:** ``{0}```n" -f $g23Api))
+    $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine')))
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23k: no API token records transport with no request" 'failed/transport/0' `
+        ("{0}/{1}/{2}" -f $m.attachments[0].status, $m.attachments[0].reason, @(Get-G23Requested).Count)
+    [System.IO.File]::WriteAllText((Join-Path $g23d '.stride_auth.md'), ("- **API Token:** ``{0}```n" -f $g23Token))
+    $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine')))
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23k: no API URL records transport with no request" 'failed/transport/0' `
+        ("{0}/{1}/{2}" -f $m.attachments[0].status, $m.attachments[0].reason, @(Get-G23Requested).Count)
+
+    # A plain-http URL not spelled exactly as loopback is refused. LOCALHOST
+    # reaches the stand-in listener (its host match ignores case), so the
+    # refusal is the only thing stopping the request.
+    [System.IO.File]::WriteAllText((Join-Path $g23d '.stride_auth.md'), ("- **API URL:** ``http://LOCALHOST:{0}```n- **API Token:** ``{1}```n" -f $g23Port, $g23Token))
+    $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine')))
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23k: a non-loopback http API URL records transport with no request" 'failed/transport/0' `
+        ("{0}/{1}/{2}" -f $m.attachments[0].status, $m.attachments[0].reason, @(Get-G23Requested).Count)
+
+    # 23s: (W2524 exploratory findings) an id an accepted entry already took
+    # -- the same id, 7 against "7", or one differing only in letter case --
+    # is refused unsafe_id, so two entries never share one local file; and a
+    # byte_size not written as plain digits is too_large, as in the bash half.
+    Set-G23Routes @{ '/api/tasks/77/attachments/860' = (New-G23Route 'dup-one'); '/api/tasks/77/attachments/861' = (New-G23Route 'dup-two') }
+    $g23d = New-G23Project 's'
+    $g23Sha1 = Get-G23Sha 'dup-one'; $g23Sha2 = Get-G23Sha 'dup-two'
+    $g23Text = '{"data":{"id":77,"identifier":"W5001","attachments":[' +
+        '{"id":860,"filename":"a.txt","byte_size":7,"sha256":"' + $g23Sha1 + '","download_url":"/api/tasks/77/attachments/860"},' +
+        '{"id":860,"filename":"a.txt","byte_size":7,"sha256":"' + $g23Sha2 + '","download_url":"/api/tasks/77/attachments/861"},' +
+        '{"id":"7","filename":"a.txt","byte_size":7,"sha256":"' + $g23Sha1 + '","download_url":"/api/tasks/77/attachments/860"},' +
+        '{"id":7,"filename":"a.txt","byte_size":7,"sha256":"' + $g23Sha2 + '","download_url":"/api/tasks/77/attachments/861"},' +
+        '{"id":"ab","filename":"a.txt","byte_size":7,"sha256":"' + $g23Sha1 + '","download_url":"/api/tasks/77/attachments/860"},' +
+        '{"id":"AB","filename":"a.txt","byte_size":7,"sha256":"' + $g23Sha2 + '","download_url":"/api/tasks/77/attachments/861"},' +
+        '{"id":870,"filename":"f.txt","byte_size":7.0,"sha256":"' + $g23Sha1 + '","download_url":"/api/tasks/77/attachments/860"},' +
+        '{"id":871,"filename":"g.txt","byte_size":7.00000000000000001,"sha256":"' + $g23Sha1 + '","download_url":"/api/tasks/77/attachments/860"}]}}'
+    $null = Invoke-G23Claim $g23d $g23Text
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23s: a repeated, 7-vs-`"7`" or case-only id is skipped unsafe_id" ',unsafe_id,,unsafe_id,,unsafe_id,too_large,too_large' `
+        (($m.attachments | ForEach-Object { [string]$_.reason }) -join ',')
+    Assert-Eq "23s: so each downloaded entry names its own file" '860-a.txt,7-a.txt,ab-a.txt' `
+        ((@($m.attachments | Where-Object { $_.status -eq 'downloaded' } | ForEach-Object { $_.local_file })) -join ',')
+
+    # 23t: (W2524 exploratory finding) a staging file an interrupted earlier
+    # run left in .stride/attachments/ -- either half's name -- is swept, so
+    # git add -A can never commit one.
+    Set-G23Routes @{ '/api/tasks/77/attachments/862' = (New-G23Route 'fine') }
+    $g23d = New-G23Project 't'
+    $g23Ad = Join-Path $g23d '.stride/attachments'
+    New-Item -ItemType Directory -Path $g23Ad -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $g23Ad '.gitignore.Ab12Cd'), "*`n")
+    [System.IO.File]::WriteAllText((Join-Path $g23Ad '.stage.j3v2oj3x.c0l'), "*`n")
+    $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine')))
+    Assert-Eq "23t: both halves' leftover staging files are swept" '.gitignore,W5001' `
+        ((Get-ChildItem -LiteralPath $g23Ad -Force | Sort-Object Name | ForEach-Object { $_.Name }) -join ',')
+    Assert-Eq "23t: and the .gitignore holds exactly *" "*`n" ([System.IO.File]::ReadAllText((Join-Path $g23Ad '.gitignore')))
+
+    # 23l: a re-claim replaces the directory, and a re-claim with no
+    # attachments removes it.
+    $g23d = New-G23Project 'l'
+    $g23Td = Join-Path $g23d '.stride/attachments/W5001'
+    New-Item -ItemType Directory -Path $g23Td -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $g23Td '999-stale.txt'), "stale`n")
+    [System.IO.File]::WriteAllText((Join-Path $g23Td 'manifest.json'), "{`"manifest_version`":1,`"stale`":true}`n")
+    $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 862 'c' 'fine')))
+    Assert-Eq "23l: a re-claim replaces the previous directory" '862-c,manifest.json' `
+        ((Get-ChildItem -LiteralPath $g23Td -Force | Sort-Object Name | ForEach-Object { $_.Name }) -join ',')
+    Assert-Eq "23l: and its manifest describes this claim" 'False' `
+        ([string]((Get-G23Manifest $g23d).PSObject.Properties.Name -contains 'stale'))
+    $null = Invoke-G23Claim $g23d '{"data":{"id":77,"identifier":"W5001","attachments":[]}}'
+    Assert-Eq "23l: a re-claim with no attachments removes the stale directory" 'False' ([string](Test-Path -LiteralPath $g23Td))
+
+    # 23m: the budget is a wall clock across the whole download: a request that
+    # stalls past it fails time_budget, and the next entry is skipped without a
+    # request. Last in the try, because the stall holds the one-at-a-time
+    # listener for its whole length.
+    $g23Map = @{}
+    $g23Map['/api/tasks/77/attachments/870'] = (New-G23Route -Body 'slow body' -Sleep 8)
+    $g23Map['/api/tasks/77/attachments/871'] = (New-G23Route 'never reached')
+    Set-G23Routes $g23Map
+    $g23d = New-G23Project 'm'
+    $env:STRIDE_ATTACHMENT_BUDGET_SECONDS = '2'
+    $g23Sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try { $null = Invoke-G23Claim $g23d (New-G23Claim @((New-G23Att 870 'slow' 'slow body'), (New-G23Att 871 'next' 'never reached'))) } finally { Remove-Item Env:STRIDE_ATTACHMENT_BUDGET_SECONDS -ErrorAction SilentlyContinue }
+    $g23Sw.Stop()
+    $m = Get-G23Manifest $g23d
+    Assert-Eq "23m: a stalled request fails time_budget and the next is skipped time_budget" 'failed/time_budget,skipped/time_budget' `
+        (($m.attachments | ForEach-Object { "{0}/{1}" -f $_.status, $_.reason }) -join ',')
+    Assert-Eq "23m: the request was cut off near the 2 s budget, not at the 8 s stall" 'True' ([string]($g23Sw.Elapsed.TotalSeconds -lt 7))
+    Assert-Eq "23m: the entry after the deadline was never requested" 'False' ([string]((Get-G23Requested) -contains '/api/tasks/77/attachments/871'))
+
+    # 23q: the bash half writes the same manifest bytes for the same claim,
+    # without a BOM in either. Runs only where bash, jq and curl exist (the
+    # bash half needs all three); the bash suite's 50p covers it otherwise.
+    if ((Get-Command bash -ErrorAction SilentlyContinue) -and (Get-Command jq -ErrorAction SilentlyContinue) -and
+        (Get-Command curl -ErrorAction SilentlyContinue) -and -not $g20IsWindows) {
+        $g23Map = @{}
+        $g23Map['/api/tasks/77/attachments/890'] = (New-G23Route 'same bytes')
+        $g23Map['/api/tasks/77/attachments/891'] = (New-G23Route 'boom' -Status 500)
+        Set-G23Routes $g23Map
+        $g23Big = New-G23Att 892 'big.bin' 'x'; $g23Big['byte_size'] = 26214401
+        $g23Claim = New-G23Claim @((New-G23Att 890 ("quote`" caf{0}.txt" -f [char]0x00E9) 'same bytes'), (New-G23Att 891 'b' 'boom'), $g23Big)
+        $g23dPs = New-G23Project 'q-ps'
+        $null = Invoke-G23Claim $g23dPs $g23Claim
+        $g23dSh = New-G23Project 'q-sh'
+        $g23In = New-G20Input -Command $g23ClaimCmd -Payload $g23Claim
+        $g23InFile = Join-Path $g23Dir 'q-input.json'
+        [System.IO.File]::WriteAllText($g23InFile, $g23In, (New-Object System.Text.UTF8Encoding($false)))
+        $g23ShHook = Join-Path $ScriptDir 'stride-hook.sh'
+        # Group 20 put a no-op curl stub first on PATH for the rest of this
+        # suite; the bash half needs the real curl, so this call drops it.
+        $g23SavedPath = $env:PATH
+        $env:PATH = (($env:PATH -split [System.IO.Path]::PathSeparator) | Where-Object { $_ -ne $g20Stub }) -join [System.IO.Path]::PathSeparator
+        $env:GEMINI_PROJECT_DIR = $g23dSh
+        try { $null = (Get-Content -Raw -LiteralPath $g23InFile | & bash $g23ShHook post 2>$null) } finally {
+            Remove-Item Env:GEMINI_PROJECT_DIR -ErrorAction SilentlyContinue
+            $env:PATH = $g23SavedPath
+        }
+        $g23MPs = Join-Path $g23dPs '.stride/attachments/W5001/manifest.json'
+        $g23MSh = Join-Path $g23dSh '.stride/attachments/W5001/manifest.json'
+        $g23BPs = [System.IO.File]::ReadAllBytes($g23MPs)
+        $g23BSh = [System.IO.File]::ReadAllBytes($g23MSh)
+        Assert-Eq "23q: the bash half writes the same manifest bytes as this half" ([Convert]::ToBase64String($g23BSh)) ([Convert]::ToBase64String($g23BPs))
+        Assert-Eq "23q: and neither manifest has a byte-order mark" 'False' ([string]($g23BPs[0] -eq 0xEF -or $g23BSh[0] -eq 0xEF))
+        Assert-Eq "23q: the manifest exercised downloaded, failed and skipped entries" 'downloaded,failed,skipped' `
+            (((Get-G23Manifest $g23dPs).attachments | ForEach-Object { $_.status }) -join ',')
+    } else {
+        Write-Host "  SKIP: 23q: bash, jq or curl not available"
+    }
+} finally {
+    Stop-Job $g23Job -ErrorAction SilentlyContinue
+    Remove-Job $g23Job -Force -ErrorAction SilentlyContinue
+}
+
+# 23i: the curl-guard exemption -- exactly a GET of an attachments path whose
+# -o target is under <project>/.stride/attachments/. Everything else is refused.
+$g23gd = New-G23Project 'guard'
+New-Item -ItemType Directory -Path (Join-Path $g23gd '.stride/attachments/W5001') -Force | Out-Null
+# The claim hook's .gitignore: a re-fetch is exempt only into a tree it made.
+[System.IO.File]::WriteAllText((Join-Path $g23gd '.stride/attachments/.gitignore'), "*`n")
+$g23Root = ([System.IO.Path]::GetFullPath($g23gd)).TrimEnd('\', '/').Replace('\', '/')
+$g23T = "$g23Root/.stride/attachments/W5001/812-shot.png"
+$g23U = 'https://www.stridelikeaboss.com/api/tasks/77/attachments/812'
+function Invoke-G23Guard {
+    param([string]$Cmd)
+    $in = @{ tool_input = @{ command = $Cmd } } | ConvertTo-Json -Compress -Depth 4
+    return (Invoke-HookScript -InputJson $in -Phase 'pre' -ProjectDir $g23gd).ExitCode
+}
+Assert-Exit "23i: a GET of an attachments path with -o under .stride/attachments/ is allowed" 0 (Invoke-G23Guard "curl -sS -H `"Authorization: Bearer `$T`" -o `"$g23T`" `"$g23U`"")
+Assert-Exit "23i: a clustered -o is allowed" 0 (Invoke-G23Guard "curl -sSo $g23T $g23U")
+Assert-Exit "23i: allowlisted options and a quoted `${VAR} base are allowed" 0 (Invoke-G23Guard "curl -sS --fail --max-time 30 -A curl/8 -o $g23T `"`${STRIDE_API_URL}/api/tasks/77/attachments/812`"")
+Assert-Exit "23i: an unquoted `$VAR base is refused" 2 (Invoke-G23Guard "curl -sS -o $g23T `$STRIDE_API_URL/api/tasks/77/attachments/812")
+Assert-Exit "23i: an empty word is refused" 2 (Invoke-G23Guard "curl -sS -o $g23T '' $g23U")
+Assert-Exit "23i: an empty option value is refused too" 2 (Invoke-G23Guard "curl -sS -A '' -o $g23T $g23U")
+# A quoted "$@", "${a[@]}" or "$*" can expand to zero or several words.
+Assert-Exit "23i: a quoted `"`$@`" is refused" 2 (Invoke-G23Guard "curl -sS -A `"`$@`" -o $g23T $g23U")
+Assert-Exit "23i: a quoted `"`${a[@]}`" is refused" 2 (Invoke-G23Guard "curl -sS -A `"`${a[@]}`" -o $g23T $g23U")
+Assert-Exit "23i: a quoted `"`$*`" is refused" 2 (Invoke-G23Guard "curl -sS -A `"`$*`" -o $g23T $g23U")
+Assert-Exit "23i: a quoted plain `$NAME option value is allowed" 0 (Invoke-G23Guard "curl -sS -A `"`$UA`" -o $g23T $g23U")
+Assert-Exit "23i: -o outside .stride/attachments/ is still refused" 2 (Invoke-G23Guard "curl -sS -o /tmp/812.png $g23U")
+Assert-Exit "23i: -o elsewhere under .stride/ is still refused" 2 (Invoke-G23Guard "curl -sS -o $g23Root/.stride/812.png $g23U")
+Assert-Exit "23i: -o onto a manifest is refused" 2 (Invoke-G23Guard "curl -sS -o $g23Root/.stride/attachments/W5001/manifest.json $g23U")
+Assert-Exit "23i: a non-GET with -o is refused" 2 (Invoke-G23Guard "curl -sS -X POST -o $g23T $g23U")
+Assert-Exit "23i: a pipe into jq on an attachments path is still refused" 2 (Invoke-G23Guard "curl -sS $g23U | jq .")
+Assert-Exit "23i: a stdout redirect on an attachments path is still refused" 2 (Invoke-G23Guard "curl -sS $g23U > $g23T")
+Assert-Exit "23i: an exempt curl cannot carry a second, unsafe one" 2 (Invoke-G23Guard "curl -sS -o $g23T $g23U; curl -sS -o out.json https://www.stridelikeaboss.com/api/tasks/1/complete")
+Assert-Exit "23i: a non-attachments path with the exempt target is refused" 2 (Invoke-G23Guard "curl -sS -o $g23T https://www.stridelikeaboss.com/api/tasks/77/complete")
+Assert-Exit "23i: a `$VAR-prefixed target is refused" 2 (Invoke-G23Guard "curl -sS -o `"`$CLAUDE_PROJECT_DIR/.stride/attachments/W5001/812-shot.png`" $g23U")
+Assert-Exit "23i: --location-trusted is not on the allowlist" 2 (Invoke-G23Guard "curl -sS --location-trusted -o $g23T $g23U")
+Assert-Exit "23i: -v is not on the allowlist" 2 (Invoke-G23Guard "curl -v -o $g23T $g23U")
+Assert-Exit "23i: a relative target is refused" 2 (Invoke-G23Guard "curl -sS -o .stride/attachments/W5001/812-shot.png $g23U")
+Assert-Exit "23i: a second URL is refused" 2 (Invoke-G23Guard "curl -sS -o $g23T $g23U https://www.stridelikeaboss.com/x")
+Assert-Exit "23i: a pipe into tee is refused" 2 (Invoke-G23Guard "curl -sS -o $g23T $g23U | tee x")
+Assert-Exit "23i: a && list is refused" 2 (Invoke-G23Guard "curl -sS -o $g23T $g23U && echo done")
+Assert-Exit "23i: an unquoted glob in an option value is refused" 2 (Invoke-G23Guard "curl -sS -H X:* -o $g23T $g23U")
+Assert-Exit "23i: an unquoted brace expansion is refused" 2 (Invoke-G23Guard "curl -sS -A a{b,c} -o $g23T $g23U")
+# The operator sits inside the option's value, so the curl stage keeps the
+# URL and its -o (stride's `-A x|tee -o T U` moves the URL into the tee stage,
+# which this port's guard judges out of scope, a permit before W2524 too).
+Assert-Exit "23i: an operator inside an option value is refused" 2 (Invoke-G23Guard "curl -sS -o $g23T $g23U -A x|cat")
+Assert-Exit "23i: a command substitution is never exempt" 2 (Invoke-G23Guard "curl -sS -o $g23T `"`$(cat u)/api/tasks/77/attachments/812`"")
+# (W2524 exploratory findings) -w/--write-out (its %output{} writes a second
+# file), an @file header, manifest.json in another case, a target that is a
+# link, and a tree with no .gitignore yet are all refused.
+Assert-Exit "23i: -w with %output{} is refused" 2 (Invoke-G23Guard "curl -sS -w '%output{/tmp/elsewhere.txt}x' -o $g23T $g23U")
+Assert-Exit "23i: --write-out is refused" 2 (Invoke-G23Guard "curl -sS --write-out=x -o $g23T $g23U")
+Assert-Exit "23i: a clustered -w is refused" 2 (Invoke-G23Guard "curl -sSw x -o $g23T $g23U")
+Assert-Exit "23i: an @file header is refused" 2 (Invoke-G23Guard "curl -sS -H @h.txt -o $g23T $g23U")
+Assert-Exit "23i: an --header=@file is refused" 2 (Invoke-G23Guard "curl -sS --header=@h.txt -o $g23T $g23U")
+Assert-Exit "23i: a clustered -H@file is refused" 2 (Invoke-G23Guard "curl -sSH@h.txt -o $g23T $g23U")
+Assert-Exit "23i: manifest.json in another case is refused" 2 (Invoke-G23Guard "curl -sS -o $g23Root/.stride/attachments/W5001/MANIFEST.JSON $g23U")
+if ([System.IO.Path]::DirectorySeparatorChar -eq [char]'/') {
+    Assert-Exit "23i: a backslash-spelled target is refused off Windows" 2 (Invoke-G23Guard "curl -sS -o '$g23Root/.stride\attachments\W5001\9.txt' $g23U")
+} else {
+    Write-Host "  SKIP: 23i: backslash target (backslash is a separator here)"
+}
+$g23Link = Join-Path $g23gd '.stride/attachments/W5001/9-link.txt'
+$g23LinkOk = $true
+try { New-Item -ItemType SymbolicLink -Path $g23Link -Target (Join-Path $g23Dir 'outside') -ErrorAction Stop | Out-Null } catch { $g23LinkOk = $false }
+if ($g23LinkOk) {
+    Assert-Exit "23i: a target that is a symlink is refused" 2 (Invoke-G23Guard "curl -sS -o $g23Root/.stride/attachments/W5001/9-link.txt $g23U")
+    try { [System.IO.File]::Delete($g23Link) } catch { }
+} else {
+    Write-Host "  SKIP: 23i: symlink target (cannot create a symlink here)"
+}
+$g23Gi = Join-Path $g23gd '.stride/attachments/.gitignore'
+[System.IO.File]::Delete($g23Gi)
+Assert-Exit "23i: no .gitignore yet means no exemption" 2 (Invoke-G23Guard "curl -sS -o $g23T $g23U")
+[System.IO.File]::WriteAllText($g23Gi, "*`n")
+Assert-Exit "23i: and the documented re-fetch is still allowed" 0 (Invoke-G23Guard "curl -sS -H `"Authorization: Bearer `$T`" -o $g23T $g23U")
+
+# ============================================================
 # Summary
 # ============================================================
 Write-Host ""
